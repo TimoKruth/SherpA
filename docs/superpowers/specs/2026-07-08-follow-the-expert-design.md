@@ -1,8 +1,9 @@
-# "Follow the Expert" — Design for an Agent-Setup Sharing Platform
+# SherpA — "Follow the Expert": Design for an Agent-Setup Sharing Platform
 
-**Status:** Draft for discussion
+**Status:** Decisions incorporated from 2026-07-08 discussion; ready for implementation planning
 **Date:** 2026-07-08
-**Working title:** *Sherpa* (placeholder — an expert who guides you up the mountain)
+**Name:** *SherpA* (an expert who guides you up the mountain, ending in A for Agents;
+CLI command stays lowercase `sherpa`)
 
 ## 1. Problem
 
@@ -91,6 +92,15 @@ parameters:
     required: false
 ```
 
+**Harness identity is first-class.** Every stack states which harness (and minimum
+version) it was developed for — configuring a Pi setup is not configuring Claude Code.
+The harness badge appears everywhere a stack appears: search results, stack pages,
+`sherpa show`, install output. Search filters by the user's harness by default, and the
+CLI refuses to install a stack for a different harness without an explicit override.
+Where a setup (or part of it) is genuinely portable, that is *marked* (portability badge
+listing target harnesses, alongside the origin harness) — portability is an attribute to
+earn, never an assumption.
+
 ### 3.2 Profiles — the technical core of clone/revert
 
 Claude Code supports `CLAUDE_CONFIG_DIR`. Sherpa exploits this so that **your own setup is
@@ -99,7 +109,7 @@ never mutated**:
 ```
 ~/.sherpa/
 ├── profiles/
-│   ├── mine/               # symlink or import of your real ~/.claude (read-only to sherpa)
+│   ├── mine/               # copy of your real ~/.claude, auto-git-init'd (permanent, versioned)
 │   ├── jane-rust-reviewer/ # cloned stack = git repo = a complete config dir
 │   └── simonw-writing/
 ├── active                  # which profile new sessions use
@@ -157,8 +167,12 @@ This buys, for free:
   *without discarding local commits* — before every mutating operation (update, rollback,
   merge) sherpa records a backup ref, and destructive resets are simply not offered.
   Update merges run in a temporary worktree and are swapped in atomically on success.
-- **Publishing your fork**: your `local` branch can itself be published as a new stack with
-  a recorded `forked_from: @jane/rust-reviewer@v14` lineage (visible on the site).
+- **Publishing your fork**: your `local` branch can itself be published as a new,
+  independent stack — but provenance is never optional. Every fork carries a recorded
+  `forked_from: @jane/rust-reviewer@v14` lineage plus a computed **divergence indicator**
+  (versions behind upstream, files changed/added/removed, share of upstream content still
+  intact), shown on the stack page and in `sherpa show`. A reader must always be able to
+  answer: where did this come from, and how far has it moved away?
 
 ### 3.4 Sanitization — publisher side
 
@@ -184,6 +198,14 @@ the platform's biggest risk and is treated as a first-class feature, not a discl
   the review gate is what writes it into the live config. A stack with undeclared
   executables fails validation server-side at publish and client-side at install. The UX
   target is "trying a browser extension with visible permissions", not `npm install`.
+  For users who accept the risk, the gate offers **"approve all"**, and a startup flag
+  (`sherpa try --approve-all`, or `trust_mode: approve-all` in sherpa's own config) skips
+  per-capability prompts entirely — an informed-consent shortcut, never the default.
+- **Sandboxed try-mode (planned, later phase)**: an opt-in mode for risk-averse users
+  where first sessions with an unreviewed stack run in a container/devcontainer with
+  scrubbed env, no real credentials, isolated worktree copy, restricted network. Not in
+  v1 (fidelity and cross-platform cost — see discussion log); designed so it can be added
+  as `sherpa try --sandboxed` without changing the install model.
 - **Env scrubbing in try mode**: declared parameters are the only environment values
   passed through to a try-mode session where feasible; hooks can otherwise read whatever
   the user's shell exposes. Sandboxed/container try is recommended for unreviewed stacks.
@@ -199,6 +221,19 @@ the platform's biggest risk and is treated as a first-class feature, not a discl
   under the staged profile (no persistent switch — exiting it is reverting) and, where
   available, suggests running inside a sandboxed worktree/container for the first session.
 - **Versions are immutable** once published; following an expert never auto-applies updates.
+
+### 3.6 Config Vault — long-term answer for GUI tools (later phase)
+
+Profile isolation via env var only works for CLIs that support it. The long-term goal
+(decided 2026-07-08): SherpA must eventually manage the *actual global setup* of any tool
+— including GUI apps like Cursor or VS Code-based products — in a solid, reversible way.
+The mechanism is the **Config Vault**: before SherpA touches any tool's real config, it
+takes a complete preimage snapshot (content-addressed, versioned, stored permanently in
+`~/.sherpa/vault`); applying a stack is a transaction (snapshot → apply → verify), and
+reset restores exact preimages. "Mine is sacred" thus generalizes: for env-var harnesses
+it means *never touched*; for vault-managed tools it means *always restorable to the
+byte*. The vault also doubles as permanent personal-config backup/history independent of
+any stack activity. Out of scope until the profile-based core is proven.
 
 ## 4. System components
 
@@ -240,9 +275,15 @@ so it works before any language runtime exists.
 
 ### 4.2 Registry (backend)
 
-- **Content storage**: each stack is a bare git repo (start: a GitHub org / user-linked
-  repos with the registry holding refs+metadata; keeps hosting cost near zero and gives
-  experts ownership. The API abstracts this so self-hosted git can replace it later).
+- **Content storage**: each stack is a bare git repo behind the registry API. Target:
+  a **self-hosted Forgejo instance** (the software behind Codeberg) — solid control, no
+  dependence on GitHub. Decision rule (2026-07-08): Phase 1 may bootstrap on plain GitHub
+  repos *only if* that is truly zero manual setup; otherwise Forgejo from v1 (testing on
+  the owner's VPS, production on Railway). Either way the storage backend is **invisible
+  to users at all times** — they talk to `sherpa` and the website, never to the git host;
+  the API abstracts storage so backends can be swapped without user-visible change.
+- **Hosting**: registry API, website, and Forgejo planned on **Railway** first; the slow
+  VPS serves as a test environment.
 - **Metadata (Postgres)**: users, stacks, versions (immutable, with manifest snapshot and
   scan results), follows, stars, install/try counts, fork lineage, notification queue.
 - **API (REST + webhooks)**: search, stack detail, version list, publish (upload → scan →
@@ -361,12 +402,19 @@ No backend, no accounts, no notifications yet. *Success criterion: a stranger cl
 expert setup, works with it for a day, and reverts or keeps it — with zero damage to
 their own config.*
 
-**Phase 2 — Registry + website + follows:** search API, stack pages with rendered contents
-and diffs, GitHub OAuth, follow + notifications, scan pipeline, MCP server, trial journal.
+**Phase 2 — Registry + website + follows + Codex:** search API, stack pages with rendered
+contents and diffs, OAuth, follow + notifications, scan pipeline, MCP server, trial
+journal — and the **second harness: Codex CLI** (`CODEX_HOME` profiles), following fast
+per the 2026-07-08 decision. Website follows Phase 1 shortly; hosted on Railway.
 
-**Phase 3 — Trust & evaluation:** verified experts, community benchmark suites, keep-rate
-ranking, multi-harness (Codex/Cursor profiles), fork-lineage graphs, `sherpa compare`
-automation.
+**Phase 3 — Trust, evaluation, more harnesses:** verified experts, community benchmark
+suites, keep-rate ranking, fork-lineage graphs, `sherpa compare` automation, **sandboxed
+try-mode** (`--sandboxed`, opt-in for risk-averse users), opening to further harnesses
+(Gemini CLI and forks, OpenCode, …), storage migration to self-hosted Forgejo if Phase 1
+bootstrapped on GitHub.
+
+**Phase 4 — Config Vault:** transactional management of GUI-based tools (§3.6), making
+"reset the actual global setup" solid for every tool, not just env-var CLIs.
 
 ## 9. Testing strategy
 
@@ -381,32 +429,29 @@ automation.
 - **Website**: rendering snapshot tests for stack pages incl. hostile content (XSS via
   README/CLAUDE.md markdown).
 
-## 10. Open questions (for discussion)
+## 10. Decision log (2026-07-08 discussion — all initial questions resolved)
 
-**Decisions from 2026-07-08 discussion:**
-
-- **Whole-profile first (Q3: decided)** — v1 clones complete setups only ("full copy
-  first"); cherry-picking single skills is a later feature.
-- **Website timing (decided)** — Phase 1 ships CLI + static index; the real website
-  follows shortly after as the immediate Phase 2 priority.
-- **Trust posture (Q: open)** — quarantine-by-default vs. mandatory sandboxed try-mode
-  still under discussion; see elaboration in the discussion thread. Recommendation:
-  quarantine flow as default, `--sandboxed` try as a first-class option, risk-tiered
-  defaults (unreviewed publishers → sandbox suggested, hooks stay quarantined).
-
-1. **Naming**: "Sherpa" is a placeholder. Also: "stack" vs "setup" vs "profile" as the
-   user-facing noun?
-2. **Scope of `mine` import**: import your real `~/.claude` read-only, or copy it so `mine`
-   is also a versioned stack from day one (recommended: copy + auto-git-init)?
-3. **Partial adoption**: v1 is whole-profile only. Cherry-picking single skills from an
-   expert ("just take her code-review skill") is a likely fast-follow — does it need to be
-   in v1?
-4. **Registry hosting economics**: GitHub-backed storage keeps Phase 1/2 nearly free;
-   at what point (if ever) move content into our own git hosting?
-5. **Codex/multi-harness**: stacks are harness-tagged from day one; is a Codex profile
-   (AGENTS.md + config.toml) worth including in Phase 1 to widen the audience? When
-   multi-harness lands, portability is per-harness adapters + compatibility badges — never
-   a lowest-common-denominator abstract format.
+1. **Naming**: **SherpA** (capital A for Agents); CLI command `sherpa`.
+2. **`mine` import**: copy + auto-git-init (recommended option taken), so `mine` is a
+   versioned stack from day one and the personal config is permanently saved. Long term
+   this generalizes beyond CLIs via the Config Vault (§3.6) — the setting must become
+   changeable and resettable for GUI tools too, with "mine is sacred" preserved.
+3. **Partial adoption**: not in v1. Whole-profile ("full copy") only; cherry-picking
+   single skills is a later feature.
+4. **Storage & hosting**: target self-hosted Forgejo; GitHub bootstrap only if truly
+   zero manual setup, migrated in Phase 3 (§4.2). Hosting planned on Railway; owner's
+   VPS for testing. Storage location must be irrelevant to users at all times.
+5. **Harness roadmap**: Claude Code in v1, Codex CLI fast in Phase 2, all harnesses in
+   later phases. Per-harness formats are fine; portability, where it exists, is marked
+   (portability badge + origin harness) — a Claude-only or Codex-only setup is fully
+   legitimate. Adapters + badges, never a lowest-common-denominator format.
+6. **Trust posture**: Approach A (structural quarantine + review gate) from v1, with an
+   **"approve all"** option in the gate and a startup flag for risk-accepting users;
+   Approach B (sandboxed try-mode) planned as opt-in for risk-averse users in Phase 3.
+7. **Website timing**: Phase 1 ships CLI + static index; the real website follows
+   shortly after as the immediate Phase 2 priority.
+8. **Fork policy**: forks are independent stacks, but origin (`forked_from`) and a
+   divergence indicator are always visible (§3.3).
 
 ## Appendix A — Prior art (research summary, GPT 5.5-assisted)
 
