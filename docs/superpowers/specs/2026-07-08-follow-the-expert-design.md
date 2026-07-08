@@ -383,6 +383,17 @@ automation.
 
 ## 10. Open questions (for discussion)
 
+**Decisions from 2026-07-08 discussion:**
+
+- **Whole-profile first (Q3: decided)** — v1 clones complete setups only ("full copy
+  first"); cherry-picking single skills is a later feature.
+- **Website timing (decided)** — Phase 1 ships CLI + static index; the real website
+  follows shortly after as the immediate Phase 2 priority.
+- **Trust posture (Q: open)** — quarantine-by-default vs. mandatory sandboxed try-mode
+  still under discussion; see elaboration in the discussion thread. Recommendation:
+  quarantine flow as default, `--sandboxed` try as a first-class option, risk-tiered
+  defaults (unreviewed publishers → sandbox suggested, hooks stay quarantined).
+
 1. **Naming**: "Sherpa" is a placeholder. Also: "stack" vs "setup" vs "profile" as the
    user-facing noun?
 2. **Scope of `mine` import**: import your real `~/.claude` read-only, or copy it so `mine`
@@ -411,3 +422,31 @@ automation.
 
 Gap confirmed: no trusted, reversible, agent-native registry where the atomic unit is an
 expert's **complete agent setup** with a clone/revert/fork/follow lifecycle.
+
+## Appendix B — Harness portability survey (verified 2026-07-08)
+
+Two independent axes, kept distinct in the product:
+
+1. **Mechanism portability** — can the profile-isolation trick work for a given harness?
+2. **Content portability** — does a stack written for one harness help in another?
+   (Answer: mostly no. Stacks are harness-tagged; adapters may later translate the
+   portable subset — instruction files, MCP declarations — but skills/hooks/settings are
+   harness-specific. No lowest-common-denominator format.)
+
+Mechanism survey:
+
+| Harness | Isolation mechanism | Status |
+|---|---|---|
+| Claude Code | `CLAUDE_CONFIG_DIR` | Clean override (day-1 spike pins exact coverage) |
+| Codex CLI | `CODEX_HOME` — root for config.toml, auth, skills, sessions | Clean override, documented |
+| Gemini CLI | `GEMINI_CLI_HOME` — parent dir for `.gemini/` | Clean override, documented |
+| Qwen Code / iFlow / other Gemini-CLI forks | fork-specific home dirs; likely inherit the mechanism | Verify per fork |
+| OpenCode / Crush (multi-provider, incl. Mistral/Chinese models) | XDG-based → `XDG_CONFIG_HOME` | Clean override |
+| Aider | config file paths + env | Workable |
+| Cursor / GUI IDEs, Mistral Code (VS Code-based) | no config-dir override | Fallback only: transactional install (preimage backup → restore) |
+
+Important nuance: **model provider ≠ harness.** GLM, Kimi, DeepSeek, Qwen and Mistral
+models are widely used *through* Claude-Code- or OpenAI-compatible endpoints
+(`ANTHROPIC_BASE_URL` etc.), so a Claude Code stack already serves users of those models
+unchanged — the model backend can even be a stack parameter. Multi-harness support means
+supporting other *harnesses*, and the big CLI ones all have clean isolation hooks.
