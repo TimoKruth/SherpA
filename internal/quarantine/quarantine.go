@@ -187,7 +187,9 @@ func Approve(dir string, id string) error {
 		if len(q.Permissions) > 0 {
 			settings["permissions"] = q.Permissions
 		}
-		q = &quar{}
+		// Clear content but retain NextSeq so hooks stripped later never reuse
+		// a sequence number (the "seqs are never reused" contract).
+		q = &quar{NextSeq: q.NextSeq}
 
 	case id == "permissions":
 		if len(q.Permissions) == 0 {

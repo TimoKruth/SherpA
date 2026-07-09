@@ -275,6 +275,27 @@ func mustPending(t *testing.T, d string) []string {
 	return p
 }
 
+// TestSeqCounterSurvivesApproveAll pins that Approve("all") preserves the
+// per-event NextSeq counter: a hook stripped afterward for the same event must
+// NOT restart at seq 0, honoring the "seqs are never reused" contract.
+func TestSeqCounterSurvivesApproveAll(t *testing.T) {
+	d := setup(t)
+	Strip(d)          // PreToolUse hook takes seq 0
+	Approve(d, "all") // clears content but must retain NextSeq
+	os.WriteFile(filepath.Join(d, "settings.json"), []byte(twoHookSettings), 0o644)
+	Strip(d)
+	p, _ := Pending(d)
+	for _, id := range p {
+		if id == "hook:PreToolUse:0" {
+			t.Fatalf("seq restarted at 0 after approve-all: %v", p)
+		}
+	}
+	// The two new hooks continue from the prior counter (seq 1 and 2).
+	if len(p) != 2 || p[0] != "hook:PreToolUse:1" || p[1] != "hook:PreToolUse:2" {
+		t.Fatalf("pending after re-strip = %v", p)
+	}
+}
+
 // TestReStripNewestWins pins the deliberate newest-wins semantic: when a fresh
 // (different) live value for an already-quarantined mcp name or the permissions
 // unit is stripped, it replaces the quarantined value — quarantine holds the
