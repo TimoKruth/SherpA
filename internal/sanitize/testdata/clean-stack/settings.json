@@ -1,7 +1,6 @@
 {
   "env": {
-    "TOKEN_NOTE": "This is a deliberately long English sentence used to prove ordinary prose is not treated as a secret.",
-    "SERVICE_URL": "https://example.com/docs/ordinary/path?with=query&and=values"
+    "secret_note": "This is a deliberately long English sentence used to prove ordinary prose is not treated as a secret.",
+    "token_url": "https://example.com/docs/ordinary/path?with=query&and=values"
   }
 }
-

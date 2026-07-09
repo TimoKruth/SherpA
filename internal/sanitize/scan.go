@@ -2,6 +2,7 @@ package sanitize
 
 import (
 	"bufio"
+	"fmt"
 	"io/fs"
 	"math"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -35,9 +37,10 @@ var secretDetectors = []detector{
 }
 
 var (
-	homePathRE     = regexp.MustCompile(`/(Users|home)/[A-Za-z0-9_\-]+/`)
+	homePathRE     = regexp.MustCompile(`/(Users|home)/[A-Za-z0-9_\-]+/?`)
 	emailRE        = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
-	assignmentRE   = regexp.MustCompile(`(?i)["']?([A-Za-z0-9_\-]*(token|secret|key|password)[A-Za-z0-9_\-]*)["']?\s*[:=]\s*["']?([^"',\s]+)`)
+	assignmentRE   = regexp.MustCompile(`(?i)["']?([A-Za-z0-9_\-]*(token|secret|key|password)[A-Za-z0-9_\-]*)["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^"',\s]+))`)
+	hexSecretRE    = regexp.MustCompile(`^[0-9a-fA-F]{32,}$`)
 	minSecretLen   = 20
 	minSecretScore = 4.0
 )
@@ -45,15 +48,23 @@ var (
 // Scan scans allowlisted paths under dir and returns publish sanitizer findings.
 // Paths in allowed are relative to dir; entries ending in "/" are walked as
 // directories. Invalid, absolute, parent-traversing, and missing paths are skipped.
-func Scan(dir string, allowed []string) (findings []Finding) {
+func Scan(dir string, allowed []string) (findings []Finding, err error) {
 	seen := map[string]bool{}
 	for _, allowedPath := range allowed {
-		for _, path := range expandAllowed(dir, allowedPath) {
+		paths, err := expandAllowed(dir, allowedPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, path := range paths {
 			if seen[path] {
 				continue
 			}
 			seen[path] = true
-			findings = append(findings, scanFile(dir, path)...)
+			fileFindings, err := scanFile(dir, path)
+			if err != nil {
+				return nil, err
+			}
+			findings = append(findings, fileFindings...)
 		}
 	}
 	sort.SliceStable(findings, func(i, j int) bool {
@@ -65,30 +76,33 @@ func Scan(dir string, allowed []string) (findings []Finding) {
 		}
 		return findings[i].Kind < findings[j].Kind
 	})
-	return findings
+	return findings, nil
 }
 
-func expandAllowed(dir, allowedPath string) []string {
+func expandAllowed(dir, allowedPath string) ([]string, error) {
 	clean, ok := cleanAllowed(allowedPath)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	full := filepath.Join(dir, filepath.FromSlash(clean))
 	info, err := os.Lstat(full)
 	if err != nil {
-		return nil
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("sanitize: stat allowlisted path %q: %w", clean, err)
 	}
 	if info.Mode()&fs.ModeSymlink != 0 {
-		return nil
+		return nil, nil
 	}
 	if !info.IsDir() {
-		return []string{clean}
+		return []string{clean}, nil
 	}
 
 	var files []string
-	filepath.WalkDir(full, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(full, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		name := d.Name()
 		if d.IsDir() {
@@ -102,12 +116,15 @@ func expandAllowed(dir, allowedPath string) []string {
 		}
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
-			return nil
+			return err
 		}
 		files = append(files, filepath.ToSlash(rel))
 		return nil
 	})
-	return files
+	if err != nil {
+		return nil, fmt.Errorf("sanitize: walk allowlisted path %q: %w", clean, err)
+	}
+	return files, nil
 }
 
 func cleanAllowed(path string) (string, bool) {
@@ -122,10 +139,10 @@ func cleanAllowed(path string) (string, bool) {
 	return strings.TrimSuffix(clean, "/"), true
 }
 
-func scanFile(root, rel string) []Finding {
+func scanFile(root, rel string) ([]Finding, error) {
 	f, err := os.Open(filepath.Join(root, filepath.FromSlash(rel)))
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("sanitize: open allowlisted file %q: %w", rel, err)
 	}
 	defer f.Close()
 
@@ -136,49 +153,96 @@ func scanFile(root, rel string) []Finding {
 		line := scanner.Text()
 		findings = append(findings, scanLine(rel, lineNo, line)...)
 	}
-	return findings
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("sanitize: scan allowlisted file %q: %w", rel, err)
+	}
+	return findings, nil
 }
 
 func scanLine(file string, lineNo int, line string) []Finding {
-	var findings []Finding
+	var matches []detectedValue
 	for _, d := range secretDetectors {
-		findings = appendMatches(findings, file, lineNo, d.kind, line, d.re.FindAllString(line, -1))
+		matches = appendMatches(matches, d.kind, d.re.FindAllString(line, -1))
 	}
 	for _, match := range assignmentRE.FindAllStringSubmatch(line, -1) {
-		value := match[3]
-		if len(value) >= minSecretLen && shannon(value) > minSecretScore {
-			findings = append(findings, Finding{
-				File:    file,
-				Line:    lineNo,
-				Kind:    "secret",
-				Excerpt: maskedExcerpt(line, value),
-			})
+		value := assignmentValue(match)
+		if genericSecretCandidate(value) {
+			matches = append(matches, detectedValue{kind: "secret", value: value})
 		}
 	}
-	findings = appendMatches(findings, file, lineNo, "home-path", line, homePathRE.FindAllString(line, -1))
-	findings = appendMatches(findings, file, lineNo, "email", line, emailRE.FindAllString(line, -1))
-	return findings
-}
+	matches = appendMatches(matches, "home-path", homePathRE.FindAllString(line, -1))
+	matches = appendMatches(matches, "email", emailRE.FindAllString(line, -1))
 
-func appendMatches(findings []Finding, file string, lineNo int, kind, line string, matches []string) []Finding {
+	values := make([]string, 0, len(matches))
+	for _, match := range matches {
+		values = append(values, match.value)
+	}
+
+	var findings []Finding
 	for _, match := range matches {
 		findings = append(findings, Finding{
 			File:    file,
 			Line:    lineNo,
-			Kind:    kind,
-			Excerpt: maskedExcerpt(line, match),
+			Kind:    match.kind,
+			Excerpt: maskedExcerpt(line, values),
 		})
 	}
 	return findings
 }
 
-func maskedExcerpt(line, value string) string {
+type detectedValue struct {
+	kind  string
+	value string
+}
+
+func appendMatches(findings []detectedValue, kind string, matches []string) []detectedValue {
+	for _, match := range matches {
+		findings = append(findings, detectedValue{kind: kind, value: match})
+	}
+	return findings
+}
+
+func assignmentValue(match []string) string {
+	for _, value := range match[3:] {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func genericSecretCandidate(value string) bool {
+	if genericSecretExempt(value) {
+		return false
+	}
+	if hexSecretRE.MatchString(value) {
+		return true
+	}
+	return len(value) >= minSecretLen && shannon(value) > minSecretScore
+}
+
+func genericSecretExempt(value string) bool {
+	if strings.Contains(value, "://") {
+		return true
+	}
+	return strings.IndexFunc(value, unicode.IsSpace) >= 0
+}
+
+func maskedExcerpt(line string, values []string) string {
+	excerpt := line
+	for _, value := range values {
+		excerpt = strings.ReplaceAll(excerpt, value, maskValue(value))
+	}
+	return excerpt
+}
+
+func maskValue(value string) string {
 	mask := value
 	if utf8.RuneCountInString(value) > 4 {
 		prefix := []rune(value)[:4]
 		mask = string(prefix) + "…"
 	}
-	return strings.Replace(line, value, mask, 1)
+	return mask
 }
 
 func shannon(value string) float64 {

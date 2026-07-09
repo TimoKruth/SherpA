@@ -1,14 +1,19 @@
 package sanitize
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestScanFindsEveryPlantedSecret(t *testing.T) {
 	dir := filepath.Join("testdata", "secrets-stack")
-	findings := Scan(dir, []string{"settings.json", "CLAUDE.md"})
+	findings, err := Scan(dir, []string{"settings.json", "CLAUDE.md"})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
 
 	want := []struct {
 		name  string
@@ -23,6 +28,7 @@ func TestScanFindsEveryPlantedSecret(t *testing.T) {
 		{"settings.json/secret/akia", "settings.json", "secret", "AKIAABCDEFGHIJKLMNOP"},
 		{"settings.json/secret/xoxb", "settings.json", "secret", "xoxb-123456789012-ABCDEFGHIJKLMN-opQRST"},
 		{"settings.json/secret/generic-entropy", "settings.json", "secret", "R4nD0mZ9qX7pL2vB6sC8eT5yU3iO1"},
+		{"settings.json/secret/hex", "settings.json", "secret", "0123456789abcdef0123456789abcdef01234567"},
 	}
 
 	for _, w := range want {
@@ -43,7 +49,10 @@ func TestScanFindsEveryPlantedSecret(t *testing.T) {
 
 func TestScanCleanStackHasNoSecretFindings(t *testing.T) {
 	dir := filepath.Join("testdata", "clean-stack")
-	findings := Scan(dir, []string{"settings.json", "CLAUDE.md", "skills/"})
+	findings, err := Scan(dir, []string{"settings.json", "CLAUDE.md", "skills/"})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
 	for _, f := range findings {
 		if f.Kind == "secret" {
 			t.Fatalf("clean stack produced secret finding: %+v", f)
@@ -53,7 +62,10 @@ func TestScanCleanStackHasNoSecretFindings(t *testing.T) {
 
 func TestScanWarnsForPersonalDataKinds(t *testing.T) {
 	dir := filepath.Join("testdata", "personal-stack")
-	findings := Scan(dir, []string{"settings.json", "README.md"})
+	findings, err := Scan(dir, []string{"settings.json", "README.md"})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
 
 	if findByKind(findings, "settings.json", "home-path") == nil {
 		t.Fatalf("missing home-path warning in settings.json: %+v", findings)
@@ -76,9 +88,64 @@ func TestScanWarnsForPersonalDataKinds(t *testing.T) {
 
 func TestScanOnlyWalksAllowlistedPaths(t *testing.T) {
 	dir := filepath.Join("testdata", "secrets-stack")
-	findings := Scan(dir, []string{"CLAUDE.md"})
+	findings, err := Scan(dir, []string{"CLAUDE.md"})
+	if err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
 	if len(findings) != 0 {
 		t.Fatalf("non-allowlisted settings.json was scanned: %+v", findings)
+	}
+}
+
+func TestMaskedExcerptsMaskEverySensitiveValueOnLine(t *testing.T) {
+	ghp := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+	anthropic := "sk-ant-abcdefghijklmnopqrstuvwxyz"
+	findings := scanLine("settings.json", 1, `{"github":"`+ghp+`","anthropic":"`+anthropic+`"}`)
+
+	if len(findings) != 2 {
+		t.Fatalf("expected two findings, got %d: %+v", len(findings), findings)
+	}
+	for _, f := range findings {
+		if strings.Contains(f.Excerpt, ghp) {
+			t.Fatalf("excerpt leaked ghp token in %q", f.Excerpt)
+		}
+		if strings.Contains(f.Excerpt, anthropic) {
+			t.Fatalf("excerpt leaked anthropic key in %q", f.Excerpt)
+		}
+	}
+}
+
+func TestScanReturnsScannerErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "long.txt"), []byte(strings.Repeat("a", 1024*1024+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	findings, err := Scan(dir, []string{"long.txt"})
+	if err == nil {
+		t.Fatalf("expected scanner error, got findings: %+v", findings)
+	}
+}
+
+func TestScanReturnsUnreadableAllowlistedFileErrors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based unreadable file test is Unix-specific")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(path, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(path, 0o600)
+	})
+
+	findings, err := Scan(dir, []string{"secret.txt"})
+	if err == nil {
+		t.Fatalf("expected unreadable file error, got findings: %+v", findings)
 	}
 }
 
