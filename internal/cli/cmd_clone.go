@@ -26,11 +26,16 @@ func cmdClone(ctx *Ctx, args []string) error {
 		return err
 	}
 
+	// Fail fast on an explicit --name collision before touching the network.
+	if name != "" && profileExists(ctx.Home, name) {
+		return fmt.Errorf("profile %q already exists", name)
+	}
+
 	stagingRoot := filepath.Join(ctx.Home, "staging")
 	if err := os.MkdirAll(stagingRoot, 0o700); err != nil {
 		return err
 	}
-	// Stage under a throwaway name: the profile name is only known after the
+	// Stage under a throwaway name: the profile name may only be known after the
 	// manifest is parsed, and os.Rename is the single commit point below.
 	staging, err := os.MkdirTemp(stagingRoot, "clone-")
 	if err != nil {
@@ -53,6 +58,11 @@ func cmdClone(ctx *Ctx, args []string) error {
 	if name == "" {
 		name = m.Name
 	}
+	// Collision check for the manifest-derived default name (the explicit --name
+	// case was already checked before the clone).
+	if profileExists(ctx.Home, name) {
+		return fmt.Errorf("profile %q already exists", name)
+	}
 
 	// Quarantine BEFORE validating: an author ships settings.json with live
 	// hooks/mcpServers/permissions, and Validate treats live capabilities as a
@@ -74,26 +84,33 @@ func cmdClone(ctx *Ctx, args []string) error {
 	if _, err := gitutil.Run(staging, "checkout", "-b", "local"); err != nil {
 		return err
 	}
-
-	final := filepath.Join(ctx.Home, "profiles", name)
-	if _, err := os.Stat(final); err == nil {
-		return fmt.Errorf("profile %q already exists", name)
-	}
-	if err := os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
-		return err
-	}
-	// Commit point: an atomic rename means the profile appears fully-formed or
-	// not at all.
-	if err := os.Rename(staging, final); err != nil {
+	// Commit the quarantine onto local so Task 13's `git reset --hard local`
+	// cannot resurrect the stripped hooks/permissions. Skipped when the stack
+	// shipped already-quarantined (clean tree).
+	if err := commitQuarantine(staging); err != nil {
 		return err
 	}
 
+	// Build the full state entry BEFORE the rename so the only fallible step left
+	// after the commit point is Save (which rolls back on failure).
 	st, err := state.Load(ctx.Home)
 	if err != nil {
 		return err
 	}
+	final := filepath.Join(ctx.Home, "profiles", name)
+	if err := os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
+		return err
+	}
 	st.Profiles[name] = state.Profile{Name: name, Path: final, Origin: url, Harness: m.Harness}
+
+	// Commit point: the atomic rename makes the profile appear fully-formed or not
+	// at all. If the subsequent Save fails, remove the just-installed tree so the
+	// clone leaves no trace (spec §6.2).
+	if err := os.Rename(staging, final); err != nil {
+		return err
+	}
 	if err := st.Save(ctx.Home); err != nil {
+		os.RemoveAll(final)
 		return err
 	}
 
@@ -127,6 +144,41 @@ func parseCloneArgs(args []string) (url, name string, err error) {
 		return "", "", fmt.Errorf("usage: sherpa clone <git-url> [--name <name>]")
 	}
 	return url, name, nil
+}
+
+// profileExists reports whether a profile with this name is already installed,
+// checking both the on-disk directory and the state file.
+func profileExists(home, name string) bool {
+	if _, err := os.Stat(filepath.Join(home, "profiles", name)); err == nil {
+		return true
+	}
+	if st, err := state.Load(home); err == nil {
+		if _, ok := st.Profiles[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// commitQuarantine records the stripped settings.json, quarantine.json, and
+// enforced .gitignore as a single sherpa commit on the current (local) branch,
+// so a later hard reset to local keeps the stack quarantined. It is a no-op when
+// the working tree is clean (the stack shipped pre-quarantined).
+func commitQuarantine(dir string) error {
+	status, err := gitutil.Run(dir, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if status == "" {
+		return nil
+	}
+	if _, err := gitutil.Run(dir, "add", "-A"); err != nil {
+		return err
+	}
+	_, err = gitutil.Run(dir,
+		"-c", "user.email=sherpa@local", "-c", "user.name=sherpa",
+		"commit", "-m", "sherpa: install (quarantine applied)")
+	return err
 }
 
 // enforceGitignore guarantees the installed stack carries the whitelist-style
