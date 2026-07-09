@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -53,30 +54,78 @@ func (m *Manifest) Validate(dir string) (violations []string) {
 	}
 	declared := map[string]bool{}
 	for _, h := range m.Executes.Hooks {
-		declared[filepath.Clean(h.Path)] = true
-		if _, err := os.Stat(filepath.Join(dir, h.Path)); err != nil {
+		clean := filepath.Clean(h.Path)
+		if h.Path == "" || !filepath.IsLocal(h.Path) || !strings.HasPrefix(filepath.ToSlash(clean), "hooks/") {
+			violations = append(violations, "hook path must be a local path under hooks/: "+h.Path)
+			continue
+		}
+		declared[clean] = true
+		if _, err := os.Stat(filepath.Join(dir, clean)); err != nil {
 			violations = append(violations, "declared hook missing: "+h.Path)
 		}
 	}
-	filepath.Walk(filepath.Join(dir, "hooks"), func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+	filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
 			return nil
 		}
-		rel, _ := filepath.Rel(dir, p)
-		if !declared[filepath.Clean(rel)] {
-			violations = append(violations, "undeclared executable: "+rel)
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return nil
+		}
+		switch slashRel := filepath.ToSlash(rel); {
+		case strings.HasPrefix(slashRel, "hooks/"):
+			// Everything under hooks/ auto-executes, so every file there
+			// must be declared, executable bit or not.
+			if !declared[filepath.Clean(rel)] {
+				violations = append(violations, "undeclared executable: "+rel)
+			}
+		case strings.HasPrefix(slashRel, "skills/"), strings.HasPrefix(slashRel, "agents/"):
+			// Skill/agent helper scripts never auto-execute; they run only
+			// when the agent invokes them, mediated by Claude Code's own
+			// permission prompts. The manifest's executes section covers the
+			// auto-execution surface (hooks + MCP), so these are not flagged.
+		default:
+			if info.Mode()&0111 != 0 {
+				violations = append(violations, "undeclared executable outside hooks/: "+rel)
+			}
 		}
 		return nil
 	})
-	if b, err := os.ReadFile(filepath.Join(dir, "settings.json")); err == nil {
+	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	switch {
+	case err == nil:
 		var s map[string]json.RawMessage
-		if json.Unmarshal(b, &s) == nil {
-			for _, key := range []string{"hooks", "mcpServers"} {
-				if v, ok := s[key]; ok && string(v) != "{}" && string(v) != "[]" && string(v) != "null" {
-					violations = append(violations, "settings.json contains live "+key+" (must be quarantined)")
-				}
+		if uerr := json.Unmarshal(b, &s); uerr != nil {
+			violations = append(violations, "settings.json unreadable or invalid JSON: "+uerr.Error())
+			break
+		}
+		for _, key := range []string{"hooks", "mcpServers"} {
+			if v, ok := s[key]; ok && !emptyJSON(v) {
+				violations = append(violations, "settings.json contains live "+key+" (must be quarantined)")
 			}
 		}
+	case !os.IsNotExist(err):
+		violations = append(violations, "settings.json unreadable or invalid JSON: "+err.Error())
 	}
 	return violations
+}
+
+// emptyJSON reports whether raw is JSON null, an object with no keys, or an
+// array with no elements.
+func emptyJSON(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) == nil {
+		return len(obj) == 0
+	}
+	var arr []json.RawMessage
+	if json.Unmarshal(raw, &arr) == nil {
+		return len(arr) == 0
+	}
+	return false
 }

@@ -76,3 +76,65 @@ func TestValidateRejectsLiveExecutablesInSettings(t *testing.T) {
 		t.Fatal("want live-executable violation")
 	}
 }
+
+func TestValidateRejectsHookPathOutsideHooksDir(t *testing.T) {
+	for _, path := range []string{"../evil.sh", "skills/x.sh", "/abs/evil.sh", ""} {
+		t.Run(path, func(t *testing.T) {
+			d := writeStack(t, true)
+			m, _ := Parse([]byte(goodYAML))
+			m.Executes.Hooks = append(m.Executes.Hooks, HookDecl{Path: path, Event: "PreToolUse", Purpose: "evil"})
+			want := "hook path must be a local path under hooks/: " + path
+			if v := m.Validate(d); !contains(v, want) {
+				t.Fatalf("want %q, got %v", want, v)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsExecutableOutsideHooks(t *testing.T) {
+	d := writeStack(t, true)
+	os.WriteFile(filepath.Join(d, "run.sh"), []byte("#!/bin/sh"), 0o755)
+	m, _ := Parse([]byte(goodYAML))
+	want := "undeclared executable outside hooks/: run.sh"
+	if v := m.Validate(d); !contains(v, want) {
+		t.Fatalf("want %q, got %v", want, v)
+	}
+}
+
+func TestValidateAllowsExecutableUnderSkills(t *testing.T) {
+	d := writeStack(t, true)
+	os.MkdirAll(filepath.Join(d, "skills", "review"), 0o755)
+	os.WriteFile(filepath.Join(d, "skills", "review", "helper.sh"), []byte("#!/bin/sh"), 0o755)
+	m, _ := Parse([]byte(goodYAML))
+	if v := m.Validate(d); len(v) != 0 {
+		t.Fatalf("violations: %v", v)
+	}
+}
+
+func TestValidateRejectsInvalidSettingsJSON(t *testing.T) {
+	d := writeStack(t, true)
+	os.WriteFile(filepath.Join(d, "settings.json"), []byte(`{not json`), 0o644)
+	m, _ := Parse([]byte(goodYAML))
+	if v := m.Validate(d); len(v) == 0 {
+		t.Fatal("want invalid-settings violation")
+	}
+}
+
+func TestValidateAllowsPrettyPrintedEmptySettings(t *testing.T) {
+	d := writeStack(t, true)
+	os.WriteFile(filepath.Join(d, "settings.json"),
+		[]byte("{\n  \"hooks\": {\n  },\n  \"mcpServers\": [\n  ]\n}"), 0o644)
+	m, _ := Parse([]byte(goodYAML))
+	if v := m.Validate(d); len(v) != 0 {
+		t.Fatalf("violations: %v", v)
+	}
+}
+
+func contains(vs []string, want string) bool {
+	for _, v := range vs {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
