@@ -238,6 +238,7 @@ func commitQuarantine(dir string) error {
 	}
 	_, err = gitutil.Run(dir,
 		"-c", "user.email=sherpa@local", "-c", "user.name=sherpa",
+		"-c", "commit.gpgsign=false",
 		"commit", "-m", "sherpa: install (quarantine applied)")
 	return err
 }

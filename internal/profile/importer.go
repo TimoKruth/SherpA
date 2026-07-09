@@ -30,7 +30,7 @@ func Import(src, dest, gitignore string) error {
 	}
 	for _, args := range [][]string{
 		{"init", "-b", "local"}, {"add", "-A"},
-		{"-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "commit", "-m", "sherpa: import"},
+		{"-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "sherpa: import"},
 	} {
 		if err := git(dest, args...); err != nil {
 			return err

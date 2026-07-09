@@ -13,7 +13,7 @@ import (
 
 func makeExpertRepo(t *testing.T, valid bool) string {
 	d := t.TempDir()
-	manifest := "name: jane-stack\nowner: \"@jane\"\nversion: 1\nharness: claude-code\nsummary: x\n"
+	manifest := "name: jane-stack\nowner: \"@jane\"\nversion: 1\nharness: claude-code\nsummary: x\nforked_from: '@origin/base@v1'\n"
 	if !valid {
 		manifest = strings.Replace(manifest, "claude-code", "pi", 1)
 	}
