@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"sherpa/internal/quarantine"
@@ -22,7 +23,13 @@ const (
 )
 
 type quarantineFile struct {
-	Permissions json.RawMessage `json:"permissions,omitempty"`
+	Hooks       map[string][]quarantinedHook `json:"hooks,omitempty"`
+	Permissions json.RawMessage              `json:"permissions,omitempty"`
+}
+
+type quarantinedHook struct {
+	Seq   int             `json:"seq"`
+	Entry json.RawMessage `json:"entry"`
 }
 
 // RunGate shows every pending capability with its declared purpose and, for
@@ -83,14 +90,15 @@ func RunGate(dir string, m *stack.Manifest, mode Mode, in io.Reader, out io.Writ
 			case "n", "no", "":
 				goto next
 			case "a", "all":
-				if err := quarantine.Approve(dir, "all"); err != nil {
-					return approved, err
-				}
 				for _, rest := range pending[i:] {
-					if !approvedSet[rest] {
-						approved = append(approved, rest)
-						approvedSet[rest] = true
+					if approvedSet[rest] {
+						continue
 					}
+					if err := quarantine.Approve(dir, rest); err != nil {
+						return approved, err
+					}
+					approved = append(approved, rest)
+					approvedSet[rest] = true
 				}
 				return approved, nil
 			case "q", "quit":
@@ -117,7 +125,7 @@ func renderCapability(out io.Writer, dir string, m *stack.Manifest, id string) e
 	fmt.Fprintf(out, "\n%s\n", id)
 	switch {
 	case strings.HasPrefix(id, "hook:"):
-		event, err := hookEvent(id)
+		event, _, err := hookEventSeq(id)
 		if err != nil {
 			return err
 		}
@@ -126,15 +134,25 @@ func renderCapability(out io.Writer, dir string, m *stack.Manifest, id string) e
 		fmt.Fprintf(out, "event: %s\n", event)
 		if len(hooks) == 0 {
 			fmt.Fprintln(out, "purpose: (not declared)")
-			return nil
-		}
-		for _, h := range hooks {
-			fmt.Fprintf(out, "path: %s\n", h.Path)
-			fmt.Fprintf(out, "purpose: %s\n", h.Purpose)
-			if err := printHookScript(out, dir, h.Path); err != nil {
-				return err
+		} else {
+			for _, h := range hooks {
+				fmt.Fprintf(out, "path: %s\n", h.Path)
+				fmt.Fprintf(out, "purpose: %s\n", h.Purpose)
+				if err := printHookScript(out, dir, h.Path); err != nil {
+					return err
+				}
 			}
 		}
+		raw, found, err := hookEntryRaw(dir, id)
+		if err != nil {
+			return err
+		}
+		if !found {
+			fmt.Fprintln(out, "WARNING: quarantined entry not found — do not approve blindly")
+			return nil
+		}
+		fmt.Fprintln(out, "entry:")
+		printIndented(out, string(raw))
 	case strings.HasPrefix(id, "mcp:"):
 		name := strings.TrimPrefix(id, "mcp:")
 		fmt.Fprintln(out, "type: mcp server")
@@ -164,13 +182,17 @@ func renderCapability(out io.Writer, dir string, m *stack.Manifest, id string) e
 	return nil
 }
 
-func hookEvent(id string) (string, error) {
+func hookEventSeq(id string) (string, int, error) {
 	rest := strings.TrimPrefix(id, "hook:")
 	i := strings.LastIndex(rest, ":")
 	if i < 0 {
-		return "", fmt.Errorf("malformed hook id %q", id)
+		return "", 0, fmt.Errorf("malformed hook id %q", id)
 	}
-	return rest[:i], nil
+	seq, err := strconv.Atoi(rest[i+1:])
+	if err != nil {
+		return "", 0, fmt.Errorf("malformed hook id %q", id)
+	}
+	return rest[:i], seq, nil
 }
 
 func hooksForEvent(m *stack.Manifest, event string) []stack.HookDecl {
@@ -232,6 +254,36 @@ func permissionsRaw(dir string) ([]byte, error) {
 		return q.Permissions, nil
 	}
 	return pretty, nil
+}
+
+func hookEntryRaw(dir, id string) ([]byte, bool, error) {
+	event, seq, err := hookEventSeq(id)
+	if err != nil {
+		return nil, false, err
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "quarantine.json"))
+	if err != nil {
+		return nil, false, err
+	}
+	var q quarantineFile
+	if err := json.Unmarshal(b, &q); err != nil {
+		return nil, false, fmt.Errorf("quarantine.json: %w", err)
+	}
+	for _, h := range q.Hooks[event] {
+		if h.Seq != seq {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal(h.Entry, &v); err != nil {
+			return h.Entry, true, nil
+		}
+		pretty, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			return h.Entry, true, nil
+		}
+		return pretty, true, nil
+	}
+	return nil, false, nil
 }
 
 func printIndented(out io.Writer, s string) {
