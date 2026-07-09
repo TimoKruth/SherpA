@@ -19,13 +19,24 @@ const (
 	quarantineFile = "quarantine.json"
 )
 
+// hookEntry is one quarantined matcher declaration plus an immutable per-event
+// sequence number assigned at Strip time. Ids are formed from Seq (not slice
+// position) so approving one hook never shifts another hook's id.
+type hookEntry struct {
+	Seq   int             `json:"seq"`
+	Entry json.RawMessage `json:"entry"`
+}
+
 // quar is the on-disk shape of quarantine.json. Hooks are keyed by event and
-// stored per matcher entry so each can be approved independently; MCP servers
-// are keyed by name; permissions move as a single opaque unit.
+// stored per matcher entry so each is independently approvable; NextSeq holds
+// the next unused sequence per event so approved-and-removed seqs are never
+// reused or renumbered; MCP servers are keyed by name; permissions move as a
+// single opaque unit.
 type quar struct {
-	Hooks       map[string][]json.RawMessage `json:"hooks,omitempty"`
-	MCPServers  map[string]json.RawMessage   `json:"mcpServers,omitempty"`
-	Permissions json.RawMessage              `json:"permissions,omitempty"`
+	Hooks       map[string][]hookEntry     `json:"hooks,omitempty"`
+	NextSeq     map[string]int             `json:"nextSeq,omitempty"`
+	MCPServers  map[string]json.RawMessage `json:"mcpServers,omitempty"`
+	Permissions json.RawMessage            `json:"permissions,omitempty"`
 }
 
 func (q *quar) empty() bool {
@@ -34,8 +45,13 @@ func (q *quar) empty() bool {
 
 // Strip moves live "hooks", "mcpServers", and "permissions" out of
 // dir/settings.json into dir/quarantine.json. It is idempotent: an existing
-// quarantine.json is merged into, never clobbered, and a missing or
-// capability-free settings.json is a no-op.
+// quarantine.json is merged into (hooks deduped by content), never clobbered,
+// and a missing or capability-free settings.json is a no-op.
+//
+// Crash safety: quarantine.json is written BEFORE the stripped settings.json.
+// A crash between the two writes leaves capabilities both quarantined and still
+// live, so a re-Strip converges (dedupe prevents duplication) — the opposite
+// order would risk losing the content entirely.
 func Strip(dir string) error {
 	settings, exists, err := loadSettings(dir)
 	if err != nil {
@@ -50,16 +66,29 @@ func Strip(dir string) error {
 	}
 
 	changed := false
+	// A structurally empty hooks/mcpServers/permissions key is not content and
+	// is deliberately left live: emptyJSON gates every move below.
 	if v, ok := settings["hooks"]; ok && !emptyJSON(v) {
 		var m map[string][]json.RawMessage
 		if err := json.Unmarshal(v, &m); err != nil {
 			return fmt.Errorf("settings hooks: %w", err)
 		}
 		if q.Hooks == nil {
-			q.Hooks = map[string][]json.RawMessage{}
+			q.Hooks = map[string][]hookEntry{}
 		}
-		for event, entries := range m {
-			q.Hooks[event] = append(q.Hooks[event], entries...)
+		if q.NextSeq == nil {
+			q.NextSeq = map[string]int{}
+		}
+		for _, event := range sortedRawSlice(m) {
+			for _, e := range m[event] {
+				// Dedupe: a re-Strip of already-quarantined content adds nothing
+				// and assigns no new seq, so recovery re-runs converge.
+				if containsEntry(q.Hooks[event], e) {
+					continue
+				}
+				q.Hooks[event] = append(q.Hooks[event], hookEntry{Seq: q.NextSeq[event], Entry: e})
+				q.NextSeq[event]++
+			}
 		}
 		delete(settings, "hooks")
 		changed = true
@@ -73,42 +102,47 @@ func Strip(dir string) error {
 			q.MCPServers = map[string]json.RawMessage{}
 		}
 		for name, entry := range m {
+			// Newest-wins by name: quarantine holds the pending capabilities of
+			// the CURRENT stack version, so a fresh live value replaces any
+			// stale quarantined one under the same name.
 			q.MCPServers[name] = entry
 		}
 		delete(settings, "mcpServers")
 		changed = true
 	}
 	if v, ok := settings["permissions"]; ok && !emptyJSON(v) {
+		// Newest-wins, as with MCP servers above: the current live grant
+		// supersedes any previously quarantined permissions value.
 		q.Permissions = v
 		delete(settings, "permissions")
 		changed = true
 	}
 
-	if changed {
-		if err := writeJSON(dir, settingsFile, settings); err != nil {
+	if !q.empty() {
+		if err := writeJSON(dir, quarantineFile, q); err != nil {
 			return err
 		}
 	}
-	if !q.empty() {
-		if err := writeJSON(dir, quarantineFile, q); err != nil {
+	if changed {
+		if err := writeJSON(dir, settingsFile, settings); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// Pending lists quarantined capability IDs: "hook:<event>:<i>" per matcher
-// entry, "mcp:<name>", and the single id "permissions". A missing
-// quarantine.json yields an empty list.
+// Pending lists quarantined capability IDs: "hook:<event>:<seq>" per matcher
+// entry (seq is the immutable id, not a slice position), "mcp:<name>", and the
+// single id "permissions". A missing quarantine.json yields an empty list.
 func Pending(dir string) ([]string, error) {
 	q, err := loadQuar(dir)
 	if err != nil {
 		return nil, err
 	}
 	var ids []string
-	for _, event := range sortedKeys(q.Hooks) {
-		for i := range q.Hooks[event] {
-			ids = append(ids, fmt.Sprintf("hook:%s:%d", event, i))
+	for _, event := range sortedHookEvents(q.Hooks) {
+		for _, he := range bySeq(q.Hooks[event]) {
+			ids = append(ids, fmt.Sprintf("hook:%s:%d", event, he.Seq))
 		}
 	}
 	for _, name := range sortedRawKeys(q.MCPServers) {
@@ -122,6 +156,10 @@ func Pending(dir string) ([]string, error) {
 
 // Approve moves the identified capability back into settings.json and removes
 // it from quarantine.json. "all" approves every pending capability at once.
+//
+// Settings is written before the quarantine removal; combined with dedupe on
+// restore, a crash between the two writes converges on retry (the entry is
+// re-added only if absent, then cleared from quarantine).
 func Approve(dir string, id string) error {
 	settings, _, err := loadSettings(dir)
 	if err != nil {
@@ -134,9 +172,11 @@ func Approve(dir string, id string) error {
 
 	switch {
 	case id == "all":
-		for _, event := range sortedKeys(q.Hooks) {
-			if err := addHook(settings, event, q.Hooks[event]); err != nil {
-				return err
+		for _, event := range sortedHookEvents(q.Hooks) {
+			for _, he := range bySeq(q.Hooks[event]) {
+				if err := addHook(settings, event, he.Entry); err != nil {
+					return err
+				}
 			}
 		}
 		for _, name := range sortedRawKeys(q.MCPServers) {
@@ -168,20 +208,27 @@ func Approve(dir string, id string) error {
 		delete(q.MCPServers, name)
 
 	case strings.HasPrefix(id, "hook:"):
-		event, i, err := parseHookID(id)
+		event, seq, err := parseHookID(id)
 		if err != nil {
 			return err
 		}
 		entries := q.Hooks[event]
-		if i < 0 || i >= len(entries) {
+		idx := -1
+		for i, he := range entries {
+			if he.Seq == seq {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
 			return fmt.Errorf("no pending hook %q", id)
 		}
-		if err := addHook(settings, event, entries[i:i+1]); err != nil {
+		if err := addHook(settings, event, entries[idx].Entry); err != nil {
 			return err
 		}
-		q.Hooks[event] = append(entries[:i:i], entries[i+1:]...)
+		q.Hooks[event] = append(entries[:idx:idx], entries[idx+1:]...)
 		if len(q.Hooks[event]) == 0 {
-			delete(q.Hooks, event)
+			delete(q.Hooks, event) // NextSeq[event] is retained so seqs never reuse.
 		}
 
 	default:
@@ -194,16 +241,19 @@ func Approve(dir string, id string) error {
 	return writeJSON(dir, quarantineFile, q)
 }
 
-// addHook appends matcher entries to settings["hooks"][event], creating the
-// structure as needed.
-func addHook(settings map[string]json.RawMessage, event string, entries []json.RawMessage) error {
+// addHook appends a matcher entry to settings["hooks"][event], creating the
+// structure as needed. It skips entries already present byte-equal so a
+// crash-recovery re-Approve does not duplicate.
+func addHook(settings map[string]json.RawMessage, event string, entry json.RawMessage) error {
 	m := map[string][]json.RawMessage{}
 	if v, ok := settings["hooks"]; ok {
 		if err := json.Unmarshal(v, &m); err != nil {
 			return fmt.Errorf("live hooks: %w", err)
 		}
 	}
-	m[event] = append(m[event], entries...)
+	if !containsRaw(m[event], entry) {
+		m[event] = append(m[event], entry)
+	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return err
@@ -235,11 +285,11 @@ func parseHookID(id string) (string, int, error) {
 	if j < 0 {
 		return "", 0, fmt.Errorf("malformed hook id %q", id)
 	}
-	i, err := strconv.Atoi(rest[j+1:])
+	seq, err := strconv.Atoi(rest[j+1:])
 	if err != nil {
 		return "", 0, fmt.Errorf("malformed hook id %q", id)
 	}
-	return rest[:j], i, nil
+	return rest[:j], seq, nil
 }
 
 func loadSettings(dir string) (map[string]json.RawMessage, bool, error) {
@@ -285,7 +335,57 @@ func writeJSON(dir, name string, v any) error {
 	return os.Rename(tmp, path)
 }
 
-func sortedKeys(m map[string][]json.RawMessage) []string {
+// canonical returns a whitespace- and key-order-independent form of raw so two
+// semantically equal JSON values compare equal.
+func canonical(raw json.RawMessage) string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return string(raw)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return string(raw)
+	}
+	return string(b)
+}
+
+func containsRaw(list []json.RawMessage, e json.RawMessage) bool {
+	c := canonical(e)
+	for _, x := range list {
+		if canonical(x) == c {
+			return true
+		}
+	}
+	return false
+}
+
+func containsEntry(list []hookEntry, e json.RawMessage) bool {
+	c := canonical(e)
+	for _, he := range list {
+		if canonical(he.Entry) == c {
+			return true
+		}
+	}
+	return false
+}
+
+func bySeq(entries []hookEntry) []hookEntry {
+	out := make([]hookEntry, len(entries))
+	copy(out, entries)
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out
+}
+
+func sortedHookEvents(m map[string][]hookEntry) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedRawSlice(m map[string][]json.RawMessage) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
