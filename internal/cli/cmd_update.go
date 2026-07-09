@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"sherpa/internal/gitutil"
@@ -124,16 +123,12 @@ func updateTarget(ctx *Ctx, args []string) (state.Profile, error) {
 func newestVersionTag(tags []string) string {
 	best, bestN := "", 0
 	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if !strings.HasPrefix(tag, "v") {
-			continue
-		}
-		n, err := strconv.Atoi(strings.TrimPrefix(tag, "v"))
-		if err != nil || n < 1 {
+		n, ok := parseVersionTag(tag)
+		if !ok {
 			continue
 		}
 		if n > bestN {
-			best, bestN = tag, n
+			best, bestN = strings.TrimSpace(tag), n
 		}
 	}
 	return best

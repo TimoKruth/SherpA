@@ -107,6 +107,35 @@ func TestPublishBumpsTagsPushesAndPreservesForkProvenance(t *testing.T) {
 	}
 }
 
+func TestPublishSkipsFetchedUpstreamTagCollision(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	gitOut(t, repo, "tag", "v2")
+	gitOut(t, repo, "tag", "v3")
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "publish-collision-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "publish-collision-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	remote := makeBareRepo(t)
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err != nil {
+		t.Fatal(err)
+	}
+	if tag := gitOut(t, remote, "tag", "-l", "v4"); tag != "v4" {
+		t.Fatalf("remote tag = %q, want v4", tag)
+	}
+	stackYAML := gitOut(t, remote, "show", "main:stack.yaml")
+	if !strings.Contains(stackYAML, "version: 4") {
+		t.Fatalf("remote stack.yaml did not publish v4:\n%s", stackYAML)
+	}
+}
+
 func TestPublishSecretAbortIsNonzeroAndDoesNotPush(t *testing.T) {
 	home := setupHome(t)
 	repo := makeExpertRepo(t, true)

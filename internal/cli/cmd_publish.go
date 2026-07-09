@@ -151,6 +151,16 @@ func bumpStackVersion(dir string) (int, error) {
 			return 0, fmt.Errorf("stack.yaml: invalid version %q", value.Value)
 		}
 		next := current + 1
+		tags, err := gitutil.Run(dir, "tag", "-l", "v*")
+		if err != nil {
+			return 0, err
+		}
+		seen, maxTag := versionTagNumbers(strings.Split(tags, "\n"))
+		// Forked profiles keep fetched upstream tags in the same local namespace,
+		// so skip over an upstream-owned v<N> before writing and tagging ours.
+		if seen[next] {
+			next = maxTag + 1
+		}
 		value.Kind = yaml.ScalarNode
 		value.Tag = "!!int"
 		value.Value = strconv.Itoa(next)
