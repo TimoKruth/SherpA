@@ -145,8 +145,19 @@ func TestUpdateRefusesDirtyProfile(t *testing.T) {
 	var out, errb bytes.Buffer
 	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\n")}
 	err := cmdUpdate(ctx, []string{"dirty-test"})
-	if err == nil || !strings.Contains(err.Error(), "sherpa save") {
-		t.Fatalf("err = %v, want refusal pointing at sherpa save", err)
+	if err == nil {
+		t.Fatal("dirty profile must refuse to update")
+	}
+	// The refusal must explain both cases: genuine edits (save them) and an
+	// interrupted previous update (reset to the already-updated local).
+	if !strings.Contains(err.Error(), "sherpa save") {
+		t.Fatalf("err = %v, want the sherpa save hint", err)
+	}
+	if !strings.Contains(err.Error(), "git -C "+dir+" reset --hard local") {
+		t.Fatalf("err = %v, want the interrupted-update recovery hint", err)
+	}
+	if !strings.Contains(err.Error(), "refs/sherpa/backup-") {
+		t.Fatalf("err = %v, want mention of the backup ref", err)
 	}
 }
 

@@ -87,7 +87,11 @@ func Merge(profileDir, tmpRoot, targetRef string) (MergeResult, error) {
 		return res, err
 	}
 	if _, err := gitutil.Run(profileDir, "reset", "--hard", "local"); err != nil {
-		return res, err
+		// `local` already points at the merge; only the working-tree sync is
+		// missing (the same state a crash in this window leaves behind).
+		return res, fmt.Errorf("update was published to local but syncing the profile working tree failed: %w\n"+
+			"run `git -C %s reset --hard local` to finish the update (pre-update state is preserved in %s)",
+			err, profileDir, backup)
 	}
 	res.Merged = true
 	return res, nil

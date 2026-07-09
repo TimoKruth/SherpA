@@ -30,13 +30,20 @@ func cmdUpdate(ctx *Ctx, args []string) error {
 		return fmt.Errorf("profile %q has no upstream to update from", profile.Name)
 	}
 	// The success path ends in `reset --hard local`, which would silently
-	// discard uncommitted work in the profile.
+	// discard uncommitted work in the profile. A dirty tree can also be the
+	// leftover of an update interrupted between update-ref and reset — that
+	// state is indistinguishable from real edits, so explain both ways out
+	// instead of guessing.
 	status, err := gitutil.Run(profile.Path, "status", "--porcelain")
 	if err != nil {
 		return err
 	}
 	if status != "" {
-		return fmt.Errorf("profile %q has uncommitted changes; run `sherpa save` first", profile.Name)
+		return fmt.Errorf("profile %q has uncommitted changes.\n"+
+			"  - If these are your edits: run `sherpa save`, then update again.\n"+
+			"  - If a previous update was interrupted: run `git -C %s reset --hard local` to restore the updated state\n"+
+			"    (your committed work is untouched; the backup ref refs/sherpa/backup-* also preserves the pre-update state)",
+			profile.Name, profile.Path)
 	}
 
 	if _, err := gitutil.Run(profile.Path, "fetch", "--tags", "origin"); err != nil {
