@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // CredentialFiles: pinned to Task 1 spike findings — on macOS, auth under
@@ -64,7 +65,7 @@ func Claude(profileDir, mineDir string, credFiles []string, args []string, stdio
 		}
 	}
 	cmd := exec.Command(bin(), args...)
-	cmd.Env = append(os.Environ(), "CLAUDE_CONFIG_DIR="+profileDir)
+	cmd.Env = withClaudeConfigDir(os.Environ(), profileDir)
 	// Default each stream independently so tests can override any subset.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio.In, stdio.Out, stdio.Err
 	if cmd.Stdin == nil {
@@ -77,4 +78,15 @@ func Claude(profileDir, mineDir string, credFiles []string, args []string, stdio
 		cmd.Stderr = os.Stderr
 	}
 	return cmd.Run()
+}
+
+func withClaudeConfigDir(env []string, profileDir string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "CLAUDE_CONFIG_DIR="+profileDir)
 }

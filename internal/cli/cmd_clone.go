@@ -8,6 +8,7 @@ import (
 
 	"sherpa/internal/gitutil"
 	"sherpa/internal/quarantine"
+	"sherpa/internal/review"
 	"sherpa/internal/stack"
 	"sherpa/internal/state"
 )
@@ -21,39 +22,67 @@ func init() {
 // removes the staging tree, so an aborted clone leaves no partial profile and no
 // state entry (spec §6.2). Cloning never changes the active profile.
 func cmdClone(ctx *Ctx, args []string) error {
-	url, name, err := parseCloneArgs(args)
+	req, err := parseCloneArgs(args)
 	if err != nil {
 		return err
 	}
+	installed, err := installStack(ctx, req.url, req.name)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(ctx.Stdout, "cloned %q into %s (not activated)\n", installed.name, installed.dir)
+	approved, err := review.RunGate(installed.dir, installed.manifest, req.mode, ctx.Stdin, ctx.Stdout)
+	if err != nil {
+		return err
+	}
+	if len(approved) > 0 {
+		fmt.Fprintf(ctx.Stdout, "approved %d capabilities\n", len(approved))
+	}
+	fmt.Fprintf(ctx.Stdout, "activate with: sherpa use %s\n", installed.name)
+	return nil
+}
 
+type cloneRequest struct {
+	url  string
+	name string
+	mode review.Mode
+}
+
+type installResult struct {
+	name     string
+	dir      string
+	manifest *stack.Manifest
+}
+
+func installStack(ctx *Ctx, url, name string) (*installResult, error) {
 	// Fail fast on an explicit --name collision before touching the network.
 	if name != "" && profileExists(ctx.Home, name) {
-		return fmt.Errorf("profile %q already exists", name)
+		return nil, fmt.Errorf("profile %q already exists", name)
 	}
 
 	stagingRoot := filepath.Join(ctx.Home, "staging")
 	if err := os.MkdirAll(stagingRoot, 0o700); err != nil {
-		return err
+		return nil, err
 	}
 	// Stage under a throwaway name: the profile name may only be known after the
 	// manifest is parsed, and os.Rename is the single commit point below.
 	staging, err := os.MkdirTemp(stagingRoot, "clone-")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer os.RemoveAll(staging) // no-op once the tree is renamed into place.
 
 	if err := gitutil.Clone(url, staging); err != nil {
-		return err
+		return nil, err
 	}
 
 	b, err := os.ReadFile(filepath.Join(staging, "stack.yaml"))
 	if err != nil {
-		return fmt.Errorf("stack.yaml: %w", err)
+		return nil, fmt.Errorf("stack.yaml: %w", err)
 	}
 	m, err := stack.Parse(b)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if name == "" {
 		name = m.Name
@@ -61,7 +90,7 @@ func cmdClone(ctx *Ctx, args []string) error {
 	// Collision check for the manifest-derived default name (the explicit --name
 	// case was already checked before the clone).
 	if profileExists(ctx.Home, name) {
-		return fmt.Errorf("profile %q already exists", name)
+		return nil, fmt.Errorf("profile %q already exists", name)
 	}
 
 	// Quarantine BEFORE validating: an author ships settings.json with live
@@ -70,36 +99,36 @@ func cmdClone(ctx *Ctx, args []string) error {
 	// stack code — so validating the stripped tree still catches undeclared
 	// executables while letting a well-formed stack install fully quarantined.
 	if err := quarantine.Strip(staging); err != nil {
-		return err
+		return nil, err
 	}
 	if violations := m.Validate(staging); len(violations) > 0 {
-		return fmt.Errorf("stack failed validation:\n  - %s", strings.Join(violations, "\n  - "))
+		return nil, fmt.Errorf("stack failed validation:\n  - %s", strings.Join(violations, "\n  - "))
 	}
 	if err := enforceGitignore(staging); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Branch `local` sits at the upstream head; origin/main and tags stay
 	// referenceable for later diff/update. No tracking config is set.
 	if _, err := gitutil.Run(staging, "checkout", "-b", "local"); err != nil {
-		return err
+		return nil, err
 	}
 	// Commit the quarantine onto local so Task 13's `git reset --hard local`
 	// cannot resurrect the stripped hooks/permissions. Skipped when the stack
 	// shipped already-quarantined (clean tree).
 	if err := commitQuarantine(staging); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Build the full state entry BEFORE the rename so the only fallible step left
 	// after the commit point is Save (which rolls back on failure).
 	st, err := state.Load(ctx.Home)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	final := filepath.Join(ctx.Home, "profiles", name)
 	if err := os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
-		return err
+		return nil, err
 	}
 	st.Profiles[name] = state.Profile{Name: name, Path: final, Origin: url, Harness: m.Harness}
 
@@ -107,43 +136,75 @@ func cmdClone(ctx *Ctx, args []string) error {
 	// at all. If the subsequent Save fails, remove the just-installed tree so the
 	// clone leaves no trace (spec §6.2).
 	if err := os.Rename(staging, final); err != nil {
-		return err
+		return nil, err
 	}
 	if err := st.Save(ctx.Home); err != nil {
 		os.RemoveAll(final)
-		return err
+		return nil, err
 	}
 
-	printReviewGate(ctx, name, final)
-	return nil
+	return &installResult{name: name, dir: final, manifest: m}, nil
 }
 
-// parseCloneArgs pulls the git URL (first positional) and optional --name out of
-// the argument list.
-func parseCloneArgs(args []string) (url, name string, err error) {
+// parseCloneArgs pulls the git URL, optional --name, and review mode out of the
+// argument list. The default is keep-quarantined; callers opt into prompting
+// with --review=interactive or into the shortcut with --approve-all.
+func parseCloneArgs(args []string) (cloneRequest, error) {
+	req := cloneRequest{mode: review.KeepQuarantined}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--name":
 			i++
 			if i >= len(args) {
-				return "", "", fmt.Errorf("--name requires a value")
+				return req, fmt.Errorf("--name requires a value")
 			}
-			name = args[i]
+			req.name = args[i]
 		case strings.HasPrefix(a, "--name="):
-			name = strings.TrimPrefix(a, "--name=")
+			req.name = strings.TrimPrefix(a, "--name=")
+		case a == "--approve-all":
+			req.mode = review.ApproveAll
+		case a == "--review":
+			i++
+			if i >= len(args) {
+				return req, fmt.Errorf("--review requires a value")
+			}
+			mode, err := parseReviewMode(args[i])
+			if err != nil {
+				return req, err
+			}
+			req.mode = mode
+		case strings.HasPrefix(a, "--review="):
+			mode, err := parseReviewMode(strings.TrimPrefix(a, "--review="))
+			if err != nil {
+				return req, err
+			}
+			req.mode = mode
 		case strings.HasPrefix(a, "-"):
-			return "", "", fmt.Errorf("unknown flag %q", a)
-		case url == "":
-			url = a
+			return req, fmt.Errorf("unknown flag %q", a)
+		case req.url == "":
+			req.url = a
 		default:
-			return "", "", fmt.Errorf("unexpected argument %q", a)
+			return req, fmt.Errorf("unexpected argument %q", a)
 		}
 	}
-	if url == "" {
-		return "", "", fmt.Errorf("usage: sherpa clone <git-url> [--name <name>]")
+	if req.url == "" {
+		return req, fmt.Errorf("usage: sherpa clone <git-url> [--name <name>] [--review interactive|approve-all|keep] [--approve-all]")
 	}
-	return url, name, nil
+	return req, nil
+}
+
+func parseReviewMode(s string) (review.Mode, error) {
+	switch s {
+	case "interactive":
+		return review.Interactive, nil
+	case "approve-all":
+		return review.ApproveAll, nil
+	case "keep", "keep-quarantined":
+		return review.KeepQuarantined, nil
+	default:
+		return review.KeepQuarantined, fmt.Errorf("unknown review mode %q", s)
+	}
 }
 
 // profileExists reports whether a profile with this name is already installed,
@@ -193,22 +254,4 @@ func enforceGitignore(dir string) error {
 		}
 	}
 	return os.WriteFile(p, []byte(stack.GitignoreContent), 0o644)
-}
-
-// printReviewGate reports what was installed and, if the stack shipped
-// capabilities, lists the quarantined ids and how to approve them. Task 10 wires
-// the interactive gate; here we only inform.
-func printReviewGate(ctx *Ctx, name, dir string) {
-	fmt.Fprintf(ctx.Stdout, "cloned %q into %s (not activated)\n", name, dir)
-	pending, err := quarantine.Pending(dir)
-	if err != nil || len(pending) == 0 {
-		fmt.Fprintf(ctx.Stdout, "activate with: sherpa use %s\n", name)
-		return
-	}
-	fmt.Fprintf(ctx.Stdout, "pending capabilities (quarantined until approved):\n")
-	for _, id := range pending {
-		fmt.Fprintf(ctx.Stdout, "  %s\n", id)
-	}
-	fmt.Fprintf(ctx.Stdout, "approve with: sherpa approve <id>   (or `sherpa approve all`)\n")
-	fmt.Fprintf(ctx.Stdout, "activate with: sherpa use %s\n", name)
 }

@@ -51,6 +51,19 @@ func TestCloneInstallsWithoutActivating(t *testing.T) {
 	}
 }
 
+func TestCloneApproveAllFlagApprovesQuarantinedCapabilities(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "trusted", "--approve-all"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	b, _ := os.ReadFile(filepath.Join(home, "profiles", "trusted", "settings.json"))
+	if !strings.Contains(string(b), "mcpServers") || !strings.Contains(string(b), "npx") {
+		t.Fatalf("approve-all did not restore mcpServers: %s", b)
+	}
+}
+
 func TestCloneAbortsCleanlyOnInvalidStack(t *testing.T) {
 	home := setupHome(t)
 	repo := makeExpertRepo(t, false)

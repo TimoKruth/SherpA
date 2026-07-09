@@ -28,6 +28,22 @@ func TestClaudeLaunchesWithConfigDirAndLinksCreds(t *testing.T) {
 	}
 }
 
+func TestClaudeOverridesInheritedConfigDir(t *testing.T) {
+	profile, mine, outDir := t.TempDir(), t.TempDir(), t.TempDir()
+	fake := filepath.Join(outDir, "claude")
+	os.WriteFile(fake, []byte("#!/bin/sh\necho \"$CLAUDE_CONFIG_DIR\" > "+outDir+"/env.txt\n"), 0o755)
+	t.Setenv("SHERPA_CLAUDE_BIN", fake)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+
+	if err := Claude(profile, mine, nil, nil, Stdio{}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(filepath.Join(outDir, "env.txt"))
+	if strings.TrimSpace(string(got)) != profile {
+		t.Fatalf("CLAUDE_CONFIG_DIR = %q, want %q", got, profile)
+	}
+}
+
 func TestClaudeNeverOverwritesExistingCred(t *testing.T) {
 	profile, mine := t.TempDir(), t.TempDir()
 	os.WriteFile(filepath.Join(mine, ".credentials.json"), []byte("new"), 0o600)
