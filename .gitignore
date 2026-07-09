@@ -1,2 +1,3 @@
 .superpowers/
 dist/
+.playwright-mcp/
