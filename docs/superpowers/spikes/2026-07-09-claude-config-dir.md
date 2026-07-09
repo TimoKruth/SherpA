@@ -12,9 +12,15 @@
 
 ## Verdict
 
-**Isolation is complete for config reads and runtime-state writes.** Every fixture
-loaded from the override dir, all runtime state was written inside it, and nothing
-leaked into `~/.claude` or `~/.claude.json`. The one surprise is **auth**: the macOS
+**Isolation is complete for config reads and runtime-state writes**, within the
+evidence gathered: every fixture loaded from the override dir, all files the probes
+created landed inside it, `~/.claude.json`'s `projects` map never gained the probe
+workdir (checked after every run), and no content from the real global config
+(CLAUDE.md text, skills, plugin skills, agents) surfaced in any probe reply. Note:
+`~/.claude` itself was not diffed before/after (the probes ran from inside a live
+Claude Code session whose own writes to `~/.claude` would confound mtime/checksum
+comparison), so writes of probe state into `~/.claude` are ruled out by the file
+inventories of the override dir, not by a direct diff. The one surprise is **auth**: the macOS
 Keychain credential is *not* used when `CLAUDE_CONFIG_DIR` is set — a fresh override
 dir starts logged out, and a `.credentials.json` file inside the dir is what carries
 auth (details below). This is workable for SherpA and actually simplifies the
@@ -79,8 +85,11 @@ dir over time): `history.jsonl`, `file-history/`, `shell-snapshots/`,
 
 - **None observed.** `~/.claude.json`'s `projects` map did not gain the probe
   workdir (checked programmatically after every run: `LEAK … : no`), the real
-  global CLAUDE.md/settings/skills/plugins never surfaced in probe output, and all
-  writes landed inside the override dir.
+  global CLAUDE.md/settings/skills/plugins never surfaced in probe output, and
+  every file the probes created appeared inside the override dir per the
+  before/after inventories. A direct before/after diff of `~/.claude` was not
+  taken (see Verdict for why), so that specific cross-check is not part of the
+  evidence.
 - **Auth gap (design-relevant, not an isolation break):** the keychain credential
   is not shared into override dirs. Impact on spec §3.2: profile creation needs a
   one-time credential seed step; ongoing sharing is a single-file link.

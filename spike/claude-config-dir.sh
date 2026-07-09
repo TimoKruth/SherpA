@@ -12,7 +12,8 @@
 # Auth: a fresh CLAUDE_CONFIG_DIR is NOT logged in (the macOS keychain entry is
 # ignored when the override is set). Run with SPIKE_COPY_CREDS=1 to seed the
 # temp dir with a .credentials.json extracted from the keychain (written
-# straight to file, never printed). Deleted together with the temp dir.
+# straight to file, never printed). Credential runs auto-delete the whole temp
+# dir on exit; only credential-free runs keep it for manual inspection.
 set -euo pipefail
 
 BASE="$(mktemp -d)"
@@ -21,6 +22,8 @@ WORK="$BASE/workdir"
 mkdir -p "$DIR" "$WORK"
 
 if [ "${SPIKE_COPY_CREDS:-0}" = "1" ]; then
+  # Live OAuth secret in plaintext — never leave it behind, even on error/^C.
+  trap 'rm -rf "$BASE"' EXIT INT TERM
   security find-generic-password -s "Claude Code-credentials" -w > "$DIR/.credentials.json"
   chmod 600 "$DIR/.credentials.json"
   echo "=== seeded $DIR/.credentials.json from keychain ($(wc -c < "$DIR/.credentials.json") bytes)"
@@ -106,5 +109,10 @@ print("LEAK to ~/.claude.json projects:", "YES" if leaked else "no")
 PYEOF
 fi
 
-echo; echo "config dir kept for manual inspection: $DIR"
-echo "delete with: rm -rf $BASE"
+echo
+if [ "${SPIKE_COPY_CREDS:-0}" = "1" ]; then
+  echo "credential run: temp dir $BASE is deleted automatically on exit"
+else
+  echo "config dir kept for manual inspection: $DIR"
+  echo "delete with: rm -rf $BASE"
+fi
