@@ -5,27 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"sherpa/internal/profile"
+	"sherpa/internal/stack"
 	"sherpa/internal/state"
 )
-
-// gitignoreContent is temporary; Task 5 replaces it with stack.GitignoreContent
-// (do not import internal/stack here yet - it doesn't exist until Task 5).
-const gitignoreContent = `*
-!/.gitignore
-!/stack.yaml
-!/README.md
-!/CHANGELOG.md
-!/CLAUDE.md
-!/settings.json
-!/keybindings.json
-!/quarantine.json
-!/skills/
-!/skills/**
-!/agents/
-!/agents/**
-!/hooks/
-!/hooks/**
-`
 
 func init() { register("init", cmdInit) }
 
@@ -46,7 +28,7 @@ func cmdInit(ctx *Ctx, args []string) error {
 		return fmt.Errorf("already initialized (profile 'mine' exists)")
 	}
 	dest := filepath.Join(ctx.Home, "profiles", "mine")
-	if err := profile.Import(claudeDir(), dest, gitignoreContent); err != nil {
+	if err := profile.Import(claudeDir(), dest, stack.GitignoreContent); err != nil {
 		return err
 	}
 	st.Profiles["mine"] = state.Profile{Name: "mine", Path: dest, Harness: "claude-code"}
