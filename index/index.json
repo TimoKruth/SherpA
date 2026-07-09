@@ -1,0 +1,37 @@
+{
+  "stacks": [
+    {
+      "ref": "@sherpa-examples/rust-reviewer-example",
+      "name": "rust-reviewer-example",
+      "owner": "@sherpa-examples",
+      "harness": "claude-code",
+      "summary": "Example placeholder stack for Rust review workflows.",
+      "tags": ["rust", "review", "example"],
+      "repo_url": "https://example.invalid/sherpa-examples/rust-reviewer-example.git",
+      "version": 1,
+      "forked_from": null
+    },
+    {
+      "ref": "@sherpa-examples/docs-editor-example",
+      "name": "docs-editor-example",
+      "owner": "@sherpa-examples",
+      "harness": "claude-code",
+      "summary": "Example placeholder stack for documentation editing sessions.",
+      "tags": ["docs", "writing", "example"],
+      "repo_url": "https://example.invalid/sherpa-examples/docs-editor-example.git",
+      "version": 1,
+      "forked_from": null
+    },
+    {
+      "ref": "@sherpa-examples/test-runner-example",
+      "name": "test-runner-example",
+      "owner": "@sherpa-examples",
+      "harness": "claude-code",
+      "summary": "Example placeholder stack for repeatable test and release checks.",
+      "tags": ["testing", "release", "example"],
+      "repo_url": "https://example.invalid/sherpa-examples/test-runner-example.git",
+      "version": 1,
+      "forked_from": "@sherpa-examples/base-example@v1"
+    }
+  ]
+}

@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sherpa Stack Index</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f6f2;
+      --panel: #ffffff;
+      --text: #1f2328;
+      --muted: #626b74;
+      --line: #d9ded7;
+      --accent: #0f766e;
+      --accent-strong: #0b5e59;
+      --tag: #e8f2ef;
+      --shadow: 0 10px 30px rgba(31, 35, 40, 0.08);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #151716;
+        --panel: #202321;
+        --text: #edf2ef;
+        --muted: #a4aea8;
+        --line: #343a36;
+        --accent: #5eead4;
+        --accent-strong: #99f6e4;
+        --tag: #173b36;
+        --shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1040px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 40px 0 56px;
+    }
+
+    header {
+      display: grid;
+      gap: 18px;
+      margin-bottom: 28px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2rem, 5vw, 4rem);
+      line-height: 0.98;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    label {
+      color: var(--muted);
+      font-size: 0.92rem;
+      font-weight: 650;
+    }
+
+    input {
+      flex: 1 1 280px;
+      min-width: 0;
+      height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 0 14px;
+      font: inherit;
+      box-shadow: var(--shadow);
+    }
+
+    input:focus {
+      outline: 3px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      border-color: var(--accent);
+    }
+
+    .status {
+      min-height: 24px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .error {
+      border: 1px solid color-mix(in srgb, #dc2626 45%, var(--line));
+      border-radius: 6px;
+      background: color-mix(in srgb, #dc2626 8%, var(--panel));
+      color: var(--text);
+      padding: 14px 16px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .topline {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+
+    .identity {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border-radius: 999px;
+      background: var(--tag);
+      color: var(--accent-strong);
+      padding: 2px 9px;
+      font-size: 0.78rem;
+      font-weight: 760;
+      white-space: nowrap;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 1.18rem;
+      line-height: 1.2;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .owner,
+    .version,
+    .provenance {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .summary {
+      margin: 0;
+      color: var(--text);
+    }
+
+    .meta {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+
+    .tags {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .tag {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 3px 9px;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    button {
+      min-height: 36px;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      background: var(--accent);
+      color: #ffffff;
+      padding: 0 12px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      button {
+        color: #06201d;
+      }
+    }
+
+    button:hover {
+      background: var(--accent-strong);
+      border-color: var(--accent-strong);
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.93em;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Sherpa Stack Index</h1>
+      <div class="toolbar">
+        <label for="query">Search claude-code stacks</label>
+        <input id="query" type="search" autocomplete="off" placeholder="name, summary, or tag">
+      </div>
+      <div id="status" class="status">Loading index...</div>
+    </header>
+    <section id="error" class="error" hidden></section>
+    <section id="results" class="grid" aria-live="polite"></section>
+  </main>
+
+  <script>
+    const supportedHarness = "claude-code";
+    const queryInput = document.querySelector("#query");
+    const statusEl = document.querySelector("#status");
+    const errorEl = document.querySelector("#error");
+    const resultsEl = document.querySelector("#results");
+    let stacks = [];
+
+    function matches(stack, query) {
+      if (stack.harness !== supportedHarness) return false;
+      if (!query) return true;
+      const q = query.toLowerCase();
+      return [stack.name, stack.summary, ...(stack.tags || [])]
+        .some(value => String(value || "").toLowerCase().includes(q));
+    }
+
+    function render() {
+      const query = queryInput.value.trim();
+      const filtered = stacks.filter(stack => matches(stack, query));
+      resultsEl.replaceChildren(...filtered.map(cardFor));
+      statusEl.textContent = filtered.length
+        ? `${filtered.length} stack${filtered.length === 1 ? "" : "s"} found`
+        : "no stacks found";
+    }
+
+    function cardFor(stack) {
+      const article = document.createElement("article");
+      article.className = "stack";
+
+      const top = document.createElement("div");
+      top.className = "topline";
+      const identity = document.createElement("div");
+      identity.className = "identity";
+      identity.append(badge(stack.harness), heading(stack.name), muted(stack.owner, "owner"));
+      top.append(identity, muted(`v${stack.version}`, "version"));
+
+      const summary = document.createElement("p");
+      summary.className = "summary";
+      summary.textContent = stack.summary || "";
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const tags = document.createElement("div");
+      tags.className = "tags";
+      (stack.tags || []).forEach(tag => tags.append(tagEl(tag)));
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.textContent = "Copy try command";
+      copy.addEventListener("click", async () => {
+        await copyText(`sherpa try ${stack.repo_url}`);
+        copy.textContent = "Copied";
+        setTimeout(() => copy.textContent = "Copy try command", 1200);
+      });
+      meta.append(tags, copy);
+
+      article.append(top, summary, meta);
+      if (stack.forked_from) {
+        const provenance = muted(`forked from ${stack.forked_from}`, "provenance");
+        article.append(provenance);
+      }
+      return article;
+    }
+
+    function heading(text) {
+      const h = document.createElement("h2");
+      h.textContent = text || "unnamed stack";
+      return h;
+    }
+
+    function badge(text) {
+      const span = document.createElement("span");
+      span.className = "badge";
+      span.textContent = text;
+      return span;
+    }
+
+    function muted(text, className) {
+      const span = document.createElement("span");
+      span.className = className;
+      span.textContent = text || "";
+      return span;
+    }
+
+    function tagEl(text) {
+      const span = document.createElement("span");
+      span.className = "tag";
+      span.textContent = text;
+      return span;
+    }
+
+    async function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.left = "-9999px";
+      document.body.append(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+
+    async function load() {
+      try {
+        const response = await fetch("../index.json");
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        const index = await response.json();
+        stacks = Array.isArray(index.stacks) ? index.stacks : [];
+        errorEl.hidden = true;
+        render();
+      } catch (error) {
+        statusEl.textContent = "index unavailable";
+        errorEl.hidden = false;
+        errorEl.innerHTML = "Could not load <code>../index.json</code>. If you opened this page with <code>file://</code>, run <code>python3 -m http.server</code> from the <code>index</code> directory and open <code>http://localhost:8000/site/</code>.";
+      }
+    }
+
+    queryInput.addEventListener("input", render);
+    load();
+  </script>
+</body>
+</html>
