@@ -159,6 +159,42 @@ func scanFile(root, rel string) ([]Finding, error) {
 	return findings, nil
 }
 
+// ScanPatch scans unified diff text and returns findings from added lines only.
+// Diff metadata and +++ file headers are skipped; findings are attributed to the
+// current diff target and use line 0 because git log patches may span history.
+func ScanPatch(patch string) ([]Finding, error) {
+	var findings []Finding
+	file := ""
+	scanner := bufio.NewScanner(strings.NewReader(patch))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "+++ ") {
+			file = diffTargetFile(strings.TrimSpace(strings.TrimPrefix(line, "+++ ")))
+			continue
+		}
+		if !strings.HasPrefix(line, "+") || strings.HasPrefix(line, "+++") {
+			continue
+		}
+		findings = append(findings, scanLine(file, 0, strings.TrimPrefix(line, "+"))...)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("sanitize: scan patch: %w", err)
+	}
+	return findings, nil
+}
+
+func diffTargetFile(target string) string {
+	switch {
+	case target == "/dev/null":
+		return ""
+	case strings.HasPrefix(target, "b/"):
+		return strings.TrimPrefix(target, "b/")
+	default:
+		return target
+	}
+}
+
 func scanLine(file string, lineNo int, line string) []Finding {
 	var matches []detectedValue
 	for _, d := range secretDetectors {

@@ -36,6 +36,11 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	if err != nil {
 		return fmt.Errorf("sanitize scan failed: %w", err)
 	}
+	historyFindings, err := scanPublishHistory(profile.Path, remote)
+	if err != nil {
+		return err
+	}
+	findings = append(findings, historyFindings...)
 	input := bufio.NewReader(ctx.Stdin)
 	if hasSecretFindings(findings) {
 		printFindings(ctx.Stderr, findings)
@@ -48,18 +53,21 @@ func cmdPublish(ctx *Ctx, args []string) error {
 		}
 	}
 
-	version, err := bumpStackVersion(profile.Path)
+	version, err := nextStackVersion(profile.Path)
 	if err != nil {
 		return err
 	}
-	if err := commitAll(profile.Path, fmt.Sprintf("sherpa: publish v%d", version)); err != nil {
-		return err
-	}
-
 	if err := showPublishDiff(ctx.Stdout, profile.Path); err != nil {
 		return err
 	}
-	if err := confirm(input, ctx.Stdout, fmt.Sprintf("Publish v%d to %s? Type yes to continue: ", version, remote)); err != nil {
+	if err := confirm(input, ctx.Stdout, fmt.Sprintf("publish version %d? (yes/no): ", version)); err != nil {
+		return err
+	}
+
+	if err := setStackVersion(profile.Path, version); err != nil {
+		return err
+	}
+	if err := commitAll(profile.Path, fmt.Sprintf("sherpa: publish v%d", version)); err != nil {
 		return err
 	}
 
@@ -114,6 +122,47 @@ func printFindings(w io.Writer, findings []sanitize.Finding) {
 	}
 }
 
+func scanPublishHistory(dir, remote string) ([]sanitize.Finding, error) {
+	rangeSpec, err := publishHistoryRange(dir, remote)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"log", "-p", rangeSpec}
+	patch, err := gitutil.Run(dir, args...)
+	if err != nil {
+		return nil, err
+	}
+	findings, err := sanitize.ScanPatch(patch)
+	if err != nil {
+		return nil, err
+	}
+	return findings, nil
+}
+
+func publishHistoryRange(dir, remote string) (string, error) {
+	out, err := gitutil.Run(dir, "ls-remote", remote, "main")
+	if err != nil {
+		return "", err
+	}
+	if sha := parseRemoteMainSHA(out); sha != "" {
+		return sha + "..local", nil
+	}
+	return "local", nil
+}
+
+func parseRemoteMainSHA(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[1] == "refs/heads/main" && fields[0] != "" {
+			return fields[0]
+		}
+	}
+	return ""
+}
+
 func confirm(in *bufio.Reader, out io.Writer, prompt string) error {
 	fmt.Fprint(out, prompt)
 	line, err := in.ReadString('\n')
@@ -127,6 +176,17 @@ func confirm(in *bufio.Reader, out io.Writer, prompt string) error {
 }
 
 func bumpStackVersion(dir string) (int, error) {
+	next, err := nextStackVersion(dir)
+	if err != nil {
+		return 0, err
+	}
+	if err := setStackVersion(dir, next); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+func nextStackVersion(dir string) (int, error) {
 	path := filepath.Join(dir, "stack.yaml")
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -161,26 +221,48 @@ func bumpStackVersion(dir string) (int, error) {
 		if seen[next] {
 			next = maxTag + 1
 		}
+		return next, nil
+	}
+	return 0, errors.New("stack.yaml: missing version")
+}
+
+func setStackVersion(dir string, version int) error {
+	path := filepath.Join(dir, "stack.yaml")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("stack.yaml: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return fmt.Errorf("stack.yaml: %w", err)
+	}
+	if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return errors.New("stack.yaml: expected mapping document")
+	}
+	mapping := doc.Content[0]
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key := mapping.Content[i]
+		value := mapping.Content[i+1]
+		if key.Value != "version" {
+			continue
+		}
 		value.Kind = yaml.ScalarNode
 		value.Tag = "!!int"
-		value.Value = strconv.Itoa(next)
+		value.Value = strconv.Itoa(version)
 		value.Style = 0
 		var out bytes.Buffer
 		enc := yaml.NewEncoder(&out)
 		enc.SetIndent(2)
 		if err := enc.Encode(&doc); err != nil {
 			enc.Close()
-			return 0, err
+			return err
 		}
 		if err := enc.Close(); err != nil {
-			return 0, err
+			return err
 		}
-		if err := os.WriteFile(path, out.Bytes(), 0o644); err != nil {
-			return 0, err
-		}
-		return next, nil
+		return os.WriteFile(path, out.Bytes(), 0o644)
 	}
-	return 0, errors.New("stack.yaml: missing version")
+	return errors.New("stack.yaml: missing version")
 }
 
 func showPublishDiff(w io.Writer, dir string) error {

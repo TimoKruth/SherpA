@@ -115,6 +115,39 @@ func TestMaskedExcerptsMaskEverySensitiveValueOnLine(t *testing.T) {
 	}
 }
 
+func TestScanPatchScansOnlyAddedLinesWithCurrentDiffTarget(t *testing.T) {
+	token := "ghp_" + strings.Repeat("x", 36)
+	patch := strings.Join([]string{
+		"diff --git a/CLAUDE.md b/CLAUDE.md",
+		"index 1111111..2222222 100644",
+		"--- a/CLAUDE.md",
+		"+++ b/CLAUDE.md",
+		"@@ -1,2 +1,2 @@",
+		"-removed " + token,
+		"+added " + token,
+		"diff --git a/README.md b/README.md",
+		"--- a/README.md",
+		"+++ b/README.md",
+		"@@ -1 +1 @@",
+		"+clean line",
+	}, "\n")
+
+	findings, err := ScanPatch(patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("findings = %+v, want one added-line finding", findings)
+	}
+	f := findings[0]
+	if f.File != "CLAUDE.md" || f.Line != 0 || f.Kind != "secret" {
+		t.Fatalf("finding = %+v, want CLAUDE.md line 0 secret", f)
+	}
+	if strings.Contains(f.Excerpt, token) {
+		t.Fatalf("excerpt leaked full token: %q", f.Excerpt)
+	}
+}
+
 func TestScanReturnsScannerErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "long.txt"), []byte(strings.Repeat("a", 1024*1024+1)), 0o600); err != nil {

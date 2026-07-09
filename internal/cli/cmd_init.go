@@ -29,6 +29,7 @@ func cmdInit(ctx *Ctx, args []string) error {
 	}
 	dest := filepath.Join(ctx.Home, "profiles", "mine")
 	if err := profile.Import(claudeDir(), dest, stack.GitignoreContent); err != nil {
+		os.RemoveAll(dest)
 		return err
 	}
 	st.Profiles["mine"] = state.Profile{Name: "mine", Path: dest, Harness: "claude-code"}

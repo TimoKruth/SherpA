@@ -245,12 +245,11 @@ func commitQuarantine(dir string) error {
 
 // enforceGitignore guarantees the installed stack carries the whitelist-style
 // .gitignore so untracked runtime state can never be committed. A stack that
-// already ships the whitelist form is left untouched.
+// already ships the exact canonical whitelist is left untouched.
 func enforceGitignore(dir string) error {
 	p := filepath.Join(dir, ".gitignore")
 	if b, err := os.ReadFile(p); err == nil {
-		s := string(b)
-		if strings.HasPrefix(strings.TrimSpace(s), "*") && strings.Contains(s, "!/stack.yaml") {
+		if string(b) == stack.GitignoreContent {
 			return nil
 		}
 	}

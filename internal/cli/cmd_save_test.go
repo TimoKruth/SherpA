@@ -170,6 +170,88 @@ func TestPublishSecretAbortIsNonzeroAndDoesNotPush(t *testing.T) {
 	}
 }
 
+func TestPublishScansCommittedSecretRemovedFromWorkingTree(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "history-secret-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "history-secret-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "history-secret-test")
+	token := "ghp_" + strings.Repeat("x", 36)
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# jane\n"+token+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "CLAUDE.md")
+	gitOut(t, dir, "-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "add secret")
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# jane\nclean again\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "CLAUDE.md")
+	gitOut(t, dir, "-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "remove secret")
+	if status := gitOut(t, dir, "status", "--porcelain"); status != "" {
+		t.Fatalf("fixture working tree not clean:\n%s", status)
+	}
+
+	remote := makeBareRepo(t)
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"publish", "--remote", remote}, &out, &errb); code == 0 {
+		t.Fatal("publish with a historical secret must fail")
+	}
+	if !strings.Contains(errb.String(), "secret") {
+		t.Fatalf("publish error did not mention secret findings: %q", errb.String())
+	}
+	if tag := gitOut(t, remote, "tag", "-l", "v2"); tag != "" {
+		t.Fatalf("blocked publish pushed tag %q", tag)
+	}
+	if refs := gitOut(t, remote, "for-each-ref", "--format=%(refname)"); refs != "" {
+		t.Fatalf("blocked publish pushed refs:\n%s", refs)
+	}
+}
+
+func TestPublishDeclineDoesNotBurnVersionOrCommit(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "decline-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "decline-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "decline-publish-test")
+	beforeHead := gitOut(t, dir, "rev-parse", "local")
+	beforeStack := gitOut(t, dir, "show", "local:stack.yaml")
+	remote := makeBareRepo(t)
+
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("no\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err == nil {
+		t.Fatal("declined publish must fail")
+	}
+	if !strings.Contains(out.String(), "publish version 2? (yes/no)") {
+		t.Fatalf("publish prompt did not name the pending version:\n%s", out.String())
+	}
+	afterHead := gitOut(t, dir, "rev-parse", "local")
+	if afterHead != beforeHead {
+		t.Fatalf("declined publish created a commit: before %s after %s", beforeHead, afterHead)
+	}
+	afterStackBytes, err := os.ReadFile(filepath.Join(dir, "stack.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterStackBytes) != beforeStack+"\n" && string(afterStackBytes) != beforeStack {
+		t.Fatalf("declined publish changed stack.yaml:\n%s", afterStackBytes)
+	}
+}
+
 func makeBareRepo(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "remote.git")

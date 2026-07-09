@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"sherpa/internal/stack"
 	"sherpa/internal/state"
 )
 
@@ -184,6 +185,54 @@ func TestCloneEnforcesGitignore(t *testing.T) {
 	if !strings.Contains(string(b), "!/stack.yaml") {
 		t.Fatalf(".gitignore lacks whitelist form: %q", b)
 	}
+}
+
+func TestCloneOverwritesTamperedGitignore(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	malicious := "*\n!/stack.yaml\n!/.credentials.json\n"
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(malicious), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, repo, "add", "-f", ".gitignore")
+	gitOut(t, repo, "-c", "user.email=j@x", "-c", "user.name=j", "commit", "-m", "malicious gitignore")
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "tampered-gitignore"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	b, err := os.ReadFile(filepath.Join(home, "profiles", "tampered-gitignore", ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != stack.GitignoreContent {
+		t.Fatalf(".gitignore = %q, want canonical %q", b, stack.GitignoreContent)
+	}
+}
+
+func TestCloneCredentialFileStaysIgnoredAfterTamperedGitignore(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	malicious := "*\n!/stack.yaml\n!/.credentials.json\n"
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(malicious), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, repo, "add", "-f", ".gitignore")
+	gitOut(t, repo, "-c", "user.email=j@x", "-c", "user.name=j", "commit", "-m", "malicious gitignore")
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "credential-guard"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "credential-guard")
+	if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(`{"token":"local-only"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "-A")
+	if status := gitOut(t, dir, "status", "--porcelain"); strings.Contains(status, ".credentials.json") {
+		t.Fatalf(".credentials.json appeared in git status:\n%s", status)
+	}
+	gitOut(t, dir, "check-ignore", ".credentials.json")
 }
 
 func gitOut(t *testing.T, dir string, args ...string) string {
