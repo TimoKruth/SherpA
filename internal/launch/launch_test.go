@@ -9,14 +9,14 @@ import (
 	"sherpa/internal/harness"
 )
 
-func TestClaudeLaunchesWithConfigDirAndLinksCreds(t *testing.T) {
+func TestLaunchLaunchesWithConfigDirAndLinksCreds(t *testing.T) {
 	profile, mine, outDir := t.TempDir(), t.TempDir(), t.TempDir()
 	os.WriteFile(filepath.Join(mine, ".credentials.json"), []byte("secret"), 0o600)
 	fake := filepath.Join(outDir, "claude")
 	os.WriteFile(fake, []byte("#!/bin/sh\necho \"$CLAUDE_CONFIG_DIR\" > "+outDir+"/env.txt\n"), 0o755)
 	t.Setenv("SHERPA_CLAUDE_BIN", fake)
 
-	err := Claude(profile, mine, []string{".credentials.json"}, nil, Stdio{})
+	err := Launch(harness.Default(), profile, mine, nil, Stdio{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,14 +30,14 @@ func TestClaudeLaunchesWithConfigDirAndLinksCreds(t *testing.T) {
 	}
 }
 
-func TestClaudeOverridesInheritedConfigDir(t *testing.T) {
+func TestLaunchOverridesInheritedConfigDir(t *testing.T) {
 	profile, mine, outDir := t.TempDir(), t.TempDir(), t.TempDir()
 	fake := filepath.Join(outDir, "claude")
 	os.WriteFile(fake, []byte("#!/bin/sh\necho \"$CLAUDE_CONFIG_DIR\" > "+outDir+"/env.txt\n"), 0o755)
 	t.Setenv("SHERPA_CLAUDE_BIN", fake)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
-	if err := Claude(profile, mine, nil, nil, Stdio{}); err != nil {
+	if err := Launch(harness.Default(), profile, mine, nil, Stdio{}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(filepath.Join(outDir, "env.txt"))
@@ -46,12 +46,12 @@ func TestClaudeOverridesInheritedConfigDir(t *testing.T) {
 	}
 }
 
-func TestClaudeNeverOverwritesExistingCred(t *testing.T) {
+func TestLaunchNeverOverwritesExistingCred(t *testing.T) {
 	profile, mine := t.TempDir(), t.TempDir()
 	os.WriteFile(filepath.Join(mine, ".credentials.json"), []byte("new"), 0o600)
 	os.WriteFile(filepath.Join(profile, ".credentials.json"), []byte("keep"), 0o600)
 	t.Setenv("SHERPA_CLAUDE_BIN", "/usr/bin/true")
-	Claude(profile, mine, []string{".credentials.json"}, nil, Stdio{})
+	Launch(harness.Default(), profile, mine, nil, Stdio{})
 	b, _ := os.ReadFile(filepath.Join(profile, ".credentials.json"))
 	if string(b) != "keep" {
 		t.Fatal("overwrote existing credential file")
@@ -81,8 +81,8 @@ func TestEnsureCredentialFileExportsFromKeychainWhenMissing(t *testing.T) {
 	mine := t.TempDir()
 	t.Setenv("SHERPA_SECURITY_BIN", fakeSecurity(t, "kc-secret", 0))
 
-	if err := EnsureCredentialFile(mine); err != nil {
-		t.Fatalf("EnsureCredentialFile: %v", err)
+	if err := harness.Default().PrepareBaselineCredentials(mine); err != nil {
+		t.Fatalf("PrepareBaselineCredentials: %v", err)
 	}
 	dst := filepath.Join(mine, ".credentials.json")
 	b, err := os.ReadFile(dst)
@@ -107,8 +107,8 @@ func TestEnsureCredentialFileNeverOverwritesExisting(t *testing.T) {
 	// Point at a fake that would export a different secret; it must not run.
 	t.Setenv("SHERPA_SECURITY_BIN", fakeSecurity(t, "kc-secret", 0))
 
-	if err := EnsureCredentialFile(mine); err != nil {
-		t.Fatalf("EnsureCredentialFile: %v", err)
+	if err := harness.Default().PrepareBaselineCredentials(mine); err != nil {
+		t.Fatalf("PrepareBaselineCredentials: %v", err)
 	}
 	b, _ := os.ReadFile(filepath.Join(mine, ".credentials.json"))
 	if string(b) != "keep" {
@@ -120,7 +120,7 @@ func TestEnsureCredentialFileReturnsErrorOnKeychainFailure(t *testing.T) {
 	mine := t.TempDir()
 	t.Setenv("SHERPA_SECURITY_BIN", fakeSecurity(t, "", 1))
 
-	err := EnsureCredentialFile(mine)
+	err := harness.Default().PrepareBaselineCredentials(mine)
 	if err == nil {
 		t.Fatal("expected error when keychain export fails")
 	}

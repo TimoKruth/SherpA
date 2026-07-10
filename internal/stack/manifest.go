@@ -55,15 +55,15 @@ func (m *Manifest) Validate(dir string, h harness.Harness) (violations []string)
 		violations = append(violations, fmt.Sprintf("harness %q not supported in phase 1 (claude-code only)", m.Harness))
 	}
 	declared := map[string]bool{}
-	for _, h := range m.Executes.Hooks {
-		clean := filepath.Clean(h.Path)
-		if h.Path == "" || !filepath.IsLocal(h.Path) || !strings.HasPrefix(filepath.ToSlash(clean), "hooks/") {
-			violations = append(violations, "hook path must be a local path under hooks/: "+h.Path)
+	for _, hook := range m.Executes.Hooks {
+		clean := filepath.Clean(hook.Path)
+		if hook.Path == "" || !filepath.IsLocal(hook.Path) || !strings.HasPrefix(filepath.ToSlash(clean), "hooks/") {
+			violations = append(violations, "hook path must be a local path under hooks/: "+hook.Path)
 			continue
 		}
 		declared[clean] = true
 		if _, err := os.Stat(filepath.Join(dir, clean)); err != nil {
-			violations = append(violations, "declared hook missing: "+h.Path)
+			violations = append(violations, "declared hook missing: "+hook.Path)
 		}
 	}
 	filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
