@@ -46,13 +46,18 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	}
 	findings = append(findings, historyFindings...)
 	// setup-state / OAuth must never be published (spec 2a §3.3). No override.
-	ss, err := sanitize.ScanSetupState(profile.Path)
+	// Tracked files are a subset of AllowedPaths: the canonical gitignore
+	// whitelist is stack.AllowedPaths, so scanning AllowedPaths covers exactly
+	// what publish pushes. Gitignored machine-local login/setup files are never
+	// pushed, so they must not block publish.
+	ss, err := sanitize.ScanSetupState(profile.Path, stack.AllowedPaths)
 	if err != nil {
 		return err
 	}
 	histSS := sanitize.ScanPatchSetupState(historyPatch)
 	if len(ss) > 0 || len(histSS) > 0 {
 		printFindings(ctx.Stderr, append(ss, histSS...))
+		fmt.Fprintln(ctx.Stderr, "machine-local login/setup files are gitignored and never published; if a tracked stack file contains login content, remove it before publishing.")
 		return fmt.Errorf("publish blocked: setup-state/login content must never be shared")
 	}
 	input := bufio.NewReader(ctx.Stdin)

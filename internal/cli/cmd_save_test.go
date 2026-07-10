@@ -136,6 +136,46 @@ func TestPublishSkipsFetchedUpstreamTagCollision(t *testing.T) {
 	}
 }
 
+func TestPublishAllowsGitignoredLocalLoginFiles(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "local-login-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "local-login-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "local-login-publish-test")
+	if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(`{"oauthAccount":{"id":"acct"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(`{"accessToken":"local-token"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# jane\n\nclean publish change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"save", "-m", "clean stack change"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+
+	remote := makeBareRepo(t)
+	out.Reset()
+	errb.Reset()
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err != nil {
+		t.Fatalf("publish with gitignored local login files failed: %s", errb.String())
+	}
+	if tag := gitOut(t, remote, "tag", "-l", "v2"); tag != "v2" {
+		t.Fatalf("remote tag = %q, want v2", tag)
+	}
+}
+
 func TestPublishSecretAbortIsNonzeroAndDoesNotPush(t *testing.T) {
 	home := setupHome(t)
 	repo := makeExpertRepo(t, true)
@@ -309,22 +349,23 @@ func TestPublishBlocksSetupStateOAuthAndDoesNotPush(t *testing.T) {
 		setup func(t *testing.T, dir string)
 	}{
 		{
-			name: "ignored setup state file",
+			name: "allowlisted oauth signature",
 			setup: func(t *testing.T, dir string) {
 				t.Helper()
-				if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(`{"oauthAccount":{"id":"acct"}}`), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# jane\n\nchanged\n"), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"note":"oauthAccount"}`), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			},
 		},
 		{
-			name: "allowlisted oauth signature",
+			name: "allowlisted setup state file",
 			setup: func(t *testing.T, dir string) {
 				t.Helper()
-				if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"note":"oauthAccount"}`), 0o644); err != nil {
+				skillsDir := filepath.Join(dir, "skills", "local")
+				if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(skillsDir, ".claude.json"), []byte(`{"theme":"dark"}`), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},

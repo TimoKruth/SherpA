@@ -25,10 +25,15 @@ func cmdProfile(ctx *Ctx, args []string) error {
 	if !ok {
 		return fmt.Errorf("unknown profile %q", name)
 	}
-	mine := st.Profiles["mine"]
+	mine, ok := st.Profiles["mine"]
+	if !ok {
+		return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
+	}
 	// Clear any seeded setup so the tool runs its own first-run flow.
-	rel, _, _ := harness.Default().Seed([]byte("{}")) // rel = target filename (".claude.json"); content ignored
-	_ = os.Remove(filepath.Join(p.Path, rel))
+	rel, _, err := harness.Default().Seed([]byte("{}")) // rel = target filename (".claude.json"); content ignored
+	if err == nil && rel != "" {
+		_ = os.Remove(filepath.Join(p.Path, rel))
+	}
 	if err := launch.EnsureCredentialFile(mine.Path); err != nil {
 		fmt.Fprintf(ctx.Stderr, "warning: could not prepare credentials (%v)\n", err)
 	}

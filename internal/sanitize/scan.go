@@ -91,35 +91,54 @@ func Scan(dir string, allowed []string) (findings []Finding, err error) {
 	return findings, nil
 }
 
-// ScanSetupState flags any setup-state file (by name) or any file whose content
-// carries an OAuth login signature. Fail-closed input to publish; Kind "setup-state".
-func ScanSetupState(dir string) ([]Finding, error) {
+// ScanSetupState flags any allowlisted setup-state file (by name) or allowlisted
+// file whose content carries an OAuth login signature. Fail-closed input to
+// publish; Kind "setup-state".
+func ScanSetupState(dir string, allowed []string) ([]Finding, error) {
 	var out []Finding
-	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+	seen := map[string]bool{}
+	for _, allowedPath := range allowed {
+		paths, err := expandAllowed(dir, allowedPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if info.IsDir() {
-			if info.Name() == ".git" {
-				return filepath.SkipDir
+		for _, rel := range paths {
+			if seen[rel] {
+				continue
 			}
-			return nil
+			seen[rel] = true
+			fileFindings, err := scanSetupStateFile(dir, rel)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, fileFindings...)
 		}
-		r, _ := filepath.Rel(dir, p)
-		if setupStateNames[info.Name()] {
-			out = append(out, Finding{File: r, Kind: "setup-state", Excerpt: info.Name()})
-			return nil
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].File != out[j].File {
+			return out[i].File < out[j].File
 		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return err
+		if out[i].Line != out[j].Line {
+			return out[i].Line < out[j].Line
 		}
-		if containsOAuthSig(string(b)) {
-			out = append(out, Finding{File: r, Kind: "setup-state", Excerpt: "oauth login signature"})
-		}
-		return nil
+		return out[i].Kind < out[j].Kind
 	})
-	return out, err
+	return out, nil
+}
+
+func scanSetupStateFile(root, rel string) ([]Finding, error) {
+	name := filepath.Base(filepath.FromSlash(rel))
+	if setupStateNames[name] {
+		return []Finding{{File: rel, Kind: "setup-state", Excerpt: name}}, nil
+	}
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		return nil, err
+	}
+	if containsOAuthSig(string(b)) {
+		return []Finding{{File: rel, Kind: "setup-state", Excerpt: "oauth login signature"}}, nil
+	}
+	return nil, nil
 }
 
 func ScanPatchSetupState(patch string) []Finding {

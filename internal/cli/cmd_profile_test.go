@@ -35,3 +35,56 @@ func TestProfileSetupRunsFresh(t *testing.T) {
 		t.Fatalf("profile setup changed active = %q", st.Active)
 	}
 }
+
+func TestProfileSetupWithoutMineDoesNotExportCredentialsToCwd(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SHERPA_HOME", home)
+	janeDir := filepath.Join(home, "profiles", "jane")
+	if err := os.MkdirAll(janeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Load(home)
+	st.Active = "jane"
+	st.Profiles["jane"] = state.Profile{Name: "jane", Path: janeDir, Origin: "https://x/jane.git", Harness: "claude-code"}
+	if err := st.Save(home); err != nil {
+		t.Fatal(err)
+	}
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	marker := filepath.Join(t.TempDir(), "security-called")
+	securityBin := filepath.Join(t.TempDir(), "security")
+	script := "#!/bin/sh\nprintf called > " + marker + "\nprintf '{\"accessToken\":\"real-token\"}'\n"
+	if err := os.WriteFile(securityBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHERPA_SECURITY_BIN", securityBin)
+	claudeBin, _ := fakeClaude(t)
+	t.Setenv("SHERPA_CLAUDE_BIN", claudeBin)
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"profile", "setup", "jane"}, &out, &errb); code == 0 {
+		t.Fatal("profile setup without mine must fail")
+	}
+	if !strings.Contains(errb.String(), "no `mine` profile") {
+		t.Fatalf("stderr = %q", errb.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("security export was reached; marker err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cwd, ".credentials.json")); !os.IsNotExist(err) {
+		t.Fatalf("cwd .credentials.json exists; err=%v", err)
+	}
+	err := filepath.WalkDir(home, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Name() == ".credentials.json" {
+			t.Fatalf("unexpected credential file under home: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

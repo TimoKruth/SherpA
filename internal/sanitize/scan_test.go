@@ -150,8 +150,11 @@ func TestScanPatchScansOnlyAddedLinesWithCurrentDiffTarget(t *testing.T) {
 
 func TestScanSetupStateFlagsFileByName(t *testing.T) {
 	d := t.TempDir()
-	os.WriteFile(filepath.Join(d, ".claude.json"), []byte(`{"x":1}`), 0o600)
-	f, err := ScanSetupState(d)
+	if err := os.MkdirAll(filepath.Join(d, "skills", "local"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(d, "skills", "local", ".claude.json"), []byte(`{"x":1}`), 0o600)
+	f, err := ScanSetupState(d, []string{"skills/"})
 	if err != nil || len(f) == 0 {
 		t.Fatalf("want setup-state finding, got %v err %v", f, err)
 	}
@@ -163,16 +166,30 @@ func TestScanSetupStateFlagsFileByName(t *testing.T) {
 func TestScanSetupStateFlagsOAuthContent(t *testing.T) {
 	d := t.TempDir()
 	os.WriteFile(filepath.Join(d, "settings.json"), []byte(`{"note":"has oauthAccount here"}`), 0o644)
-	f, _ := ScanSetupState(d)
+	f, _ := ScanSetupState(d, []string{"settings.json"})
 	if len(f) == 0 {
 		t.Fatal("want finding for oauth signature in a normal file")
+	}
+}
+
+func TestScanSetupStateSkipsNonAllowlistedLocalLoginFiles(t *testing.T) {
+	d := t.TempDir()
+	os.WriteFile(filepath.Join(d, ".claude.json"), []byte(`{"oauthAccount":{"id":"acct"}}`), 0o600)
+	os.WriteFile(filepath.Join(d, ".credentials.json"), []byte(`{"accessToken":"token"}`), 0o600)
+	os.WriteFile(filepath.Join(d, "settings.json"), []byte(`{"note":"clean"}`), 0o644)
+	f, err := ScanSetupState(d, []string{"settings.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f) != 0 {
+		t.Fatalf("non-allowlisted login files were scanned: %+v", f)
 	}
 }
 
 func TestScanSetupStateCleanDirNoFindings(t *testing.T) {
 	d := t.TempDir()
 	os.WriteFile(filepath.Join(d, "CLAUDE.md"), []byte("# ok"), 0o644)
-	f, _ := ScanSetupState(d)
+	f, _ := ScanSetupState(d, []string{"CLAUDE.md"})
 	if len(f) != 0 {
 		t.Fatalf("clean dir flagged: %v", f)
 	}
