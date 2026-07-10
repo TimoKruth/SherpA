@@ -32,8 +32,26 @@ behavior. Low risk, and it creates the clean seam 2b-ii plugs into.
 **2b-ii — Codex adapter (separate plan, after a spike).** A day-1 `CODEX_HOME` spike (like
 Phase 1's) empirically pins Codex's config-dir coverage, credential file, and global-
 instructions file. Then: the Codex adapter, `sherpa init --harness codex`, per-harness
-baseline, `manifest.Validate` accepting codex, and harness-aware `back`. 2b-ii's task-level
-plan is written after the spike, because accurate adapter tasks require verified internals.
+baseline (§6), `manifest.Validate` accepting codex, and harness-aware `back`. 2b-ii's
+task-level plan is written after the spike, because accurate adapter tasks require verified
+internals.
+
+**2b-ii carry-in checklist** (from the 2b-i whole-branch review — items that are behavior-
+identical while claude-code is the only harness but must be handled when codex registers):
+1. **`cmd_search` filter** (cmd_search.go) — filters on `harness.Default().Name()`; change to
+   registry membership (`harness.Names()`/`For`) or codex stacks silently vanish from search.
+2. **Empty-signature guard** (security) — add a registration-time guard or test that every
+   registered harness returns **non-empty** `SetupStateFilenames()` (and consciously documents
+   `LoginSignatures()`); an empty list would weaken that harness's publish barrier. The Codex
+   adapter must ship `auth.json` + its token signatures.
+3. **Stale claude-specific strings** — `manifest.go` violation text ("phase 1 (claude-code
+   only)"), `cmd_init.go` literal `"claude-code"` → `harness.Default().Name()`, and the
+   `cmd_run`/`cmd_try` credential warning "claude may ask you to log in" → harness-appropriate.
+4. **`TestCloneOverwritesTamperedGitignore`** — asserts `Default().GitignoreContent()`; switch
+   to `For(m.Harness)` once a second harness exists.
+5. **Rename `TestEnsureCredentialFile*`** tests (they now exercise `PrepareBaselineCredentials`).
+6. **Registry tripwire** (`registry_guard_test.go`) — consciously update `Names()` expectation
+   when registering codex. `Alias()`/`AllowedPaths()` gain their first real consumers in 2b-ii.
 
 ## 4. The generalized Harness interface (2b-i)
 
