@@ -79,3 +79,62 @@ func TestSetupStateSourcesDerivedFromConfigDir(t *testing.T) {
 		t.Fatalf("sources = %v, want [/tmp/x/.claude.json]", got)
 	}
 }
+
+func TestClaudeAdapterParity(t *testing.T) {
+	h := Default()
+	if h.ConfigDirEnv() != "CLAUDE_CONFIG_DIR" || h.LaunchBin() != "claude" || h.LaunchBinEnv() != "SHERPA_CLAUDE_BIN" {
+		t.Fatalf("launch identity drift: %q %q %q", h.ConfigDirEnv(), h.LaunchBin(), h.LaunchBinEnv())
+	}
+	if got := h.CredentialFiles(); len(got) != 1 || got[0] != ".credentials.json" {
+		t.Fatalf("cred files drift: %v", got)
+	}
+	if got := h.SetupStateFilenames(); len(got) != 2 || got[0] != ".claude.json" || got[1] != ".sherpa-setup.json" {
+		t.Fatalf("setup filenames drift: %v", got)
+	}
+	wantSigs := []string{"oauthAccount", "claudeAiOauth", `"accessToken"`, `"refreshToken"`}
+	if got := h.LoginSignatures(); !equalStrings(got, wantSigs) {
+		t.Fatalf("login sig drift: %v", got)
+	}
+	wantAllowed := []string{
+		"stack.yaml", "README.md", "CHANGELOG.md", "CLAUDE.md",
+		"settings.json", "keybindings.json", "quarantine.json",
+		"skills/", "agents/", "hooks/",
+	}
+	if got := h.AllowedPaths(); !equalStrings(got, wantAllowed) {
+		t.Fatalf("allowed paths drift: %v", got)
+	}
+	const wantGitignore = `*
+!/.gitignore
+!/stack.yaml
+!/README.md
+!/CHANGELOG.md
+!/CLAUDE.md
+!/settings.json
+!/keybindings.json
+!/quarantine.json
+!/skills/
+!/skills/**
+!/agents/
+!/agents/**
+!/hooks/
+!/hooks/**
+`
+	if got := h.GitignoreContent(); got != wantGitignore {
+		t.Fatalf("gitignore drift:\ngot:\n%q\nwant:\n%q", got, wantGitignore)
+	}
+	if h.DefaultConfigDir("/home/u") != "/home/u/.claude" {
+		t.Fatalf("config dir drift: %q", h.DefaultConfigDir("/home/u"))
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
