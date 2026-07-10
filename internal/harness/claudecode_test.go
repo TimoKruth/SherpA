@@ -42,6 +42,31 @@ func TestSeedKeepsIdentityStripsProjectsAndCaches(t *testing.T) {
 	}
 }
 
+func TestSeedDropsStructuredFamilyKeys(t *testing.T) {
+	raw := []byte(`{
+	  "mcpMigrationBackup": {"x": 1},
+	  "fooMigrationComplete": true,
+	  "oauthAccount": {"emailAddress": "me@example.com"},
+	  "hasSeenTasksHint": true
+	}`)
+	_, content, err := Default().Seed(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(content, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["mcpMigrationBackup"]; ok {
+		t.Fatal("expected structured family key mcpMigrationBackup dropped")
+	}
+	for _, keep := range []string{"fooMigrationComplete", "oauthAccount", "hasSeenTasksHint"} {
+		if _, ok := m[keep]; !ok {
+			t.Errorf("expected key %q kept", keep)
+		}
+	}
+}
+
 func TestSeedRejectsInvalidJSON(t *testing.T) {
 	if _, _, err := Default().Seed([]byte("{not json")); err == nil {
 		t.Fatal("want error on invalid setup json")

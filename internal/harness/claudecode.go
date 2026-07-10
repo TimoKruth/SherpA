@@ -45,6 +45,11 @@ func keepFamily(k string) bool {
 	return false
 }
 
+func isPrimitiveJSON(raw json.RawMessage) bool {
+	trimmed := strings.TrimLeft(string(raw), " \t\r\n")
+	return trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[')
+}
+
 func (ClaudeCode) Seed(captured []byte) (string, []byte, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(captured, &m); err != nil {
@@ -52,7 +57,7 @@ func (ClaudeCode) Seed(captured []byte) (string, []byte, error) {
 	}
 	out := map[string]json.RawMessage{}
 	for k, v := range m {
-		if keep[k] || keepFamily(k) {
+		if keep[k] || (keepFamily(k) && isPrimitiveJSON(v)) {
 			out[k] = v
 		}
 	}
