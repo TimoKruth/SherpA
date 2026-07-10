@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"sherpa/internal/harness"
 	"sherpa/internal/profile"
-	"sherpa/internal/stack"
 	"sherpa/internal/state"
 )
 
@@ -48,7 +47,7 @@ func cmdInit(ctx *Ctx, args []string) error {
 	if exists {
 		return fmt.Errorf("already initialized (profile 'mine' exists); use --refresh to re-capture setup state")
 	}
-	if err := profile.Import(claudeDir(), dest, stack.GitignoreContent); err != nil {
+	if err := profile.Import(claudeDir(), dest, harness.Default().GitignoreContent()); err != nil {
 		os.RemoveAll(dest)
 		return err
 	}

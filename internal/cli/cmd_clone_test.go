@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"sherpa/internal/stack"
+	"sherpa/internal/harness"
 	"sherpa/internal/state"
 )
 
@@ -205,8 +205,9 @@ func TestCloneOverwritesTamperedGitignore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != stack.GitignoreContent {
-		t.Fatalf(".gitignore = %q, want canonical %q", b, stack.GitignoreContent)
+	want := harness.Default().GitignoreContent()
+	if string(b) != want {
+		t.Fatalf(".gitignore = %q, want canonical %q", b, want)
 	}
 }
 

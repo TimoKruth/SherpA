@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"sherpa/internal/gitutil"
+	"sherpa/internal/harness"
 	"sherpa/internal/quarantine"
 	"sherpa/internal/review"
 	"sherpa/internal/stack"
@@ -84,6 +85,10 @@ func installStack(ctx *Ctx, url, name string) (*installResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	h, err := harness.For(m.Harness)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported harness %q: %w", m.Harness, err)
+	}
 	if name == "" {
 		name = m.Name
 	}
@@ -101,10 +106,10 @@ func installStack(ctx *Ctx, url, name string) (*installResult, error) {
 	if err := quarantine.Strip(staging); err != nil {
 		return nil, err
 	}
-	if violations := m.Validate(staging); len(violations) > 0 {
+	if violations := m.Validate(staging, h); len(violations) > 0 {
 		return nil, fmt.Errorf("stack failed validation:\n  - %s", strings.Join(violations, "\n  - "))
 	}
-	if err := enforceGitignore(staging); err != nil {
+	if err := enforceGitignore(staging, h); err != nil {
 		return nil, err
 	}
 
@@ -246,12 +251,12 @@ func commitQuarantine(dir string) error {
 // enforceGitignore guarantees the installed stack carries the whitelist-style
 // .gitignore so untracked runtime state can never be committed. A stack that
 // already ships the exact canonical whitelist is left untouched.
-func enforceGitignore(dir string) error {
+func enforceGitignore(dir string, h harness.Harness) error {
 	p := filepath.Join(dir, ".gitignore")
 	if b, err := os.ReadFile(p); err == nil {
-		if string(b) == stack.GitignoreContent {
+		if string(b) == h.GitignoreContent() {
 			return nil
 		}
 	}
-	return os.WriteFile(p, []byte(stack.GitignoreContent), 0o644)
+	return os.WriteFile(p, []byte(h.GitignoreContent()), 0o644)
 }
