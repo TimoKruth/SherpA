@@ -36,11 +36,25 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	if err != nil {
 		return fmt.Errorf("sanitize scan failed: %w", err)
 	}
-	historyFindings, err := scanPublishHistory(profile.Path, remote)
+	historyPatch, err := scanPublishHistoryPatch(profile.Path, remote)
+	if err != nil {
+		return err
+	}
+	historyFindings, err := sanitize.ScanPatch(historyPatch)
 	if err != nil {
 		return err
 	}
 	findings = append(findings, historyFindings...)
+	// setup-state / OAuth must never be published (spec 2a §3.3). No override.
+	ss, err := sanitize.ScanSetupState(profile.Path)
+	if err != nil {
+		return err
+	}
+	histSS := sanitize.ScanPatchSetupState(historyPatch)
+	if len(ss) > 0 || len(histSS) > 0 {
+		printFindings(ctx.Stderr, append(ss, histSS...))
+		return fmt.Errorf("publish blocked: setup-state/login content must never be shared")
+	}
 	input := bufio.NewReader(ctx.Stdin)
 	if hasSecretFindings(findings) {
 		printFindings(ctx.Stderr, findings)
@@ -122,21 +136,17 @@ func printFindings(w io.Writer, findings []sanitize.Finding) {
 	}
 }
 
-func scanPublishHistory(dir, remote string) ([]sanitize.Finding, error) {
+func scanPublishHistoryPatch(dir, remote string) (string, error) {
 	rangeSpec, err := publishHistoryRange(dir, remote)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	args := []string{"log", "-p", rangeSpec}
 	patch, err := gitutil.Run(dir, args...)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	findings, err := sanitize.ScanPatch(patch)
-	if err != nil {
-		return nil, err
-	}
-	return findings, nil
+	return patch, nil
 }
 
 func publishHistoryRange(dir, remote string) (string, error) {

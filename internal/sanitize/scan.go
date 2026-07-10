@@ -45,6 +45,18 @@ var (
 	minSecretScore = 4.0
 )
 
+var setupStateNames = map[string]bool{".claude.json": true, ".sherpa-setup.json": true}
+var oauthSignatures = []string{"oauthAccount", "claudeAiOauth", `"accessToken"`, `"refreshToken"`}
+
+func containsOAuthSig(s string) bool {
+	for _, sig := range oauthSignatures {
+		if strings.Contains(s, sig) {
+			return true
+		}
+	}
+	return false
+}
+
 // Scan scans allowlisted paths under dir and returns publish sanitizer findings.
 // Paths in allowed are relative to dir; entries ending in "/" are walked as
 // directories. Invalid, absolute, parent-traversing, and missing paths are skipped.
@@ -77,6 +89,54 @@ func Scan(dir string, allowed []string) (findings []Finding, err error) {
 		return findings[i].Kind < findings[j].Kind
 	})
 	return findings, nil
+}
+
+// ScanSetupState flags any setup-state file (by name) or any file whose content
+// carries an OAuth login signature. Fail-closed input to publish; Kind "setup-state".
+func ScanSetupState(dir string) ([]Finding, error) {
+	var out []Finding
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		r, _ := filepath.Rel(dir, p)
+		if setupStateNames[info.Name()] {
+			out = append(out, Finding{File: r, Kind: "setup-state", Excerpt: info.Name()})
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if containsOAuthSig(string(b)) {
+			out = append(out, Finding{File: r, Kind: "setup-state", Excerpt: "oauth login signature"})
+		}
+		return nil
+	})
+	return out, err
+}
+
+func ScanPatchSetupState(patch string) []Finding {
+	var out []Finding
+	for _, line := range strings.Split(patch, "\n") {
+		if strings.HasPrefix(line, "+++ ") {
+			name := filepath.Base(strings.TrimSpace(strings.TrimPrefix(line, "+++ b/")))
+			if setupStateNames[name] {
+				out = append(out, Finding{File: name, Kind: "setup-state", Excerpt: name})
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "+") && containsOAuthSig(line) {
+			out = append(out, Finding{Kind: "setup-state", Excerpt: "oauth login signature"})
+		}
+	}
+	return out
 }
 
 func expandAllowed(dir, allowedPath string) ([]string, error) {

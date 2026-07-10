@@ -215,6 +215,75 @@ func TestPublishScansCommittedSecretRemovedFromWorkingTree(t *testing.T) {
 	}
 }
 
+func TestPublishBlocksSetupStateOAuthAndDoesNotPush(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+	}{
+		{
+			name: "ignored setup state file",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, ".claude.json"), []byte(`{"oauthAccount":{"id":"acct"}}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# jane\n\nchanged\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "allowlisted oauth signature",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"note":"oauthAccount"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := setupHome(t)
+			repo := makeExpertRepo(t, true)
+			var out, errb bytes.Buffer
+			profileName := "setup-state-publish-test"
+			if code := Run([]string{"clone", repo, "--name", profileName}, &out, &errb); code != 0 {
+				t.Fatal(errb.String())
+			}
+			out.Reset()
+			errb.Reset()
+			if code := Run([]string{"use", profileName}, &out, &errb); code != 0 {
+				t.Fatal(errb.String())
+			}
+			dir := filepath.Join(home, "profiles", profileName)
+			tt.setup(t, dir)
+			out.Reset()
+			errb.Reset()
+			if code := Run([]string{"save", "-m", "setup-state fixture"}, &out, &errb); code != 0 {
+				t.Fatal(errb.String())
+			}
+
+			remote := makeBareRepo(t)
+			out.Reset()
+			errb.Reset()
+			if code := Run([]string{"publish", "--remote", remote}, &out, &errb); code == 0 {
+				t.Fatal("publish with setup-state/OAuth content must fail")
+			}
+			if !strings.Contains(errb.String(), "setup-state") {
+				t.Fatalf("publish error did not mention setup-state findings: %q", errb.String())
+			}
+			if tag := gitOut(t, remote, "tag", "-l", "v2"); tag != "" {
+				t.Fatalf("blocked publish pushed tag %q", tag)
+			}
+			if refs := gitOut(t, remote, "for-each-ref", "--format=%(refname)"); refs != "" {
+				t.Fatalf("blocked publish pushed refs:\n%s", refs)
+			}
+		})
+	}
+}
+
 func TestPublishDeclineDoesNotBurnVersionOrCommit(t *testing.T) {
 	home := setupHome(t)
 	repo := makeExpertRepo(t, true)

@@ -148,6 +148,43 @@ func TestScanPatchScansOnlyAddedLinesWithCurrentDiffTarget(t *testing.T) {
 	}
 }
 
+func TestScanSetupStateFlagsFileByName(t *testing.T) {
+	d := t.TempDir()
+	os.WriteFile(filepath.Join(d, ".claude.json"), []byte(`{"x":1}`), 0o600)
+	f, err := ScanSetupState(d)
+	if err != nil || len(f) == 0 {
+		t.Fatalf("want setup-state finding, got %v err %v", f, err)
+	}
+	if f[0].Kind != "setup-state" {
+		t.Fatalf("kind = %q", f[0].Kind)
+	}
+}
+
+func TestScanSetupStateFlagsOAuthContent(t *testing.T) {
+	d := t.TempDir()
+	os.WriteFile(filepath.Join(d, "settings.json"), []byte(`{"note":"has oauthAccount here"}`), 0o644)
+	f, _ := ScanSetupState(d)
+	if len(f) == 0 {
+		t.Fatal("want finding for oauth signature in a normal file")
+	}
+}
+
+func TestScanSetupStateCleanDirNoFindings(t *testing.T) {
+	d := t.TempDir()
+	os.WriteFile(filepath.Join(d, "CLAUDE.md"), []byte("# ok"), 0o644)
+	f, _ := ScanSetupState(d)
+	if len(f) != 0 {
+		t.Fatalf("clean dir flagged: %v", f)
+	}
+}
+
+func TestScanPatchSetupStateFlagsAddedOAuth(t *testing.T) {
+	patch := "+++ b/x.json\n+  \"accessToken\": \"zzz\"\n"
+	if len(ScanPatchSetupState(patch)) == 0 {
+		t.Fatal("want setup-state finding in patch")
+	}
+}
+
 func TestScanReturnsScannerErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "long.txt"), []byte(strings.Repeat("a", 1024*1024+1)), 0o600); err != nil {
