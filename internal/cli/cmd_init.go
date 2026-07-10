@@ -16,7 +16,7 @@ func claudeDir() string {
 		return d
 	}
 	u, _ := os.UserHomeDir()
-	return filepath.Join(u, ".claude")
+	return harness.Default().DefaultConfigDir(u)
 }
 
 func cmdInit(ctx *Ctx, args []string) error {

@@ -7,10 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sherpa/internal/harness"
 	"strings"
 )
-
-const supportedSearchHarness = "claude-code"
 
 func init() {
 	register("search", cmdSearch)
@@ -106,7 +105,7 @@ func searchStacks(stacks []indexStack, query string) []indexStack {
 	q := strings.ToLower(query)
 	var matches []indexStack
 	for _, stack := range stacks {
-		if stack.Harness != supportedSearchHarness {
+		if stack.Harness != harness.Default().Name() {
 			continue
 		}
 		if stackMatches(stack, q) {
