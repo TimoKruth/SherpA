@@ -41,7 +41,8 @@ plan is written after the spike, because accurate adapter tasks require verified
 package harness
 
 type Harness interface {
-    Name() string
+    Name() string                            // "claude-code" / "codex"
+    Alias() string                           // short user-facing tag: "claude" / "codex" (baseline naming §6)
 
     // Isolation + launch
     ConfigDirEnv() string                    // "CLAUDE_CONFIG_DIR" / "CODEX_HOME"
@@ -91,24 +92,42 @@ the harness they're handed.
   `h.LoginSignatures()` for the harness of the profile being published. The exact-pushed-set
   scan (`git ls-files`) is harness-agnostic and unchanged.
 
-## 6. The `mine` / baseline model with multiple harnesses (2b-ii — key decision)
+## 6. The `mine` / baseline model with multiple harnesses (2b-ii — decided 2026-07-10)
 
-Recommended (surfaced for approval): **one baseline profile per harness.**
-- `sherpa init` → claude-code baseline, named `mine` (unchanged, back-compat).
-- `sherpa init --harness codex` → a codex baseline, named `mine-codex` (a `--name` override is
-  allowed). Refuses if that harness's baseline already exists (use `--refresh`).
-- `state` gains `Baselines map[string]string` (harness → baseline profile name). `back` and
-  credential/setup seeding resolve the baseline for **the active profile's harness**, not a
-  hardcoded "mine". `back` on a codex profile returns to the codex baseline.
+**One baseline profile per harness, with the name kept unambiguous at all times** (user
+decision): while only one harness has a baseline it is simply `mine`; the instant a second
+harness is added, every baseline becomes harness-tagged so it is never unclear which `mine`
+is which.
+
+- **Harness alias**: each adapter exposes a short `Alias()` for user-facing names —
+  claude-code → `claude`, codex → `codex`.
+- `state` gains `Baselines map[string]string` (harness name → baseline profile name).
+- **Naming rule (dynamic):**
+  - First baseline ever created (any harness): named `mine`.
+  - Creating a baseline for a *second* harness triggers a rename: the existing lone `mine`
+    is renamed to `mine-<alias-of-its-harness>` **and** the new one is created as
+    `mine-<alias-of-new-harness>`. So with ≥2 harnesses, both are `mine-claude`,
+    `mine-codex`, etc. — never a bare `mine`.
+  - Any baseline created while ≥1 already exists is directly named `mine-<alias>`.
+  - Renaming updates the profile's state entry, the `Baselines` map, the `Active` pointer if
+    it referenced the renamed profile, and renames the on-disk `profiles/<name>` directory
+    (updating `state.Profile.Path`). It never rewrites the profile's git history.
+- `sherpa init` creates the claude-code baseline (default harness); `sherpa init --harness
+  codex` creates the codex baseline, applying the naming rule (renaming an existing lone
+  `mine` as needed). `--refresh` re-captures an existing baseline.
+- **`back` and credential/setup seeding resolve the baseline for the active profile's
+  harness** via `Baselines[active.Harness]`, never a hardcoded "mine". `back` on a codex
+  profile returns to the codex baseline.
 - A single global `Active` pointer is kept (Phase-1 model). `run`/`try` launch the active
-  profile under *its* harness. Rationale: you run Claude Code and Codex as separate tools;
-  the active pointer is "what SherpA launches next," and its harness is intrinsic to the
-  profile.
+  profile under *its* harness. Rationale: Claude Code and Codex are separate tools you run
+  separately; the active pointer is "what SherpA launches next," and its harness is intrinsic
+  to the profile.
+- Out of scope: renaming *back* to a bare `mine` when a harness is removed (there is no
+  remove-harness command yet); once tagged, baselines stay tagged.
 
-Alternative considered: a separate active pointer per harness. Rejected for 2b as
-over-engineered — one global active with harness-intrinsic profiles is simpler and the
-`Baselines` map already makes `back` correct. Revisit only if usage shows the single pointer
-is confusing.
+Alternative considered: a separate active pointer per harness. Rejected as over-engineered —
+one global active with harness-intrinsic profiles plus the `Baselines` map keeps `back`
+correct. Revisit only if usage shows the single pointer is confusing.
 
 ## 7. Codex adapter — hypothesis (2b-ii, pinned by the spike)
 
@@ -154,8 +173,10 @@ Provisional adapter (spike confirms/adjusts):
 ## 10. Decision log / open questions
 
 1. **Build order** (decided): 2b-i refactor (zero behavior change) → 2b-ii codex-after-spike.
-2. **Baseline model** (recommended, needs approval): one baseline per harness, `back` resolves
-   by active profile's harness via a `state.Baselines` map; single global active pointer.
+2. **Baseline model** (decided 2026-07-10, §6): one baseline per harness; a lone baseline is
+   `mine`, but adding a second harness renames both to `mine-<alias>` (`mine-claude`,
+   `mine-codex`) so it is never ambiguous which `mine` is which; `back` resolves by the active
+   profile's harness via `state.Baselines`; single global active pointer.
 3. **Codex setup-state** (spike-pinned): expected to be `auth.json`-only (credential link, no
    curated seed) — the spike confirms whether Codex has any `~/.claude.json`-analog to seed.
 4. **`config.toml` publishability** (decided): publishable stack file, sanitized by the

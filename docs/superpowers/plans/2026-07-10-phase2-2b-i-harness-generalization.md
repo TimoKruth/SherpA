@@ -38,6 +38,7 @@ Offline env: `GOFLAGS=-mod=mod GOPROXY=off GOCACHE=/private/tmp/sherpa-go-build`
 ```go
 type Harness interface {
     Name() string
+    Alias() string                              // short user-facing tag: "claude"; used by 2b-ii baseline naming
     // Isolation + launch
     ConfigDirEnv() string
     DefaultConfigDir(home string) string
@@ -151,6 +152,7 @@ func Names() []string {
 In `claudecode.go` add the methods, copying values from their current homes:
 
 ```go
+func (ClaudeCode) Alias() string         { return "claude" }
 func (ClaudeCode) ConfigDirEnv() string  { return "CLAUDE_CONFIG_DIR" }
 func (ClaudeCode) LaunchBin() string     { return "claude" }
 func (ClaudeCode) LaunchBinEnv() string  { return "SHERPA_CLAUDE_BIN" }
