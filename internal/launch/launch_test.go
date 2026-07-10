@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"sherpa/internal/harness"
 )
 
 func TestClaudeLaunchesWithConfigDirAndLinksCreds(t *testing.T) {
@@ -124,5 +126,42 @@ func TestEnsureCredentialFileReturnsErrorOnKeychainFailure(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(mine, ".credentials.json")); statErr == nil {
 		t.Fatal("must not write a credential file on failure")
+	}
+}
+
+func TestSeedSetupWritesCuratedWhenAbsent(t *testing.T) {
+	profile, mine := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(mine, ".sherpa-setup.json"),
+		[]byte(`{"hasCompletedOnboarding":true,"projects":{"x":1}}`), 0o600)
+	if err := SeedSetup(profile, mine, harness.Default()); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(profile, ".claude.json"))
+	if err != nil {
+		t.Fatal("seed not written")
+	}
+	if !strings.Contains(string(b), "hasCompletedOnboarding") || strings.Contains(string(b), "projects") {
+		t.Fatalf("seed not curated: %s", b)
+	}
+}
+
+func TestSeedSetupNeverOverwrites(t *testing.T) {
+	profile, mine := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(mine, ".sherpa-setup.json"), []byte(`{"theme":"dark"}`), 0o600)
+	os.WriteFile(filepath.Join(profile, ".claude.json"), []byte(`{"live":"state"}`), 0o600)
+	SeedSetup(profile, mine, harness.Default())
+	b, _ := os.ReadFile(filepath.Join(profile, ".claude.json"))
+	if string(b) != `{"live":"state"}` {
+		t.Fatalf("overwrote live state: %s", b)
+	}
+}
+
+func TestSeedSetupNoBlobNoop(t *testing.T) {
+	profile, mine := t.TempDir(), t.TempDir()
+	if err := SeedSetup(profile, mine, harness.Default()); err != nil {
+		t.Fatalf("want nil on missing blob, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(profile, ".claude.json")); err == nil {
+		t.Fatal("wrote a file with no blob to seed from")
 	}
 }

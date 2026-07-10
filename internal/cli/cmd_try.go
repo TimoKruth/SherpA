@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"sherpa/internal/harness"
 	"sherpa/internal/launch"
 	"sherpa/internal/review"
 	"sherpa/internal/stack"
@@ -20,6 +21,7 @@ type tryRequest struct {
 	target string
 	name   string
 	mode   review.Mode
+	fresh  bool
 }
 
 func cmdTry(ctx *Ctx, args []string) error {
@@ -64,6 +66,11 @@ func cmdTry(ctx *Ctx, args []string) error {
 	if len(approved) > 0 {
 		fmt.Fprintf(ctx.Stdout, "approved %d capabilities\n", len(approved))
 	}
+	if !req.fresh {
+		if err := launch.SeedSetup(profileDir, mine.Path, harness.Default()); err != nil {
+			fmt.Fprintf(ctx.Stderr, "warning: could not seed setup state (%v); tool may onboard\n", err)
+		}
+	}
 	if err := launch.EnsureCredentialFile(mine.Path); err != nil {
 		fmt.Fprintf(ctx.Stderr, "warning: could not prepare credentials (%v); claude may ask you to log in\n", err)
 	}
@@ -103,6 +110,8 @@ func parseTryArgs(args []string) (tryRequest, error) {
 				return req, err
 			}
 			req.mode = mode
+		case a == "--fresh-setup":
+			req.fresh = true
 		case strings.HasPrefix(a, "-"):
 			return req, fmt.Errorf("unknown flag %q", a)
 		case req.target == "":
@@ -112,7 +121,7 @@ func parseTryArgs(args []string) (tryRequest, error) {
 		}
 	}
 	if req.target == "" {
-		return req, fmt.Errorf("usage: sherpa try <git-url-or-profile> [--name <name>] [--review interactive|approve-all|keep] [--approve-all]")
+		return req, fmt.Errorf("usage: sherpa try <git-url-or-profile> [--name <name>] [--review interactive|approve-all|keep] [--approve-all] [--fresh-setup]")
 	}
 	return req, nil
 }

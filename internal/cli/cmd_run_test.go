@@ -87,3 +87,45 @@ func TestRunStillLaunchesWhenCredentialPrepFails(t *testing.T) {
 		t.Fatalf("expected a warning on stderr, got %q", errb.String())
 	}
 }
+
+func TestRunSeedsSetupUnlessFreshSetup(t *testing.T) {
+	_, mineDir, janeDir := setupRunHome(t)
+	os.WriteFile(filepath.Join(mineDir, ".credentials.json"), []byte("secret"), 0o600)
+	os.WriteFile(filepath.Join(mineDir, ".sherpa-setup.json"),
+		[]byte(`{"hasCompletedOnboarding":true,"projects":{"x":1}}`), 0o600)
+	bin, marker := fakeClaude(t)
+	t.Setenv("SHERPA_CLAUDE_BIN", bin)
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"run"}, &out, &errb); code != 0 {
+		t.Fatalf("run failed: %s", errb.String())
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("claude was not launched")
+	}
+	seed, err := os.ReadFile(filepath.Join(janeDir, ".claude.json"))
+	if err != nil {
+		t.Fatal("setup seed not written")
+	}
+	if !strings.Contains(string(seed), "hasCompletedOnboarding") || strings.Contains(string(seed), "projects") {
+		t.Fatalf("seed not curated: %s", seed)
+	}
+
+	_, freshMine, freshJane := setupRunHome(t)
+	os.WriteFile(filepath.Join(freshMine, ".credentials.json"), []byte("secret"), 0o600)
+	os.WriteFile(filepath.Join(freshMine, ".sherpa-setup.json"), []byte(`{"theme":"dark"}`), 0o600)
+	freshBin, freshMarker := fakeClaude(t)
+	t.Setenv("SHERPA_CLAUDE_BIN", freshBin)
+
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"run", "--fresh-setup"}, &out, &errb); code != 0 {
+		t.Fatalf("run --fresh-setup failed: %s", errb.String())
+	}
+	if _, err := os.Stat(freshMarker); err != nil {
+		t.Fatal("claude was not launched with --fresh-setup")
+	}
+	if _, err := os.Stat(filepath.Join(freshJane, ".claude.json")); err == nil {
+		t.Fatal("run --fresh-setup wrote setup seed")
+	}
+}

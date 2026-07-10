@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"sherpa/internal/harness"
 )
 
 // CredentialFiles: pinned to Task 1 spike findings — on macOS, auth under
@@ -51,6 +53,29 @@ func EnsureCredentialFile(mineDir string) error {
 		return fmt.Errorf("writing credential file: %w", err)
 	}
 	return nil
+}
+
+// SeedSetup writes a curated setup-state file into profileDir if it has none and
+// mine holds a captured blob. Never overwrites an existing profile file (live
+// runtime state wins). A missing blob is a no-op — the caller falls back to the
+// tool's own first-run onboarding.
+func SeedSetup(profileDir, mineDir string, h harness.Harness) error {
+	b, err := os.ReadFile(filepath.Join(mineDir, h.CapturedName()))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rel, content, err := h.Seed(b)
+	if err != nil {
+		return err
+	}
+	dst := filepath.Join(profileDir, rel)
+	if _, err := os.Stat(dst); err == nil {
+		return nil // never overwrite live state
+	}
+	return os.WriteFile(dst, content, 0o600)
 }
 
 func Claude(profileDir, mineDir string, credFiles []string, args []string, stdio Stdio) error {
