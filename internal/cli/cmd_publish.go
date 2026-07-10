@@ -32,7 +32,11 @@ func cmdPublish(ctx *Ctx, args []string) error {
 		return err
 	}
 
-	findings, err := sanitize.Scan(profile.Path, stack.AllowedPaths)
+	// Working-tree files that publish can commit and push are exactly
+	// AllowedPaths plus .gitignore: git add -A cannot stage other non-AllowedPaths
+	// content because the enforced whitelist ignores it.
+	scanPaths := append(append([]string{}, stack.AllowedPaths...), ".gitignore")
+	findings, err := sanitize.Scan(profile.Path, scanPaths)
 	if err != nil {
 		return fmt.Errorf("sanitize scan failed: %w", err)
 	}
@@ -46,11 +50,9 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	}
 	findings = append(findings, historyFindings...)
 	// setup-state / OAuth must never be published (spec 2a §3.3). No override.
-	// Tracked files are a subset of AllowedPaths: the canonical gitignore
-	// whitelist is stack.AllowedPaths, so scanning AllowedPaths covers exactly
-	// what publish pushes. Gitignored machine-local login/setup files are never
-	// pushed, so they must not block publish.
-	ss, err := sanitize.ScanSetupState(profile.Path, stack.AllowedPaths)
+	// scanPaths covers every tracked/pushable working-tree file publish pushes,
+	// including .gitignore as the only extra file git add -A can stage.
+	ss, err := sanitize.ScanSetupState(profile.Path, scanPaths)
 	if err != nil {
 		return err
 	}

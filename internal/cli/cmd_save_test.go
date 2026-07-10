@@ -176,6 +176,75 @@ func TestPublishAllowsGitignoredLocalLoginFiles(t *testing.T) {
 	}
 }
 
+func TestPublishBlocksUncommittedGitignoreSetupStateAndDoesNotPush(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "gitignore-setup-state-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "gitignore-setup-state-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "gitignore-setup-state-publish-test")
+	b, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), append(b, []byte("# oauthAccount\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := makeBareRepo(t)
+	out.Reset()
+	errb.Reset()
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\nyes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err == nil {
+		t.Fatal("publish with uncommitted .gitignore setup-state/OAuth content must fail")
+	}
+	if !strings.Contains(errb.String(), "setup-state") {
+		t.Fatalf("publish error did not mention setup-state findings: %q", errb.String())
+	}
+	assertRemoteStayedEmpty(t, remote)
+}
+
+func TestPublishBlocksUncommittedGitignoreSecretAndDoesNotPush(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "gitignore-secret-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "gitignore-secret-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "gitignore-secret-publish-test")
+	b, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "ghp_" + strings.Repeat("x", 36)
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), append(b, []byte("# "+token+"\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := makeBareRepo(t)
+	out.Reset()
+	errb.Reset()
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\nyes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err == nil {
+		t.Fatal("publish with uncommitted .gitignore secret content must fail")
+	}
+	if !strings.Contains(errb.String(), "secret") {
+		t.Fatalf("publish error did not mention secret findings: %q", errb.String())
+	}
+	assertRemoteStayedEmpty(t, remote)
+}
+
 func TestPublishSecretAbortIsNonzeroAndDoesNotPush(t *testing.T) {
 	home := setupHome(t)
 	repo := makeExpertRepo(t, true)
