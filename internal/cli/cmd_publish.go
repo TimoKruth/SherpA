@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"sherpa/internal/gitutil"
+	"sherpa/internal/harness"
 	"sherpa/internal/sanitize"
 
 	"gopkg.in/yaml.v3"
@@ -27,6 +28,10 @@ func cmdPublish(ctx *Ctx, args []string) error {
 		return err
 	}
 	profile, err := activeProfile(ctx)
+	if err != nil {
+		return err
+	}
+	h, err := harness.For(profile.Harness)
 	if err != nil {
 		return err
 	}
@@ -51,11 +56,11 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	}
 	findings = append(findings, historyFindings...)
 	// setup-state / OAuth must never be published (spec 2a §3.3). No override.
-	ss, err := sanitize.ScanSetupState(profile.Path, scanFiles)
+	ss, err := sanitize.ScanSetupState(profile.Path, scanFiles, h.SetupStateFilenames(), h.LoginSignatures())
 	if err != nil {
 		return err
 	}
-	histSS := sanitize.ScanPatchSetupState(historyPatch)
+	histSS := sanitize.ScanPatchSetupState(historyPatch, h.SetupStateFilenames(), h.LoginSignatures())
 	if len(ss) > 0 || len(histSS) > 0 {
 		printFindings(ctx.Stderr, append(ss, histSS...))
 		fmt.Fprintln(ctx.Stderr, "machine-local login/setup files are gitignored and never published; if a tracked stack file contains login content, remove it before publishing.")

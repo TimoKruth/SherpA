@@ -8,6 +8,9 @@ import (
 	"testing"
 )
 
+var claudeSetupStateNames = []string{".claude.json", ".sherpa-setup.json"}
+var claudeLoginSignatures = []string{"oauthAccount", "claudeAiOauth", `"accessToken"`, `"refreshToken"`}
+
 func TestScanFindsEveryPlantedSecret(t *testing.T) {
 	dir := filepath.Join("testdata", "secrets-stack")
 	findings, err := Scan(dir, []string{"settings.json", "CLAUDE.md"})
@@ -154,7 +157,7 @@ func TestScanSetupStateFlagsFileByName(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(d, "skills", "local", ".claude.json"), []byte(`{"x":1}`), 0o600)
-	f, err := ScanSetupState(d, []string{"skills/"})
+	f, err := ScanSetupState(d, []string{"skills/"}, claudeSetupStateNames, claudeLoginSignatures)
 	if err != nil || len(f) == 0 {
 		t.Fatalf("want setup-state finding, got %v err %v", f, err)
 	}
@@ -166,7 +169,7 @@ func TestScanSetupStateFlagsFileByName(t *testing.T) {
 func TestScanSetupStateFlagsOAuthContent(t *testing.T) {
 	d := t.TempDir()
 	os.WriteFile(filepath.Join(d, "settings.json"), []byte(`{"note":"has oauthAccount here"}`), 0o644)
-	f, _ := ScanSetupState(d, []string{"settings.json"})
+	f, _ := ScanSetupState(d, []string{"settings.json"}, claudeSetupStateNames, claudeLoginSignatures)
 	if len(f) == 0 {
 		t.Fatal("want finding for oauth signature in a normal file")
 	}
@@ -177,7 +180,7 @@ func TestScanSetupStateSkipsNonAllowlistedLocalLoginFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(d, ".claude.json"), []byte(`{"oauthAccount":{"id":"acct"}}`), 0o600)
 	os.WriteFile(filepath.Join(d, ".credentials.json"), []byte(`{"accessToken":"token"}`), 0o600)
 	os.WriteFile(filepath.Join(d, "settings.json"), []byte(`{"note":"clean"}`), 0o644)
-	f, err := ScanSetupState(d, []string{"settings.json"})
+	f, err := ScanSetupState(d, []string{"settings.json"}, claudeSetupStateNames, claudeLoginSignatures)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +192,7 @@ func TestScanSetupStateSkipsNonAllowlistedLocalLoginFiles(t *testing.T) {
 func TestScanSetupStateCleanDirNoFindings(t *testing.T) {
 	d := t.TempDir()
 	os.WriteFile(filepath.Join(d, "CLAUDE.md"), []byte("# ok"), 0o644)
-	f, _ := ScanSetupState(d, []string{"CLAUDE.md"})
+	f, _ := ScanSetupState(d, []string{"CLAUDE.md"}, claudeSetupStateNames, claudeLoginSignatures)
 	if len(f) != 0 {
 		t.Fatalf("clean dir flagged: %v", f)
 	}
@@ -197,14 +200,14 @@ func TestScanSetupStateCleanDirNoFindings(t *testing.T) {
 
 func TestScanPatchSetupStateFlagsAddedOAuth(t *testing.T) {
 	patch := "+++ b/x.json\n+  \"accessToken\": \"zzz\"\n"
-	if len(ScanPatchSetupState(patch)) == 0 {
+	if len(ScanPatchSetupState(patch, claudeSetupStateNames, claudeLoginSignatures)) == 0 {
 		t.Fatal("want setup-state finding in patch")
 	}
 }
 
 func TestScanPatchSetupStateFlagsQuotedSetupStatePath(t *testing.T) {
 	patch := "+++ \"b/dir-\\303\\274/.claude.json\"\n+{}\n"
-	if len(ScanPatchSetupState(patch)) == 0 {
+	if len(ScanPatchSetupState(patch, claudeSetupStateNames, claudeLoginSignatures)) == 0 {
 		t.Fatal("want setup-state finding for quoted patch path")
 	}
 }

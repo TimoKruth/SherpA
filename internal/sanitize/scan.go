@@ -45,11 +45,8 @@ var (
 	minSecretScore = 4.0
 )
 
-var setupStateNames = map[string]bool{".claude.json": true, ".sherpa-setup.json": true}
-var oauthSignatures = []string{"oauthAccount", "claudeAiOauth", `"accessToken"`, `"refreshToken"`}
-
-func containsOAuthSig(s string) bool {
-	for _, sig := range oauthSignatures {
+func containsOAuthSig(s string, loginSigs []string) bool {
+	for _, sig := range loginSigs {
 		if strings.Contains(s, sig) {
 			return true
 		}
@@ -94,9 +91,13 @@ func Scan(dir string, allowed []string) (findings []Finding, err error) {
 // ScanSetupState flags any allowlisted setup-state file (by name) or allowlisted
 // file whose content carries an OAuth login signature. Fail-closed input to
 // publish; Kind "setup-state".
-func ScanSetupState(dir string, allowed []string) ([]Finding, error) {
+func ScanSetupState(dir string, allowed, setupNames, loginSigs []string) ([]Finding, error) {
 	var out []Finding
 	seen := map[string]bool{}
+	setupStateNames := map[string]bool{}
+	for _, name := range setupNames {
+		setupStateNames[name] = true
+	}
 	for _, allowedPath := range allowed {
 		paths, err := expandAllowed(dir, allowedPath)
 		if err != nil {
@@ -107,7 +108,7 @@ func ScanSetupState(dir string, allowed []string) ([]Finding, error) {
 				continue
 			}
 			seen[rel] = true
-			fileFindings, err := scanSetupStateFile(dir, rel)
+			fileFindings, err := scanSetupStateFile(dir, rel, setupStateNames, loginSigs)
 			if err != nil {
 				return nil, err
 			}
@@ -126,7 +127,7 @@ func ScanSetupState(dir string, allowed []string) ([]Finding, error) {
 	return out, nil
 }
 
-func scanSetupStateFile(root, rel string) ([]Finding, error) {
+func scanSetupStateFile(root, rel string, setupStateNames map[string]bool, loginSigs []string) ([]Finding, error) {
 	name := filepath.Base(filepath.FromSlash(rel))
 	if setupStateNames[name] {
 		return []Finding{{File: rel, Kind: "setup-state", Excerpt: name}}, nil
@@ -135,14 +136,18 @@ func scanSetupStateFile(root, rel string) ([]Finding, error) {
 	if err != nil {
 		return nil, err
 	}
-	if containsOAuthSig(string(b)) {
+	if containsOAuthSig(string(b), loginSigs) {
 		return []Finding{{File: rel, Kind: "setup-state", Excerpt: "oauth login signature"}}, nil
 	}
 	return nil, nil
 }
 
-func ScanPatchSetupState(patch string) []Finding {
+func ScanPatchSetupState(patch string, setupNames, loginSigs []string) []Finding {
 	var out []Finding
+	setupStateNames := map[string]bool{}
+	for _, name := range setupNames {
+		setupStateNames[name] = true
+	}
 	for _, line := range strings.Split(patch, "\n") {
 		if strings.HasPrefix(line, "+++ ") {
 			path := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
@@ -155,7 +160,7 @@ func ScanPatchSetupState(patch string) []Finding {
 			}
 			continue
 		}
-		if strings.HasPrefix(line, "+") && containsOAuthSig(line) {
+		if strings.HasPrefix(line, "+") && containsOAuthSig(line, loginSigs) {
 			out = append(out, Finding{Kind: "setup-state", Excerpt: "oauth login signature"})
 		}
 	}
