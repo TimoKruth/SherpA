@@ -119,18 +119,30 @@ can never reach a published stack:
    `stack.GitignoreContent` does not un-ignore them. (Phase-1 already made `enforceGitignore`
    always write the canonical whitelist, so an author cannot tamper the gitignore to
    un-ignore them — that hole is already closed.)
-2. **Publish hard-block (new).** `sherpa publish` fails closed if any of these appear in the
-   files it would push: a file named `.claude.json` or `.sherpa-setup.json` (any directory),
-   OR content matching an OAuth/login signature (`oauthAccount`, `claudeAiOauth`,
-   `accessToken`/`refreshToken` keys). This is a dedicated check, not reliant on the generic
-   secret scanner, and has **no override flag**. It runs over both the working tree and the
-   pushed history range (reusing the Phase-1 history scan).
+2. **Publish hard-block (new).** `sherpa publish` fails closed if a setup-state filename
+   (`.claude.json` / `.sherpa-setup.json`) OR an OAuth/login signature (`oauthAccount`,
+   `claudeAiOauth`, `accessToken`/`refreshToken`) appears in **the content publish would
+   actually push** — i.e. scoped to `stack.AllowedPaths` in the working tree, plus the pushed
+   history range (`git log -m -p`, merge commits included). It is a dedicated check, not the
+   generic secret scanner, with **no override flag**.
+   *Scoping (corrected after 2a whole-branch review):* the working-tree scan is scoped to
+   `AllowedPaths`, not the whole profile tree. `tracked ⊆ AllowedPaths` (the canonical
+   gitignore whitelist equals `AllowedPaths`), so this covers exactly what gets pushed;
+   gitignored machine-local files (the profile's live `.claude.json`, linked
+   `.credentials.json`, `.sherpa-setup.json`) are never pushed and therefore must **not**
+   block publish — otherwise every launched profile would be permanently unpublishable,
+   breaking the fork-publish flow (parent spec §3.3). The block message includes a
+   remediation hint that machine-local login files are gitignored and never published.
 3. **Credential/setup files are 0600 and untracked by construction** — `save`'s `git add -A`
    cannot stage them because the gitignore excludes them (barrier 1); barrier 2 is the
-   backstop if barriers 1 and the enforcement ever regress.
+   backstop against a *tracked* file (e.g. a stack that ships `skills/x/.claude.json`, which
+   `!/skills/**` would track — caught because `skills/` is in `AllowedPaths`).
 
-Test that a profile which has been launched (so it has a live `.claude.json` with a real-ish
-oauth structure) **cannot** publish — publish must abort citing the setup-state block, and
+Tests: (a) a launched profile — with a gitignored live `.claude.json` (oauth) and linked
+`.credentials.json` — **can** publish its stack (remote gets the tag): the fork-publish flow
+works. (b) An OAuth signature in a **tracked** allowlisted file (e.g. `settings.json`), or a
+tracked `.claude.json` under `skills/`, **cannot** publish — abort citing the setup-state
+block, and
 the remote must receive nothing.
 
 ### 3.4 `--fresh-setup`
