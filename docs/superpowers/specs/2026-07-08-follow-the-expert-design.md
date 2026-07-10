@@ -235,6 +235,60 @@ it means *never touched*; for vault-managed tools it means *always restorable to
 byte*. The vault also doubles as permanent personal-config backup/history independent of
 any stack activity. Out of scope until the profile-based core is proven.
 
+### 3.7 Machine-local setup state — inherit login & defaults (Phase 2)
+
+**Problem found in Phase 1 field testing (2026-07-09).** A profile is meant to differ from
+`mine` only in its *stack* (instructions, skills, agents, settings) — not in who you're
+logged in as or whether the tool thinks it has been set up. But launching a fresh profile
+under `CLAUDE_CONFIG_DIR` forced a **full re-login and re-onboarding** (theme, first-run
+flow) every time. Credential linking (§3.2) was working; the gap is elsewhere.
+
+**Root cause.** Claude Code splits its per-user state across two locations: the config
+*directory* (`~/.claude/` — settings, skills, agents, hooks) **and a sibling state file
+`~/.claude.json`** (in `$HOME`, *next to* the directory, not inside it). That file holds the
+setup/identity layer: `hasCompletedOnboarding`, `oauthAccount`, `userID`, `machineID`,
+`installMethod`, theme, dismissed callouts, and per-tool migration flags — plus a `projects`
+map of per-project trust, MCP approvals, and history. Because `sherpa init` imports the
+*directory*, it never captured `~/.claude.json`; and because a profile's config dir has no
+`.claude.json`, Claude runs first-run onboarding and writes a brand-new identity there.
+
+**The three-layer profile model** (this section makes the §3.2 tracked-vs-runtime split
+explicit as three layers):
+
+1. **Stack layer** — git-tracked, allowlisted, publishable. The expert's setup.
+2. **Machine-local setup layer** — untracked, never published, **inherited from `mine`**:
+   credentials (already done) *plus* the setup/identity state that makes the tool feel
+   already-configured. New in Phase 2.
+3. **Runtime state** — ephemeral per-profile (history, caches, per-session files). Ignored.
+
+**Fix design (Phase 2).**
+- `sherpa init` additionally captures the harness's setup-state file(s) — for Claude Code,
+  `~/.claude.json` — into `mine` as machine-local (untracked, gitignored, never published,
+  same class as `.credentials.json`).
+- On launch, if a profile lacks its setup-state file, SherpA **seeds a curated copy** from
+  `mine`: carry the identity/onboarding/preferences keys, but **strip `projects`** (per-
+  project trust, MCP approvals, and history) and volatile caches. Rationale: keeping
+  `projects` would both bloat every profile and, more importantly, let per-project MCP
+  approvals bypass the stack quarantine model (§3.5). Accepted minor cost: the first run in
+  a given repo under a new profile re-shows the project-trust prompt. The seed is a
+  whitelist of keys, not a blind copy, so unknown future keys default to *not* inherited.
+- Never write back into `mine`'s captured `.claude.json` from a profile session — `mine`
+  stays sacred; its setup snapshot is refreshed only by an explicit `sherpa init --refresh`.
+
+**Optional full fresh setup (Phase 2, opt-in).** Inheriting is the default, but a start can
+deliberately opt out and run the tool's own first-run setup inside the isolated profile —
+`sherpa try --fresh-setup` (and a persistent `sherpa profile setup <name>`). Use cases:
+logging in as a *different account* per expert, testing an expert's onboarding, or a
+clean-room trial. This reuses the isolation guarantee: a fresh setup in a profile never
+touches `mine` or the real config, and `sherpa back` still reverts instantly.
+
+**Harness generalization.** "Machine-local setup state" is a per-harness concept, so it
+belongs in the harness adapter (§10.5, Phase 3+): each adapter declares (a) which files are
+setup/identity state to inherit (Claude Code: `~/.claude.json` minus `projects`; Codex:
+`~/.codex/auth.json` + non-project config defaults; Gemini: its equivalents), (b) the
+key-level curation policy, and (c) how to trigger a fresh setup. The default-inherit /
+opt-in-fresh behavior is uniform across harnesses; only the file list and curation differ.
+
 ## 4. System components
 
 ```
@@ -402,10 +456,14 @@ No backend, no accounts, no notifications yet. *Success criterion: a stranger cl
 expert setup, works with it for a day, and reverts or keeps it — with zero damage to
 their own config.*
 
-**Phase 2 — Registry + website + follows + Codex:** search API, stack pages with rendered
-contents and diffs, OAuth, follow + notifications, scan pipeline, MCP server, trial
-journal — and the **second harness: Codex CLI** (`CODEX_HOME` profiles), following fast
-per the 2026-07-08 decision. Website follows Phase 1 shortly; hosted on Railway.
+**Phase 2 — Registry + website + follows + Codex + setup-state inheritance:** search API,
+stack pages with rendered contents and diffs, OAuth, follow + notifications, scan pipeline,
+MCP server, trial journal; the **second harness: Codex CLI** (`CODEX_HOME` profiles),
+following fast per the 2026-07-08 decision; and **machine-local setup-state inheritance
+(§3.7)** — inherit login/onboarding/defaults from `mine` by default, with an opt-in
+`--fresh-setup`. This last item is a Phase-1 field-test finding (re-login on every profile
+launch) and is the highest-priority near-term profile fix. Website follows Phase 1 shortly;
+hosted on Railway.
 
 **Phase 3 — Trust, evaluation, more harnesses:** verified experts, community benchmark
 suites, keep-rate ranking, fork-lineage graphs, `sherpa compare` automation, **sandboxed
@@ -414,7 +472,9 @@ try-mode** (`--sandboxed`, opt-in for risk-averse users), opening to further har
 bootstrapped on GitHub.
 
 **Phase 4 — Config Vault:** transactional management of GUI-based tools (§3.6), making
-"reset the actual global setup" solid for every tool, not just env-var CLIs.
+"reset the actual global setup" solid for every tool, not just env-var CLIs. The
+per-harness setup-state adapter (§3.7) generalizes here: each managed tool declares its
+setup/identity files, curation policy, and fresh-setup trigger.
 
 ## 9. Testing strategy
 
