@@ -141,7 +141,7 @@ func scanPublishHistoryPatch(dir, remote string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	args := []string{"log", "-p", rangeSpec}
+	args := []string{"log", "-m", "-p", rangeSpec}
 	patch, err := gitutil.Run(dir, args...)
 	if err != nil {
 		return "", err

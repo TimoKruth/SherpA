@@ -185,6 +185,13 @@ func TestScanPatchSetupStateFlagsAddedOAuth(t *testing.T) {
 	}
 }
 
+func TestScanPatchSetupStateFlagsQuotedSetupStatePath(t *testing.T) {
+	patch := "+++ \"b/dir-\\303\\274/.claude.json\"\n+{}\n"
+	if len(ScanPatchSetupState(patch)) == 0 {
+		t.Fatal("want setup-state finding for quoted patch path")
+	}
+}
+
 func TestScanReturnsScannerErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "long.txt"), []byte(strings.Repeat("a", 1024*1024+1)), 0o600); err != nil {

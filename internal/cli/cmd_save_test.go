@@ -215,6 +215,94 @@ func TestPublishScansCommittedSecretRemovedFromWorkingTree(t *testing.T) {
 	}
 }
 
+func TestPublishScansHistoricalSetupStateRemovedFromWorkingTree(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "history-setup-state-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "history-setup-state-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "history-setup-state-test")
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"note":"oauthAccount"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "settings.json")
+	gitOut(t, dir, "-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "add oauth setup state")
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"note":"clean"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "settings.json")
+	gitOut(t, dir, "-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "remove oauth setup state")
+	if status := gitOut(t, dir, "status", "--porcelain"); status != "" {
+		t.Fatalf("fixture working tree not clean:\n%s", status)
+	}
+
+	remote := makeBareRepo(t)
+	out.Reset()
+	errb.Reset()
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\nyes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err == nil {
+		t.Fatal("publish with historical setup-state/OAuth content must fail")
+	}
+	if !strings.Contains(errb.String(), "setup-state") {
+		t.Fatalf("publish error did not mention setup-state findings: %q", errb.String())
+	}
+	assertRemoteStayedEmpty(t, remote)
+}
+
+func TestPublishScansMergeCommitSetupStateRemovedFromWorkingTree(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "merge-setup-state-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "merge-setup-state-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "merge-setup-state-test")
+	gitOut(t, dir, "checkout", "-b", "side")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("side branch change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "README.md")
+	gitOut(t, dir, "-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "side change")
+	gitOut(t, dir, "checkout", "local")
+	gitOut(t, dir, "merge", "--no-ff", "--no-commit", "side")
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"note":"oauthAccount"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "settings.json")
+	gitOut(t, dir, "-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "merge with oauth setup state")
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"note":"clean"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "settings.json")
+	gitOut(t, dir, "-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "remove merge oauth setup state")
+	if status := gitOut(t, dir, "status", "--porcelain"); status != "" {
+		t.Fatalf("fixture working tree not clean:\n%s", status)
+	}
+
+	remote := makeBareRepo(t)
+	out.Reset()
+	errb.Reset()
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\nyes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err == nil {
+		t.Fatal("publish with merge-commit setup-state/OAuth content must fail")
+	}
+	if !strings.Contains(errb.String(), "setup-state") {
+		t.Fatalf("publish error did not mention setup-state findings: %q", errb.String())
+	}
+	assertRemoteStayedEmpty(t, remote)
+}
+
 func TestPublishBlocksSetupStateOAuthAndDoesNotPush(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -328,4 +416,14 @@ func makeBareRepo(t *testing.T) string {
 		t.Fatalf("git init --bare: %s", out)
 	}
 	return dir
+}
+
+func assertRemoteStayedEmpty(t *testing.T, remote string) {
+	t.Helper()
+	if tag := gitOut(t, remote, "tag", "-l", "v2"); tag != "" {
+		t.Fatalf("blocked publish pushed tag %q", tag)
+	}
+	if refs := gitOut(t, remote, "for-each-ref", "--format=%(refname)"); refs != "" {
+		t.Fatalf("blocked publish pushed refs:\n%s", refs)
+	}
 }

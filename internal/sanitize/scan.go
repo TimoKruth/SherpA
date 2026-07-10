@@ -126,7 +126,11 @@ func ScanPatchSetupState(patch string) []Finding {
 	var out []Finding
 	for _, line := range strings.Split(patch, "\n") {
 		if strings.HasPrefix(line, "+++ ") {
-			name := filepath.Base(strings.TrimSpace(strings.TrimPrefix(line, "+++ b/")))
+			path := strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
+			if strings.HasPrefix(path, "\"") && strings.HasSuffix(path, "\"") {
+				path = strings.TrimSuffix(strings.TrimPrefix(path, "\""), "\"")
+			}
+			name := filepath.Base(strings.TrimPrefix(path, "b/"))
 			if setupStateNames[name] {
 				out = append(out, Finding{File: name, Kind: "setup-state", Excerpt: name})
 			}
