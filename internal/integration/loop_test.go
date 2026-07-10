@@ -34,6 +34,9 @@ func TestFullPhase1Loop(t *testing.T) {
 	if err := writeFile(filepath.Join(claudeDir, ".credentials.json"), "credential-copy\n", 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := writeFile(claudeDir+".json", `{"hasCompletedOnboarding":true,"theme":"dark","projects":{"/tmp/project":{"trust":true}}}`+"\n", 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	repo := makeExpertRepo(t, root)
 	fakeClaude, marker := makeFakeClaude(t, root)
@@ -81,6 +84,26 @@ func TestFullPhase1Loop(t *testing.T) {
 		}
 		if st := loadState(t, home); st.Active != "mine" {
 			t.Fatalf("try changed active profile to %q", st.Active)
+		}
+		assertCuratedSetupSeed(t, filepath.Join(expertDir, ".claude.json"))
+
+		secondName := "expert-loop-two"
+		secondDir := filepath.Join(home, "profiles", secondName)
+		out, errb, code = runCLI(t, nil, "clone", repo, "--name", secondName, "--review=approve-all")
+		if code != 0 {
+			t.Fatalf("clone second profile failed: %s\nstdout:\n%s", errb, out)
+		}
+		out, errb, code = runCLI(t, nil, "try", secondName)
+		if code != 0 {
+			t.Fatalf("try second profile failed: %s\nstdout:\n%s", errb, out)
+		}
+		assertCuratedSetupSeed(t, filepath.Join(expertDir, ".claude.json"))
+		assertCuratedSetupSeed(t, filepath.Join(secondDir, ".claude.json"))
+		if st := loadState(t, home); st.Active != "mine" {
+			t.Fatalf("second try changed active profile to %q", st.Active)
+		}
+		if err := os.Remove(filepath.Join(expertDir, ".claude.json")); err != nil {
+			t.Fatal(err)
 		}
 	})
 
@@ -356,6 +379,17 @@ func assertCleanGit(t *testing.T, dir string) {
 	t.Helper()
 	if status := git(t, dir, "status", "--porcelain"); status != "" {
 		t.Fatalf("git tree dirty in %s:\n%s", dir, status)
+	}
+}
+
+func assertCuratedSetupSeed(t *testing.T, path string) {
+	t.Helper()
+	setup := readFile(t, path)
+	if !strings.Contains(setup, "hasCompletedOnboarding") {
+		t.Fatalf("setup seed missing onboarding marker:\n%s", setup)
+	}
+	if strings.Contains(setup, "projects") {
+		t.Fatalf("setup seed leaked projects:\n%s", setup)
 	}
 }
 
