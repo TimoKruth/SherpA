@@ -13,7 +13,6 @@ import (
 
 	"sherpa/internal/gitutil"
 	"sherpa/internal/sanitize"
-	"sherpa/internal/stack"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,11 +31,13 @@ func cmdPublish(ctx *Ctx, args []string) error {
 		return err
 	}
 
-	// Working-tree files that publish can commit and push are exactly
-	// AllowedPaths plus .gitignore: git add -A cannot stage other non-AllowedPaths
-	// content because the enforced whitelist ignores it.
-	scanPaths := append(append([]string{}, stack.AllowedPaths...), ".gitignore")
-	findings, err := sanitize.Scan(profile.Path, scanPaths)
+	// Scan the exact set git will push (ls-files cached+others-not-ignored), so
+	// completeness does not depend on any tracked-subset-of-AllowedPaths assumption.
+	scanFiles, err := publishScanFiles(profile.Path)
+	if err != nil {
+		return err
+	}
+	findings, err := sanitize.Scan(profile.Path, scanFiles)
 	if err != nil {
 		return fmt.Errorf("sanitize scan failed: %w", err)
 	}
@@ -50,9 +51,7 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	}
 	findings = append(findings, historyFindings...)
 	// setup-state / OAuth must never be published (spec 2a §3.3). No override.
-	// scanPaths covers every tracked/pushable working-tree file publish pushes,
-	// including .gitignore as the only extra file git add -A can stage.
-	ss, err := sanitize.ScanSetupState(profile.Path, scanPaths)
+	ss, err := sanitize.ScanSetupState(profile.Path, scanFiles)
 	if err != nil {
 		return err
 	}
@@ -101,6 +100,21 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	}
 	fmt.Fprintf(ctx.Stdout, "published %s to %s\n", tag, remote)
 	return nil
+}
+
+func publishScanFiles(dir string) ([]string, error) {
+	out, err := gitutil.Run(dir, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, file := range strings.Split(out, "\x00") {
+		if file == "" {
+			continue
+		}
+		files = append(files, file)
+	}
+	return files, nil
 }
 
 func parsePublishArgs(args []string) (string, error) {

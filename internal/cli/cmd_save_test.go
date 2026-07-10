@@ -245,6 +245,77 @@ func TestPublishBlocksUncommittedGitignoreSecretAndDoesNotPush(t *testing.T) {
 	assertRemoteStayedEmpty(t, remote)
 }
 
+func TestPublishBlocksTrackedOutsideAllowlistSetupStateAndDoesNotPush(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "outside-allowlist-setup-state-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "outside-allowlist-setup-state-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "outside-allowlist-setup-state-publish-test")
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("clean note\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "-f", "notes.txt")
+	gitOut(t, dir, "-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "track outside allowlist note")
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("oauthAccount\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := makeBareRepo(t)
+	out.Reset()
+	errb.Reset()
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\nyes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err == nil {
+		t.Fatal("publish with tracked outside-allowlist setup-state/OAuth content must fail")
+	}
+	if !strings.Contains(errb.String(), "setup-state") {
+		t.Fatalf("publish error did not mention setup-state findings: %q", errb.String())
+	}
+	assertRemoteStayedEmpty(t, remote)
+}
+
+func TestPublishBlocksTrackedOutsideAllowlistSecretAndDoesNotPush(t *testing.T) {
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "outside-allowlist-secret-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "outside-allowlist-secret-publish-test"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "outside-allowlist-secret-publish-test")
+	token := "ghp_" + strings.Repeat("x", 36)
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("clean note\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, dir, "add", "-f", "notes.txt")
+	gitOut(t, dir, "-c", "user.email=sherpa@local", "-c", "user.name=sherpa", "-c", "commit.gpgsign=false", "commit", "-m", "track outside allowlist note")
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte(token+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := makeBareRepo(t)
+	out.Reset()
+	errb.Reset()
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\nyes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err == nil {
+		t.Fatal("publish with tracked outside-allowlist secret content must fail")
+	}
+	if !strings.Contains(errb.String(), "secret") {
+		t.Fatalf("publish error did not mention secret findings: %q", errb.String())
+	}
+	assertRemoteStayedEmpty(t, remote)
+}
+
 func TestPublishSecretAbortIsNonzeroAndDoesNotPush(t *testing.T) {
 	home := setupHome(t)
 	repo := makeExpertRepo(t, true)
