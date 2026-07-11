@@ -158,6 +158,66 @@ func TestInitCodexRenamesLoneClaudeMineAndCreatesTaggedBaseline(t *testing.T) {
 	}
 }
 
+func TestInitRollbackRestoresLoneMineAfterSecondHarnessSaveFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SHERPA_HOME", home)
+	claudeDir := fixtureConfigDir(t, "claude", map[string]string{
+		"CLAUDE.md": "# claude\n",
+	})
+	codexDir := fixtureConfigDir(t, "codex", map[string]string{
+		"AGENTS.md": "# codex\n",
+		"auth.json": `{"tokens":{"access_token":"fixture"}}`,
+	})
+	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", codexDir)
+	os.WriteFile(claudeDir+".json", []byte(`{"hasCompletedOnboarding":true}`), 0o600)
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	if err := os.MkdirAll(filepath.Join(home, "state.json.tmp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"init", "--harness", "codex"}, &out, &errb); code == 0 {
+		t.Fatal("second-harness init must fail when final state save fails")
+	}
+	if _, err := os.Stat(filepath.Join(home, "profiles", "mine", "CLAUDE.md")); err != nil {
+		t.Fatalf("rollback did not restore profiles/mine: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "profiles", "mine-claude")); !os.IsNotExist(err) {
+		t.Fatalf("rollback left profiles/mine-claude behind: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "profiles", "mine-codex")); !os.IsNotExist(err) {
+		t.Fatalf("rollback left profiles/mine-codex behind: %v", err)
+	}
+
+	if err := os.RemoveAll(filepath.Join(home, "state.json.tmp")); err != nil {
+		t.Fatal(err)
+	}
+	st := loadTestState(t, home)
+	if st.Active != "mine" {
+		t.Fatalf("Active = %q, want mine", st.Active)
+	}
+	if got := st.Baselines["claude-code"]; got != "mine" {
+		t.Fatalf("Baselines[claude-code] = %q, want mine (all baselines: %#v)", got, st.Baselines)
+	}
+	if _, ok := st.Baselines["codex"]; ok {
+		t.Fatalf("codex baseline recorded despite rollback: %#v", st.Baselines)
+	}
+	if _, ok := st.Profiles["mine"]; !ok {
+		t.Fatalf("state lost mine profile: %#v", st.Profiles)
+	}
+	if _, ok := st.Profiles["mine-codex"]; ok {
+		t.Fatalf("state recorded mine-codex despite rollback: %#v", st.Profiles)
+	}
+	if _, ok := st.Profiles["mine-claude"]; ok {
+		t.Fatalf("state recorded mine-claude despite rollback: %#v", st.Profiles)
+	}
+}
+
 func TestInitExistingCodexBaselineRequiresRefresh(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("SHERPA_HOME", home)

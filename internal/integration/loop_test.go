@@ -208,6 +208,114 @@ func TestFullPhase1Loop(t *testing.T) {
 	})
 }
 
+func TestCodexHarnessRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "sherpa-home")
+	claudeDir := filepath.Join(root, "real-claude")
+	codexDir := filepath.Join(root, "real-codex")
+	t.Setenv("SHERPA_HOME", home)
+	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", codexDir)
+	t.Setenv("SHERPA_SECURITY_BIN", "/usr/bin/false")
+
+	if err := writeFile(filepath.Join(claudeDir, "CLAUDE.md"), "claude baseline\n", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(claudeDir, ".credentials.json"), "claude-credential\n", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(claudeDir+".json", `{"hasCompletedOnboarding":true}`+"\n", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(codexDir, "AGENTS.md"), "codex baseline\n", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(codexDir, "config.toml"), "model = \"gpt-5-codex\"\n", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(codexDir, "auth.json"), `{"tokens":{"access_token":"baseline-token"}}`+"\n", 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeCodex, codexMarker := makeFakeCodex(t, root)
+	t.Setenv("SHERPA_CODEX_BIN", fakeCodex)
+	t.Setenv("SHERPA_FAKE_CODEX_MARKER", codexMarker)
+
+	if out, errb, code := runCLI(t, nil, "init"); code != 0 {
+		t.Fatalf("claude init failed: %s\nstdout:\n%s", errb, out)
+	}
+	if out, errb, code := runCLI(t, nil, "init", "--harness", "codex"); code != 0 {
+		t.Fatalf("codex init failed: %s\nstdout:\n%s", errb, out)
+	}
+
+	st := loadState(t, home)
+	if _, ok := st.Profiles["mine"]; ok {
+		t.Fatalf("bare mine should have been renamed after codex init: %#v", st.Profiles)
+	}
+	if st.Active != "mine-claude" {
+		t.Fatalf("Active = %q, want mine-claude", st.Active)
+	}
+	if got := st.Baselines["claude-code"]; got != "mine-claude" {
+		t.Fatalf("claude baseline = %q, want mine-claude (all baselines: %#v)", got, st.Baselines)
+	}
+	if got := st.Baselines["codex"]; got != "mine-codex" {
+		t.Fatalf("codex baseline = %q, want mine-codex (all baselines: %#v)", got, st.Baselines)
+	}
+
+	repo := makeCodexExpertRepo(t, root)
+	profileName := "codex-loop"
+	profileDir := filepath.Join(home, "profiles", profileName)
+	if out, errb, code := runCLI(t, nil, "clone", repo, "--name", profileName, "--review=approve-all"); code != 0 {
+		t.Fatalf("codex clone failed: %s\nstdout:\n%s", errb, out)
+	}
+	if st := loadState(t, home); st.Active != "mine-claude" {
+		t.Fatalf("clone changed active profile to %q", st.Active)
+	}
+
+	if out, errb, code := runCLI(t, nil, "try", profileName); code != 0 {
+		t.Fatalf("codex try failed: %s\nstdout:\n%s", errb, out)
+	}
+	if got := strings.TrimSpace(readFile(t, codexMarker)); got != profileDir {
+		t.Fatalf("CODEX_HOME = %q, want %q", got, profileDir)
+	}
+	if got := readFile(t, filepath.Join(profileDir, "auth.json")); !strings.Contains(got, "baseline-token") {
+		t.Fatalf("codex credentials were not linked from baseline:\n%s", got)
+	}
+
+	if out, errb, code := runCLI(t, nil, "use", profileName); code != 0 {
+		t.Fatalf("use codex profile failed: %s\nstdout:\n%s", errb, out)
+	}
+	if out, errb, code := runCLI(t, nil, "back"); code != 0 {
+		t.Fatalf("back from codex profile failed: %s\nstdout:\n%s", errb, out)
+	}
+	if st := loadState(t, home); st.Active != "mine-codex" {
+		t.Fatalf("back active = %q, want mine-codex", st.Active)
+	}
+
+	if out, errb, code := runCLI(t, nil, "use", profileName); code != 0 {
+		t.Fatalf("use codex profile for publish barrier failed: %s\nstdout:\n%s", errb, out)
+	}
+	if err := writeFile(filepath.Join(profileDir, "auth.json"), `{"tokens":{"access_token":"must-not-publish"}}`+"\n", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, profileDir, "add", "-f", "auth.json")
+	if out, errb, code := runCLI(t, nil, "save", "-m", "track codex auth fixture"); code != 0 {
+		t.Fatalf("save tracked auth fixture failed: %s\nstdout:\n%s", errb, out)
+	}
+	remote := filepath.Join(root, "codex-fork.git")
+	gitRaw(t, "init", "--bare", remote)
+	out, errb, code := runCLI(t, "yes\nyes\n", "publish", "--remote", remote)
+	if code == 0 {
+		t.Fatalf("publish with tracked codex auth.json unexpectedly succeeded:\n%s", out)
+	}
+	if !strings.Contains(errb, "setup-state") && !strings.Contains(errb, "login") {
+		t.Fatalf("publish error did not mention setup-state/login barrier:\n%s", errb)
+	}
+	if refs := gitRaw(t, "--git-dir", remote, "for-each-ref", "--format=%(refname)"); refs != "" {
+		t.Fatalf("blocked codex publish pushed refs:\n%s", refs)
+	}
+}
+
 type snapshotEntry struct {
 	mode    os.FileMode
 	content []byte
@@ -313,6 +421,35 @@ executes:
 	return repo
 }
 
+func makeCodexExpertRepo(t *testing.T, root string) string {
+	t.Helper()
+	repo := filepath.Join(root, "codex-expert")
+	files := map[string]string{
+		"stack.yaml": `name: codex-loop
+owner: "@codex-expert"
+version: 1
+harness: codex
+summary: Codex integration fixture
+`,
+		"README.md":              "codex expert stack\n",
+		"CHANGELOG.md":           "# Changelog\n\n## v1\n\n- initial\n",
+		"AGENTS.md":              "codex expert instructions\n",
+		"config.toml":            "model = \"gpt-5-codex\"\n",
+		"rules/style.md":         "prefer direct answers\n",
+		"skills/review/SKILL.md": "codex review skill\n",
+	}
+	for name, content := range files {
+		if err := writeFile(filepath.Join(repo, name), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(t, repo, "init", "-b", "main")
+	git(t, repo, "add", "-A")
+	git(t, repo, "-c", "user.email=codex.invalid", "-c", "user.name=codex", "-c", "commit.gpgsign=false", "commit", "-m", "v1")
+	git(t, repo, "tag", "v1")
+	return repo
+}
+
 func publishUpstream(t *testing.T, repo, tag, msg string, files map[string]string) {
 	t.Helper()
 	for name, content := range files {
@@ -331,6 +468,18 @@ func makeFakeClaude(t *testing.T, root string) (bin, marker string) {
 	bin = filepath.Join(dir, "claude")
 	marker = filepath.Join(dir, "claude-config-dir.txt")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$CLAUDE_CONFIG_DIR\" > \"$SHERPA_FAKE_CLAUDE_MARKER\"\n"
+	if err := writeFile(bin, script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin, marker
+}
+
+func makeFakeCodex(t *testing.T, root string) (bin, marker string) {
+	t.Helper()
+	dir := filepath.Join(root, "fake-bin")
+	bin = filepath.Join(dir, "codex")
+	marker = filepath.Join(dir, "codex-home.txt")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$CODEX_HOME\" > \"$SHERPA_FAKE_CODEX_MARKER\"\n"
 	if err := writeFile(bin, script, 0o755); err != nil {
 		t.Fatal(err)
 	}

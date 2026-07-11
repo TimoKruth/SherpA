@@ -205,7 +205,13 @@ func TestCloneOverwritesTamperedGitignore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := harness.Default().GitignoreContent()
+	st, _ := state.Load(home)
+	m := st.Profiles["tampered-gitignore"]
+	h, err := harness.For(m.Harness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := h.GitignoreContent()
 	if string(b) != want {
 		t.Fatalf(".gitignore = %q, want canonical %q", b, want)
 	}

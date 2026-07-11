@@ -77,7 +77,7 @@ func fakeSecurity(t *testing.T, secret string, exitCode int) string {
 	return path
 }
 
-func TestEnsureCredentialFileExportsFromKeychainWhenMissing(t *testing.T) {
+func TestPrepareBaselineCredentialsExportsFromKeychainWhenMissing(t *testing.T) {
 	mine := t.TempDir()
 	t.Setenv("SHERPA_SECURITY_BIN", fakeSecurity(t, "kc-secret", 0))
 
@@ -101,7 +101,7 @@ func TestEnsureCredentialFileExportsFromKeychainWhenMissing(t *testing.T) {
 	}
 }
 
-func TestEnsureCredentialFileNeverOverwritesExisting(t *testing.T) {
+func TestPrepareBaselineCredentialsNeverOverwritesExisting(t *testing.T) {
 	mine := t.TempDir()
 	os.WriteFile(filepath.Join(mine, ".credentials.json"), []byte("keep"), 0o600)
 	// Point at a fake that would export a different secret; it must not run.
@@ -116,7 +116,7 @@ func TestEnsureCredentialFileNeverOverwritesExisting(t *testing.T) {
 	}
 }
 
-func TestEnsureCredentialFileReturnsErrorOnKeychainFailure(t *testing.T) {
+func TestPrepareBaselineCredentialsReturnsErrorOnKeychainFailure(t *testing.T) {
 	mine := t.TempDir()
 	t.Setenv("SHERPA_SECURITY_BIN", fakeSecurity(t, "", 1))
 
