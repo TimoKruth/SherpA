@@ -23,7 +23,7 @@ type Harness interface {
 	LoginSignatures() []string
 }
 
-var registry = map[string]Harness{"claude-code": ClaudeCode{}}
+var registry = map[string]Harness{"claude-code": ClaudeCode{}, "codex": Codex{}}
 
 func For(name string) (Harness, error) {
 	h, ok := registry[name]

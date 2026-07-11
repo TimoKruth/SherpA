@@ -7,8 +7,9 @@ func TestForKnownAndUnknown(t *testing.T) {
 	if err != nil || h.Name() != "claude-code" {
 		t.Fatalf("For(claude-code) = %v, %v", h, err)
 	}
-	if _, err := For("codex"); err == nil {
-		t.Fatal("For(codex) must error until 2b-ii")
+	h, err = For("codex")
+	if err != nil || h.Name() != "codex" {
+		t.Fatalf("For(codex) = %v, %v", h, err)
 	}
 	if _, err := For(""); err == nil {
 		t.Fatal("For(empty) must error")
@@ -24,5 +25,17 @@ func TestNamesListsClaudeCode(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("Names() = %v, want claude-code", Names())
+	}
+}
+
+func TestEveryHarnessHasNonEmptyBarrier(t *testing.T) {
+	for _, name := range Names() {
+		h, _ := For(name)
+		if len(h.SetupStateFilenames()) == 0 {
+			t.Errorf("%s: empty SetupStateFilenames weakens its publish barrier", name)
+		}
+		if len(h.LoginSignatures()) == 0 {
+			t.Errorf("%s: empty LoginSignatures weakens its publish barrier", name)
+		}
 	}
 }
