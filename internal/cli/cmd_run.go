@@ -35,24 +35,30 @@ func cmdRun(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
-	mine, ok := st.Profiles["mine"]
+	bn, ok := baselineName(st, active.Harness)
 	if !ok {
-		return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
+		bn = "mine"
+	}
+	baseline, ok := st.Profiles[bn]
+	if !ok {
+		if bn == "mine" {
+			return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
+		}
+		return fmt.Errorf("no baseline profile for harness %q (run `sherpa init --harness %s` first)", active.Harness, active.Harness)
 	}
 
 	if !fresh {
-		if err := launch.SeedSetup(active.Path, mine.Path, h); err != nil {
+		if err := launch.SeedSetup(active.Path, baseline.Path, h); err != nil {
 			fmt.Fprintf(ctx.Stderr, "warning: could not seed setup state (%v); tool may onboard\n", err)
 		}
 	}
 
-	// Best-effort: make sure mine has a credential file to link from. On a fresh
-	// machine auth may live only in the Keychain. Never fatal — claude can still
-	// prompt for login.
-	if err := h.PrepareBaselineCredentials(mine.Path); err != nil {
-		fmt.Fprintf(ctx.Stderr, "warning: could not prepare credentials (%v); claude may ask you to log in\n", err)
+	// Best-effort: make sure the baseline has credentials to link from.
+	// Never fatal: the tool can still prompt for login.
+	if err := h.PrepareBaselineCredentials(baseline.Path); err != nil {
+		fmt.Fprintf(ctx.Stderr, "warning: could not prepare credentials (%v); the tool may ask you to log in\n", err)
 	}
 
 	stdio := launch.Stdio{In: ctx.Stdin, Out: ctx.Stdout, Err: ctx.Stderr}
-	return launch.Launch(h, active.Path, mine.Path, passthrough, stdio)
+	return launch.Launch(h, active.Path, baseline.Path, passthrough, stdio)
 }

@@ -52,7 +52,7 @@ func Parse(b []byte) (*Manifest, error) {
 // Validate checks the manifest against the stack directory contents.
 func (m *Manifest) Validate(dir string, h harness.Harness) (violations []string) {
 	if h == nil || h.Name() != m.Harness {
-		violations = append(violations, fmt.Sprintf("harness %q not supported in phase 1 (claude-code only)", m.Harness))
+		violations = append(violations, fmt.Sprintf("unsupported harness %q", m.Harness))
 	}
 	declared := map[string]bool{}
 	for _, hook := range m.Executes.Hooks {

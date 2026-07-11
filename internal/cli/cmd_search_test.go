@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestSearchFiltersToClaudeCodeStacks(t *testing.T) {
+func TestSearchAcceptsRegisteredHarnessStacks(t *testing.T) {
 	t.Setenv("SHERPA_HOME", t.TempDir())
 	t.Setenv("SHERPA_INDEX_URL", searchIndexURL(t, map[string]any{
 		"stacks": []map[string]any{
@@ -50,8 +50,8 @@ func TestSearchFiltersToClaudeCodeStacks(t *testing.T) {
 	if !strings.Contains(stdout, "try: sherpa try https://example.invalid/jane/rust-reviewer.git") {
 		t.Fatalf("stdout missing try hint:\n%s", stdout)
 	}
-	if strings.Contains(stdout, "@casey/rust-codex") || strings.Contains(stdout, "(codex)") {
-		t.Fatalf("stdout included codex stack:\n%s", stdout)
+	if !strings.Contains(stdout, "@casey/rust-codex  Rust workflows for Codex  (codex)") {
+		t.Fatalf("stdout missing codex row:\n%s", stdout)
 	}
 }
 

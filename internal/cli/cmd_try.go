@@ -33,13 +33,10 @@ func cmdTry(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
-	mine, ok := st.Profiles["mine"]
-	if !ok {
-		return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
-	}
 
 	profileName := req.target
 	profileDir := ""
+	profileHarness := ""
 	var manifest *stack.Manifest
 	var h harness.Harness
 	if p, ok := st.Profiles[req.target]; ok {
@@ -47,6 +44,7 @@ func cmdTry(ctx *Ctx, args []string) error {
 			return fmt.Errorf("--name only applies when cloning a new profile")
 		}
 		profileName, profileDir = p.Name, p.Path
+		profileHarness = p.Harness
 		h, err = harness.For(p.Harness)
 		if err != nil {
 			return err
@@ -61,11 +59,23 @@ func cmdTry(ctx *Ctx, args []string) error {
 			return err
 		}
 		profileName, profileDir, manifest = installed.name, installed.dir, installed.manifest
+		profileHarness = manifest.Harness
 		h, err = harness.For(manifest.Harness)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintf(ctx.Stdout, "cloned %q into %s (not activated)\n", profileName, profileDir)
+	}
+	bn, ok := baselineName(st, profileHarness)
+	if !ok {
+		bn = "mine"
+	}
+	baseline, ok := st.Profiles[bn]
+	if !ok {
+		if bn == "mine" {
+			return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
+		}
+		return fmt.Errorf("no baseline profile for harness %q (run `sherpa init --harness %s` first)", profileHarness, profileHarness)
 	}
 
 	approved, err := review.RunGate(profileDir, manifest, req.mode, ctx.Stdin, ctx.Stdout)
@@ -76,16 +86,16 @@ func cmdTry(ctx *Ctx, args []string) error {
 		fmt.Fprintf(ctx.Stdout, "approved %d capabilities\n", len(approved))
 	}
 	if !req.fresh {
-		if err := launch.SeedSetup(profileDir, mine.Path, h); err != nil {
+		if err := launch.SeedSetup(profileDir, baseline.Path, h); err != nil {
 			fmt.Fprintf(ctx.Stderr, "warning: could not seed setup state (%v); tool may onboard\n", err)
 		}
 	}
-	if err := h.PrepareBaselineCredentials(mine.Path); err != nil {
-		fmt.Fprintf(ctx.Stderr, "warning: could not prepare credentials (%v); claude may ask you to log in\n", err)
+	if err := h.PrepareBaselineCredentials(baseline.Path); err != nil {
+		fmt.Fprintf(ctx.Stderr, "warning: could not prepare credentials (%v); the tool may ask you to log in\n", err)
 	}
 	fmt.Fprintf(ctx.Stdout, "trying %q (active profile unchanged)\n", profileName)
 	stdio := launch.Stdio{In: ctx.Stdin, Out: ctx.Stdout, Err: ctx.Stderr}
-	return launch.Launch(h, profileDir, mine.Path, nil, stdio)
+	return launch.Launch(h, profileDir, baseline.Path, nil, stdio)
 }
 
 func parseTryArgs(args []string) (tryRequest, error) {

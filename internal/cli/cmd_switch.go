@@ -34,7 +34,17 @@ func cmdUse(ctx *Ctx, args []string) error {
 }
 
 func cmdBack(ctx *Ctx, args []string) error {
-	return cmdUse(ctx, []string{"mine"})
+	st, err := state.Load(ctx.Home)
+	if err != nil {
+		return err
+	}
+	target := "mine"
+	if active, ok := st.Profiles[st.Active]; ok {
+		if baseline, ok := baselineName(st, active.Harness); ok {
+			target = baseline
+		}
+	}
+	return cmdUse(ctx, []string{target})
 }
 
 func cmdStatus(ctx *Ctx, args []string) error {

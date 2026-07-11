@@ -29,20 +29,27 @@ func cmdProfile(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
-	mine, ok := st.Profiles["mine"]
+	bn, ok := baselineName(st, p.Harness)
 	if !ok {
-		return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
+		bn = "mine"
+	}
+	baseline, ok := st.Profiles[bn]
+	if !ok {
+		if bn == "mine" {
+			return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
+		}
+		return fmt.Errorf("no baseline profile for harness %q (run `sherpa init --harness %s` first)", p.Harness, p.Harness)
 	}
 	// Clear any seeded setup so the tool runs its own first-run flow.
 	rel, _, err := h.Seed([]byte("{}")) // rel = target filename (".claude.json"); content ignored
 	if err == nil && rel != "" {
 		_ = os.Remove(filepath.Join(p.Path, rel))
 	}
-	if err := h.PrepareBaselineCredentials(mine.Path); err != nil {
+	if err := h.PrepareBaselineCredentials(baseline.Path); err != nil {
 		fmt.Fprintf(ctx.Stderr, "warning: could not prepare credentials (%v)\n", err)
 	}
 	fmt.Fprintf(ctx.Stdout, "fresh setup for %q (active profile unchanged)\n", name)
 	stdio := launch.Stdio{In: ctx.Stdin, Out: ctx.Stdout, Err: ctx.Stderr}
 	// No SeedSetup call: this is the fresh path.
-	return launch.Launch(h, p.Path, mine.Path, nil, stdio)
+	return launch.Launch(h, p.Path, baseline.Path, nil, stdio)
 }

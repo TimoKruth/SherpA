@@ -103,9 +103,13 @@ func readIndexURL(indexURL string) ([]byte, error) {
 
 func searchStacks(stacks []indexStack, query string) []indexStack {
 	q := strings.ToLower(query)
+	registered := map[string]bool{}
+	for _, name := range harness.Names() {
+		registered[name] = true
+	}
 	var matches []indexStack
 	for _, stack := range stacks {
-		if stack.Harness != harness.Default().Name() {
+		if !registered[stack.Harness] {
 			continue
 		}
 		if stackMatches(stack, q) {
