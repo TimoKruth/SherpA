@@ -17,14 +17,15 @@ type Profile struct {
 }
 
 type State struct {
-	Active   string             `json:"active"`
-	Profiles map[string]Profile `json:"profiles"`
+	Active    string             `json:"active"`
+	Profiles  map[string]Profile `json:"profiles"`
+	Baselines map[string]string  `json:"baselines"`
 }
 
 func file(home string) string { return filepath.Join(home, "state.json") }
 
 func Load(home string) (*State, error) {
-	s := &State{Profiles: map[string]Profile{}}
+	s := &State{Profiles: map[string]Profile{}, Baselines: map[string]string{}}
 	b, err := os.ReadFile(file(home))
 	if errors.Is(err, fs.ErrNotExist) {
 		return s, nil
@@ -37,6 +38,14 @@ func Load(home string) (*State, error) {
 	}
 	if s.Profiles == nil {
 		s.Profiles = map[string]Profile{}
+	}
+	if s.Baselines == nil {
+		s.Baselines = map[string]string{}
+	}
+	if len(s.Baselines) == 0 {
+		if m, ok := s.Profiles["mine"]; ok {
+			s.Baselines[m.Harness] = "mine"
+		}
 	}
 	return s, nil
 }
