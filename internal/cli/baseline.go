@@ -13,6 +13,18 @@ func baselineName(st *state.State, harnessName string) (string, bool) {
 	return n, ok
 }
 
+func baselineProfile(st *state.State, harnessName string) (state.Profile, error) {
+	n, ok := baselineName(st, harnessName)
+	if !ok {
+		return state.Profile{}, fmt.Errorf("no baseline for harness %q — run `sherpa init --harness %s` first", harnessName, harnessName)
+	}
+	p, ok := st.Profiles[n]
+	if !ok {
+		return state.Profile{}, fmt.Errorf("no baseline for harness %q — run `sherpa init --harness %s` first", harnessName, harnessName)
+	}
+	return p, nil
+}
+
 // renameProfile moves profiles/old -> profiles/new on disk and updates st in memory.
 // It does not Save; the caller commits st and, on Save failure, must roll the dir back.
 func renameProfile(home string, st *state.State, old, newName string) error {

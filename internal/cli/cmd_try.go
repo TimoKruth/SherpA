@@ -66,16 +66,9 @@ func cmdTry(ctx *Ctx, args []string) error {
 		}
 		fmt.Fprintf(ctx.Stdout, "cloned %q into %s (not activated)\n", profileName, profileDir)
 	}
-	bn, ok := baselineName(st, profileHarness)
-	if !ok {
-		bn = "mine"
-	}
-	baseline, ok := st.Profiles[bn]
-	if !ok {
-		if bn == "mine" {
-			return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
-		}
-		return fmt.Errorf("no baseline profile for harness %q (run `sherpa init --harness %s` first)", profileHarness, profileHarness)
+	baseline, err := baselineProfile(st, profileHarness)
+	if err != nil {
+		return err
 	}
 
 	approved, err := review.RunGate(profileDir, manifest, req.mode, ctx.Stdin, ctx.Stdout)

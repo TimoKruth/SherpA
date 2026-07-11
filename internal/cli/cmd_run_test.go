@@ -46,6 +46,18 @@ func fakeClaude(t *testing.T) (bin, marker string) {
 	return bin, marker
 }
 
+func fakeCodex(t *testing.T) (bin, marker string) {
+	t.Helper()
+	dir := t.TempDir()
+	marker = filepath.Join(dir, "codex-launched.txt")
+	bin = filepath.Join(dir, "codex")
+	script := "#!/bin/sh\necho \"$CODEX_HOME\" > " + marker + "\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return bin, marker
+}
+
 func TestRunLaunchesUnderActiveProfileWithLinkedCreds(t *testing.T) {
 	_, mineDir, janeDir := setupRunHome(t)
 	os.WriteFile(filepath.Join(mineDir, ".credentials.json"), []byte("secret"), 0o600)
@@ -63,6 +75,40 @@ func TestRunLaunchesUnderActiveProfileWithLinkedCreds(t *testing.T) {
 	cred, err := os.ReadFile(filepath.Join(janeDir, ".credentials.json"))
 	if err != nil || string(cred) != "secret" {
 		t.Fatal("credentials not linked into active profile")
+	}
+}
+
+func TestRunRequiresActiveHarnessBaselineWithoutFallingBackToMine(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SHERPA_HOME", home)
+	mineDir := filepath.Join(home, "profiles", "mine")
+	codexDir := filepath.Join(home, "profiles", "codex-stack")
+	if err := os.MkdirAll(mineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Load(home)
+	st.Active = "codex-stack"
+	st.Profiles["mine"] = state.Profile{Name: "mine", Path: mineDir, Harness: "claude-code"}
+	st.Profiles["codex-stack"] = state.Profile{Name: "codex-stack", Path: codexDir, Harness: "codex"}
+	st.Baselines["claude-code"] = "mine"
+	if err := st.Save(home); err != nil {
+		t.Fatal(err)
+	}
+	bin, marker := fakeCodex(t)
+	t.Setenv("SHERPA_CODEX_BIN", bin)
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"run"}, &out, &errb); code == 0 {
+		t.Fatal("run must fail when the active harness has no baseline")
+	}
+	if !strings.Contains(errb.String(), `no baseline for harness "codex"`) {
+		t.Fatalf("stderr = %q", errb.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("codex launched despite missing baseline; marker err=%v", err)
 	}
 }
 

@@ -38,13 +38,15 @@ func cmdBack(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
-	target := "mine"
-	if active, ok := st.Profiles[st.Active]; ok {
-		if baseline, ok := baselineName(st, active.Harness); ok {
-			target = baseline
-		}
+	active, ok := st.Profiles[st.Active]
+	if !ok {
+		return fmt.Errorf("no active profile (run `sherpa init` first)")
 	}
-	return cmdUse(ctx, []string{target})
+	baseline, err := baselineProfile(st, active.Harness)
+	if err != nil {
+		return err
+	}
+	return cmdUse(ctx, []string{baseline.Name})
 }
 
 func cmdStatus(ctx *Ctx, args []string) error {

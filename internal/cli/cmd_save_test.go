@@ -136,6 +136,66 @@ func TestPublishSkipsFetchedUpstreamTagCollision(t *testing.T) {
 	}
 }
 
+func TestPublishCodexConfigTomlEnvKeyIsPublishable(t *testing.T) {
+	home := setupHome(t)
+	repo := makeCodexExpertRepo(t, "codex-env-key-stack", map[string]string{
+		"config.toml": "model_provider = \"openai\"\nenv_key = \"OPENAI_API_KEY\"\n",
+	})
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "codex-env-key"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "codex-env-key"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+
+	remote := makeBareRepo(t)
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err != nil {
+		t.Fatalf("codex config.toml env_key should publish: %v\nstderr: %s", err, errb.String())
+	}
+	if tag := gitOut(t, remote, "tag", "-l", "v2"); tag != "v2" {
+		t.Fatalf("remote tag = %q, want v2", tag)
+	}
+}
+
+func TestPublishCodexBlocksJSONOpenAIAPIKeyLoginSignature(t *testing.T) {
+	home := setupHome(t)
+	repo := makeCodexExpertRepo(t, "codex-json-key-stack", nil)
+	var out, errb bytes.Buffer
+	if code := Run([]string{"clone", repo, "--name", "codex-json-key"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"use", "codex-json-key"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+	dir := filepath.Join(home, "profiles", "codex-json-key")
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(`{"OPENAI_API_KEY": "sk-xxxx"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"save", "-m", "track codex json key fixture"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+
+	remote := makeBareRepo(t)
+	out.Reset()
+	errb.Reset()
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errb, Stdin: strings.NewReader("yes\nyes\n")}
+	if err := cmdPublish(ctx, []string{"--remote", remote}); err == nil {
+		t.Fatal("publish with codex JSON API key login content must fail")
+	}
+	if !strings.Contains(errb.String(), "setup-state") && !strings.Contains(errb.String(), "login") {
+		t.Fatalf("publish error did not mention setup-state/login barrier: %q", errb.String())
+	}
+	assertRemoteStayedEmpty(t, remote)
+}
+
 func TestPublishAllowsGitignoredLocalLoginFiles(t *testing.T) {
 	home := setupHome(t)
 	repo := makeExpertRepo(t, true)
@@ -595,6 +655,36 @@ func makeBareRepo(t *testing.T) string {
 	dir := filepath.Join(t.TempDir(), "remote.git")
 	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %s", out)
+	}
+	return dir
+}
+
+func makeCodexExpertRepo(t *testing.T, name string, overrides map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"stack.yaml":  "name: " + name + "\nowner: \"@codex-expert\"\nversion: 1\nharness: codex\nsummary: codex test fixture\n",
+		"README.md":   "codex stack\n",
+		"AGENTS.md":   "codex instructions\n",
+		"config.toml": "model = \"gpt-5-codex\"\n",
+	}
+	for rel, content := range overrides {
+		files[rel] = content
+	}
+	for rel, content := range files {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, a := range [][]string{{"init", "-b", "main"}, {"add", "-A"},
+		{"-c", "user.email=codex@local", "-c", "user.name=codex", "-c", "commit.gpgsign=false", "commit", "-m", "v1"}, {"tag", "v1"}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, a...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", a, out)
+		}
 	}
 	return dir
 }

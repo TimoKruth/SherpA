@@ -40,6 +40,32 @@ func TestTryInstalledProfileLaunchesWithoutChangingActive(t *testing.T) {
 	}
 }
 
+func TestTryRequiresTargetHarnessBaselineWithoutFallingBackToMine(t *testing.T) {
+	home := setupHome(t)
+	codex := filepath.Join(home, "profiles", "codex-trial")
+	if err := os.MkdirAll(codex, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Load(home)
+	st.Profiles["codex-trial"] = state.Profile{Name: "codex-trial", Path: codex, Origin: "https://x/codex.git", Harness: "codex"}
+	if err := st.Save(home); err != nil {
+		t.Fatal(err)
+	}
+	bin, marker := fakeCodex(t)
+	t.Setenv("SHERPA_CODEX_BIN", bin)
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"try", "codex-trial"}, &out, &errb); code == 0 {
+		t.Fatal("try must fail when the target harness has no baseline")
+	}
+	if !strings.Contains(errb.String(), `no baseline for harness "codex"`) {
+		t.Fatalf("stderr = %q", errb.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("codex launched despite missing baseline; marker err=%v", err)
+	}
+}
+
 func TestTryURLClonesReviewsAndLaunchesWithoutChangingActive(t *testing.T) {
 	home := setupHome(t)
 	mine := filepath.Join(home, "profiles", "mine")

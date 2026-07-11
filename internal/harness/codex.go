@@ -28,7 +28,7 @@ func (Codex) Seed(captured []byte) (string, []byte, error)        { return "", n
 // LoginSignatures are markers found in auth.json. Non-empty is mandatory for
 // the publish barrier.
 func (Codex) LoginSignatures() []string {
-	return []string{"OPENAI_API_KEY", `"access_token"`, `"refresh_token"`, `"id_token"`, `"tokens"`, `"account_id"`}
+	return []string{`"OPENAI_API_KEY":`, `"access_token"`, `"refresh_token"`, `"id_token"`, `"tokens"`, `"account_id"`}
 }
 
 func (Codex) AllowedPaths() []string {

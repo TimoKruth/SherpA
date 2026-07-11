@@ -25,6 +25,11 @@ func TestCodexAdapterValues(t *testing.T) {
 	if len(h.LoginSignatures()) == 0 {
 		t.Fatal("login signatures must be non-empty")
 	}
+	for _, sig := range h.LoginSignatures() {
+		if sig == "OPENAI_API_KEY" {
+			t.Fatal("bare OPENAI_API_KEY signature blocks publishable config.toml env_key values")
+		}
+	}
 	// no keychain export
 	if err := h.PrepareBaselineCredentials(t.TempDir()); err != nil {
 		t.Fatalf("PrepareBaselineCredentials must be a no-op for codex: %v", err)

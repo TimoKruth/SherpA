@@ -29,16 +29,9 @@ func cmdProfile(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
-	bn, ok := baselineName(st, p.Harness)
-	if !ok {
-		bn = "mine"
-	}
-	baseline, ok := st.Profiles[bn]
-	if !ok {
-		if bn == "mine" {
-			return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
-		}
-		return fmt.Errorf("no baseline profile for harness %q (run `sherpa init --harness %s` first)", p.Harness, p.Harness)
+	baseline, err := baselineProfile(st, p.Harness)
+	if err != nil {
+		return err
 	}
 	// Clear any seeded setup so the tool runs its own first-run flow.
 	rel, _, err := h.Seed([]byte("{}")) // rel = target filename (".claude.json"); content ignored

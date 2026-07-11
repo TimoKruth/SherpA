@@ -61,6 +61,31 @@ func TestBackUsesActiveProfilesHarnessBaseline(t *testing.T) {
 	}
 }
 
+func TestBackRequiresActiveHarnessBaselineWithoutFallingBackToMine(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SHERPA_HOME", home)
+	st, _ := state.Load(home)
+	st.Active = "casey"
+	st.Profiles["mine"] = state.Profile{Name: "mine", Path: home + "/profiles/mine", Harness: "claude-code"}
+	st.Profiles["casey"] = state.Profile{Name: "casey", Path: home + "/profiles/casey", Origin: "https://x/casey.git", Harness: "codex"}
+	st.Baselines["claude-code"] = "mine"
+	if err := st.Save(home); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"back"}, &out, &errb); code == 0 {
+		t.Fatal("back must fail when the active harness has no baseline")
+	}
+	if !strings.Contains(errb.String(), `no baseline for harness "codex"`) {
+		t.Fatalf("stderr = %q", errb.String())
+	}
+	st, _ = state.Load(home)
+	if st.Active != "casey" {
+		t.Fatalf("back changed active = %q", st.Active)
+	}
+}
+
 func TestUseUnknownProfileFails(t *testing.T) {
 	setupHome(t)
 	var out, errb bytes.Buffer

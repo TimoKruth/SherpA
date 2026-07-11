@@ -35,16 +35,9 @@ func cmdRun(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
-	bn, ok := baselineName(st, active.Harness)
-	if !ok {
-		bn = "mine"
-	}
-	baseline, ok := st.Profiles[bn]
-	if !ok {
-		if bn == "mine" {
-			return fmt.Errorf("no `mine` profile (run `sherpa init` first)")
-		}
-		return fmt.Errorf("no baseline profile for harness %q (run `sherpa init --harness %s` first)", active.Harness, active.Harness)
+	baseline, err := baselineProfile(st, active.Harness)
+	if err != nil {
+		return err
 	}
 
 	if !fresh {

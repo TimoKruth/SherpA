@@ -108,6 +108,40 @@ func TestInitDefaultCreatesBareMineBaseline(t *testing.T) {
 	}
 }
 
+func TestInitRefusesExistingUntrackedBaselineDirWithoutDeletingIt(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SHERPA_HOME", home)
+	claudeDir := fixtureConfigDir(t, "claude", map[string]string{
+		"CLAUDE.md": "# claude\n",
+	})
+	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+
+	mineDir := filepath.Join(home, "profiles", "mine")
+	if err := os.MkdirAll(mineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(mineDir, "marker.txt")
+	if err := os.WriteFile(marker, []byte("pre-existing user data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init"}, &out, &errb); code == 0 {
+		t.Fatal("init must fail when profiles/mine already exists outside state")
+	}
+	if !strings.Contains(errb.String(), "profile directory already exists") ||
+		!strings.Contains(errb.String(), mineDir) ||
+		!strings.Contains(errb.String(), "refusing to overwrite") {
+		t.Fatalf("init error did not explain existing baseline dir: %q", errb.String())
+	}
+	if _, err := os.Stat(mineDir); err != nil {
+		t.Fatalf("existing profile dir was removed: %v", err)
+	}
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "pre-existing user data\n" {
+		t.Fatalf("marker was not preserved: got %q err %v", got, err)
+	}
+}
+
 func TestInitCodexRenamesLoneClaudeMineAndCreatesTaggedBaseline(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("SHERPA_HOME", home)

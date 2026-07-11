@@ -70,6 +70,10 @@ func cmdInit(ctx *Ctx, args []string) error {
 	if !wasFirstBaseline {
 		newName = "mine-" + h.Alias()
 	}
+	dest := filepath.Join(ctx.Home, "profiles", newName)
+	if err := ensureProfileDirAbsent(dest); err != nil {
+		return err
+	}
 
 	renamedOld := ""
 	renamedNew := ""
@@ -90,7 +94,6 @@ func cmdInit(ctx *Ctx, args []string) error {
 		}
 	}
 
-	dest := filepath.Join(ctx.Home, "profiles", newName)
 	if err := profile.Import(configDir(h), dest, h.GitignoreContent()); err != nil {
 		rollbackInit(ctx.Home, st, dest, renamedOld, renamedNew)
 		return err
@@ -109,6 +112,15 @@ func cmdInit(ctx *Ctx, args []string) error {
 		return err
 	}
 	fmt.Fprintf(ctx.Stdout, "imported %s as profile %q (your original config is untouched)\n", configDir(h), newName)
+	return nil
+}
+
+func ensureProfileDirAbsent(dest string) error {
+	if _, err := os.Stat(dest); err == nil {
+		return fmt.Errorf("profile directory already exists: %s (refusing to overwrite)", dest)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	return nil
 }
 

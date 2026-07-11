@@ -36,6 +36,32 @@ func TestProfileSetupRunsFresh(t *testing.T) {
 	}
 }
 
+func TestProfileSetupRequiresProfileHarnessBaselineWithoutFallingBackToMine(t *testing.T) {
+	home := setupHome(t)
+	codex := filepath.Join(home, "profiles", "codex-setup")
+	if err := os.MkdirAll(codex, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Load(home)
+	st.Profiles["codex-setup"] = state.Profile{Name: "codex-setup", Path: codex, Origin: "https://x/codex.git", Harness: "codex"}
+	if err := st.Save(home); err != nil {
+		t.Fatal(err)
+	}
+	bin, marker := fakeCodex(t)
+	t.Setenv("SHERPA_CODEX_BIN", bin)
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"profile", "setup", "codex-setup"}, &out, &errb); code == 0 {
+		t.Fatal("profile setup must fail when the profile harness has no baseline")
+	}
+	if !strings.Contains(errb.String(), `no baseline for harness "codex"`) {
+		t.Fatalf("stderr = %q", errb.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("codex launched despite missing baseline; marker err=%v", err)
+	}
+}
+
 func TestProfileSetupWithoutMineDoesNotExportCredentialsToCwd(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("SHERPA_HOME", home)
@@ -66,7 +92,7 @@ func TestProfileSetupWithoutMineDoesNotExportCredentialsToCwd(t *testing.T) {
 	if code := Run([]string{"profile", "setup", "jane"}, &out, &errb); code == 0 {
 		t.Fatal("profile setup without mine must fail")
 	}
-	if !strings.Contains(errb.String(), "no `mine` profile") {
+	if !strings.Contains(errb.String(), `no baseline for harness "claude-code"`) {
 		t.Fatalf("stderr = %q", errb.String())
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
