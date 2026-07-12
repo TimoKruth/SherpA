@@ -13,6 +13,7 @@ import (
 
 	"sherpa/internal/gitutil"
 	"sherpa/internal/harness"
+	"sherpa/internal/publishscan"
 	"sherpa/internal/sanitize"
 
 	"gopkg.in/yaml.v3"
@@ -36,33 +37,18 @@ func cmdPublish(ctx *Ctx, args []string) error {
 		return err
 	}
 
-	// Scan the exact set git will push (ls-files cached+others-not-ignored), so
-	// completeness does not depend on any tracked-subset-of-AllowedPaths assumption.
-	scanFiles, err := publishScanFiles(profile.Path)
+	historyRange, err := publishHistoryRange(profile.Path, remote)
 	if err != nil {
 		return err
 	}
-	findings, err := sanitize.Scan(profile.Path, scanFiles)
-	if err != nil {
-		return fmt.Errorf("sanitize scan failed: %w", err)
-	}
-	historyPatch, err := scanPublishHistoryPatch(profile.Path, remote)
+	findings, err := publishscan.ScanRepo(profile.Path, h, historyRange)
 	if err != nil {
 		return err
 	}
-	historyFindings, err := sanitize.ScanPatch(historyPatch)
-	if err != nil {
-		return err
-	}
-	findings = append(findings, historyFindings...)
 	// setup-state / OAuth must never be published (spec 2a §3.3). No override.
-	ss, err := sanitize.ScanSetupState(profile.Path, scanFiles, h.SetupStateFilenames(), h.LoginSignatures())
-	if err != nil {
-		return err
-	}
-	histSS := sanitize.ScanPatchSetupState(historyPatch, h.SetupStateFilenames(), h.LoginSignatures())
-	if len(ss) > 0 || len(histSS) > 0 {
-		printFindings(ctx.Stderr, append(ss, histSS...))
+	setupStateFindings := findingsByKind(findings, "setup-state")
+	if len(setupStateFindings) > 0 {
+		printFindings(ctx.Stderr, setupStateFindings)
 		fmt.Fprintln(ctx.Stderr, "machine-local login/setup files are gitignored and never published; if a tracked stack file contains login content, remove it before publishing.")
 		return fmt.Errorf("publish blocked: setup-state/login content must never be shared")
 	}
@@ -107,21 +93,6 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	return nil
 }
 
-func publishScanFiles(dir string) ([]string, error) {
-	out, err := gitutil.Run(dir, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-	if err != nil {
-		return nil, err
-	}
-	var files []string
-	for _, file := range strings.Split(out, "\x00") {
-		if file == "" {
-			continue
-		}
-		files = append(files, file)
-	}
-	return files, nil
-}
-
 func parsePublishArgs(args []string) (string, error) {
 	var remote string
 	for i := 0; i < len(args); i++ {
@@ -156,23 +127,20 @@ func hasSecretFindings(findings []sanitize.Finding) bool {
 	return false
 }
 
+func findingsByKind(findings []sanitize.Finding, kind string) []sanitize.Finding {
+	var out []sanitize.Finding
+	for _, finding := range findings {
+		if finding.Kind == kind {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
 func printFindings(w io.Writer, findings []sanitize.Finding) {
 	for _, finding := range findings {
 		fmt.Fprintf(w, "%s:%d: %s: %s\n", finding.File, finding.Line, finding.Kind, finding.Excerpt)
 	}
-}
-
-func scanPublishHistoryPatch(dir, remote string) (string, error) {
-	rangeSpec, err := publishHistoryRange(dir, remote)
-	if err != nil {
-		return "", err
-	}
-	args := []string{"log", "-m", "-p", rangeSpec}
-	patch, err := gitutil.Run(dir, args...)
-	if err != nil {
-		return "", err
-	}
-	return patch, nil
 }
 
 func publishHistoryRange(dir, remote string) (string, error) {
