@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	registryauth "sherpa/internal/registry/auth"
 	"sherpa/internal/registry/content"
 	"sherpa/internal/registry/store"
 )
@@ -12,16 +13,20 @@ type server struct {
 	store   store.Store
 	content content.ContentStore
 	token   string
+	github  registryauth.GitHubClient
 }
 
-func New(st store.Store, cs content.ContentStore, token string) http.Handler {
+func New(st store.Store, cs content.ContentStore, token string, github registryauth.GitHubClient) http.Handler {
 	s := &server{
 		store:   st,
 		content: cs,
 		token:   token,
+		github:  github,
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/auth/device/start", s.handleDeviceStart)
+	mux.HandleFunc("POST /v1/auth/device/poll", s.handleDevicePoll)
 	mux.HandleFunc("GET /v1/search", s.handleSearch)
 	mux.HandleFunc("GET /v1/stacks/{owner}/{repo}/", s.handleGit)
 	mux.HandleFunc("GET /v1/stacks/{owner}/{name}", s.handleStack)

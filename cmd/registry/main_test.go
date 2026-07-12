@@ -52,6 +52,7 @@ func TestLoadConfigDefaultsAndEnv(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://example/sherpa")
 	t.Setenv("SHERPA_REGISTRY_TOKEN", "secret")
 	t.Setenv("SHERPA_CONTENT_DIR", "")
+	t.Setenv("SHERPA_GITHUB_CLIENT_ID", "github-client")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -69,6 +70,9 @@ func TestLoadConfigDefaultsAndEnv(t *testing.T) {
 	if cfg.ContentDir != "./registry-content" {
 		t.Fatalf("ContentDir = %q, want ./registry-content", cfg.ContentDir)
 	}
+	if cfg.GitHubClientID != "github-client" {
+		t.Fatalf("GitHubClientID = %q", cfg.GitHubClientID)
+	}
 }
 
 func TestLoadConfigRequiresDatabaseURL(t *testing.T) {
@@ -83,14 +87,19 @@ func TestLoadConfigRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRequiresToken(t *testing.T) {
-	t.Setenv("PORT", "")
+func TestLoadConfigAllowsDisabledAdminToken(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://example/sherpa")
 	t.Setenv("SHERPA_REGISTRY_TOKEN", "")
-	t.Setenv("SHERPA_CONTENT_DIR", "")
+	t.Setenv("SHERPA_GITHUB_CLIENT_ID", "github-client")
 
-	_, err := LoadConfig()
-	if err == nil || !strings.Contains(err.Error(), "SHERPA_REGISTRY_TOKEN") {
-		t.Fatalf("LoadConfig error = %v, want SHERPA_REGISTRY_TOKEN error", err)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Token != "" {
+		t.Fatalf("Token = %q", cfg.Token)
+	}
+	if cfg.GitHubClientID != "github-client" {
+		t.Fatalf("GitHubClientID = %q", cfg.GitHubClientID)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"sherpa/internal/gitutil"
+	registryauth "sherpa/internal/registry/auth"
 	"sherpa/internal/registry/content"
 	"sherpa/internal/registry/store"
 )
@@ -32,7 +33,7 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 		Version:     2,
 		PublishedAt: testTime(2),
 	}}
-	handler := New(st, content.NewBareGit(t.TempDir()), "")
+	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://registry.test/v1/search?q=sec&harness=claude-code&tag=review", nil)
@@ -107,7 +108,7 @@ func TestStackDetailReturnsVersions(t *testing.T) {
 			PublishedAt: testTime(1),
 		},
 	}
-	handler := New(st, content.NewBareGit(t.TempDir()), "")
+	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://registry.test/v1/stacks/alice/reviewer", nil)
@@ -149,7 +150,7 @@ func TestStackDetailReturnsVersions(t *testing.T) {
 }
 
 func TestStackDetailMissingReturns404(t *testing.T) {
-	handler := New(newFakeStore(), content.NewBareGit(t.TempDir()), "")
+	handler := New(newFakeStore(), content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://registry.test/v1/stacks/alice/missing", nil)
@@ -168,7 +169,7 @@ func TestVersionDetailReturnsManifestAndScanReport(t *testing.T) {
 		Changelog:   "Second release",
 		PublishedAt: testTime(2),
 	}
-	handler := New(st, content.NewBareGit(t.TempDir()), "")
+	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://registry.test/v1/stacks/alice/reviewer/versions/2", nil)
@@ -198,7 +199,7 @@ func TestVersionDetailReturnsManifestAndScanReport(t *testing.T) {
 }
 
 func TestVersionDetailBadVersionReturns400(t *testing.T) {
-	handler := New(newFakeStore(), content.NewBareGit(t.TempDir()), "")
+	handler := New(newFakeStore(), content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://registry.test/v1/stacks/alice/reviewer/versions/two", nil)
@@ -208,7 +209,7 @@ func TestVersionDetailBadVersionReturns400(t *testing.T) {
 }
 
 func TestVersionDetailMissingReturns404(t *testing.T) {
-	handler := New(newFakeStore(), content.NewBareGit(t.TempDir()), "")
+	handler := New(newFakeStore(), content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://registry.test/v1/stacks/alice/reviewer/versions/99", nil)
@@ -221,7 +222,7 @@ func TestGitRouteServesBareRepoInfoRefs(t *testing.T) {
 	root := t.TempDir()
 	cs := content.NewBareGit(filepath.Join(root, "content"))
 	buildBareRepo(t, cs, root, "alice", "reviewer")
-	handler := New(newFakeStore(), cs, "")
+	handler := New(newFakeStore(), cs, "", &registryauth.FakeGitHubClient{})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://registry.test/v1/stacks/alice/reviewer.git/info/refs", nil)
@@ -236,7 +237,7 @@ func TestGitRouteServesBareRepoInfoRefs(t *testing.T) {
 }
 
 func TestGitRouteMissingRepoReturns404(t *testing.T) {
-	handler := New(newFakeStore(), content.NewBareGit(t.TempDir()), "")
+	handler := New(newFakeStore(), content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://registry.test/v1/stacks/alice/missing.git/info/refs", nil)
@@ -268,6 +269,18 @@ func newFakeStore() *fakeStore {
 
 func (f *fakeStore) UpsertUser(context.Context, string) (int64, error) {
 	return 0, errors.New("not implemented")
+}
+
+func (f *fakeStore) UpsertUserGitHub(context.Context, string, int64) (int64, error) {
+	return 0, store.ErrNotFound
+}
+
+func (f *fakeStore) CreateSession(context.Context, int64, string, time.Duration) error {
+	return store.ErrNotFound
+}
+
+func (f *fakeStore) SessionUser(context.Context, string) (string, error) {
+	return "", store.ErrNotFound
 }
 
 func (f *fakeStore) UpsertStack(context.Context, store.Stack) (int64, error) {

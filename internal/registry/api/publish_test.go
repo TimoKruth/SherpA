@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"sherpa/internal/gitutil"
+	registryauth "sherpa/internal/registry/auth"
 	"sherpa/internal/registry/content"
 	"sherpa/internal/registry/store"
 )
@@ -35,7 +36,7 @@ func TestPublishRequiresBearerTokenBeforeWrites(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			st := newPublishSpyStore()
 			cs := newPublishSpyContent(t)
-			handler := New(st, cs, "registry-token")
+			handler := New(st, cs, "registry-token", &registryauth.FakeGitHubClient{})
 
 			rr := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "http://registry.test/v1/stacks/o/n/versions", nil)
@@ -53,7 +54,7 @@ func TestPublishRequiresBearerTokenBeforeWrites(t *testing.T) {
 func TestPublishBlocksTrackedSecretFailClosed(t *testing.T) {
 	st := newPublishSpyStore()
 	cs := newPublishSpyContent(t)
-	handler := New(st, cs, "registry-token")
+	handler := New(st, cs, "registry-token", &registryauth.FakeGitHubClient{})
 
 	bundle := buildPublishBundle(t, map[string]string{
 		"stack.yaml":    "name: n\nowner: o\nversion: 1\nharness: codex\nsummary: clean summary\n",
@@ -78,7 +79,7 @@ func TestPublishBlocksTrackedSecretFailClosed(t *testing.T) {
 func TestPublishBlocksCodexSetupStateFailClosed(t *testing.T) {
 	st := newPublishSpyStore()
 	cs := newPublishSpyContent(t)
-	handler := New(st, cs, "registry-token")
+	handler := New(st, cs, "registry-token", &registryauth.FakeGitHubClient{})
 
 	bundle := buildPublishBundle(t, map[string]string{
 		"stack.yaml": "name: n\nowner: o\nversion: 1\nharness: codex\nsummary: clean summary\n",
@@ -103,7 +104,7 @@ func TestPublishBlocksCodexSetupStateFailClosed(t *testing.T) {
 func TestPublishRejectsVersionTagThatDoesNotPointAtPublishedHeadBeforeWrites(t *testing.T) {
 	st := newPublishSpyStore()
 	cs := newPublishSpyContent(t)
-	handler := New(st, cs, "registry-token")
+	handler := New(st, cs, "registry-token", &registryauth.FakeGitHubClient{})
 
 	bundle := buildPublishBundleWithMismatchedVersionTag(t)
 	rr := postBundle(t, handler, "o", "n", bundle, "registry-token")
@@ -121,7 +122,7 @@ func TestPublishRejectsExistingVersionBeforeWrites(t *testing.T) {
 	st := newPublishSpyStore()
 	st.versionByKey["o/n/1"] = store.Version{Version: 1, GitTag: "v1"}
 	cs := newPublishSpyContent(t)
-	handler := New(st, cs, "registry-token")
+	handler := New(st, cs, "registry-token", &registryauth.FakeGitHubClient{})
 
 	bundle := buildPublishBundle(t, map[string]string{
 		"stack.yaml": "name: n\nowner: o\nversion: 1\nharness: codex\nsummary: clean summary\n",
@@ -136,7 +137,7 @@ func TestPublishRejectsExistingVersionBeforeWrites(t *testing.T) {
 func TestPublishCleanBundleCommitsMetadataAndAppearsInDetail(t *testing.T) {
 	st := newPublishSpyStore()
 	cs := newPublishSpyContent(t)
-	handler := New(st, cs, "registry-token")
+	handler := New(st, cs, "registry-token", &registryauth.FakeGitHubClient{})
 
 	bundle := buildPublishBundle(t, map[string]string{
 		"stack.yaml": "name: n\nowner: o\nversion: 1\nharness: codex\nsummary: clean summary\ntags:\n  - review\n",
@@ -248,6 +249,11 @@ type publishSpyStore struct {
 	versionByKey       map[string]store.Version
 	insertedVersions   []store.Version
 	insertErr          error
+	githubUserID       int64
+	githubLogin        string
+	createdSessionHash string
+	createdSessionTTL  time.Duration
+	sessionUsers       map[string]string
 }
 
 func newPublishSpyStore() *publishSpyStore {
@@ -258,6 +264,7 @@ func newPublishSpyStore() *publishSpyStore {
 		stacks:       map[string]store.Stack{},
 		versions:     map[string][]store.Version{},
 		versionByKey: map[string]store.Version{},
+		sessionUsers: map[string]string{},
 	}
 }
 
@@ -265,6 +272,24 @@ func (p *publishSpyStore) UpsertUser(_ context.Context, handle string) (int64, e
 	p.upsertUserCalls++
 	p.nextUserID++
 	return p.nextUserID - 1, nil
+}
+
+func (p *publishSpyStore) UpsertUserGitHub(_ context.Context, login string, githubID int64) (int64, error) {
+	p.githubLogin, p.githubUserID = login, githubID
+	return 7, nil
+}
+
+func (p *publishSpyStore) CreateSession(_ context.Context, _ int64, hash string, ttl time.Duration) error {
+	p.createdSessionHash, p.createdSessionTTL = hash, ttl
+	return nil
+}
+
+func (p *publishSpyStore) SessionUser(_ context.Context, hash string) (string, error) {
+	login, ok := p.sessionUsers[hash]
+	if !ok {
+		return "", store.ErrNotFound
+	}
+	return login, nil
 }
 
 func (p *publishSpyStore) UpsertStack(_ context.Context, s store.Stack) (int64, error) {

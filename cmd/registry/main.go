@@ -7,6 +7,7 @@ import (
 
 	registry "sherpa/internal/registry"
 	"sherpa/internal/registry/api"
+	registryauth "sherpa/internal/registry/auth"
 	"sherpa/internal/registry/content"
 	"sherpa/internal/registry/store"
 )
@@ -30,7 +31,8 @@ func run(ctx context.Context, cfg Config) (http.Handler, func(), error) {
 	}
 
 	cs := content.NewBareGit(cfg.ContentDir)
-	return api.New(st, cs, cfg.Token), cleanup, nil
+	github := registryauth.NewGitHubClient(cfg.GitHubClientID)
+	return api.New(st, cs, cfg.Token, github), cleanup, nil
 }
 
 func main() {

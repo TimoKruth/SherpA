@@ -7,25 +7,24 @@ import (
 )
 
 type Config struct {
-	Port        string
-	DatabaseURL string
-	Token       string
-	ContentDir  string
+	Port           string
+	DatabaseURL    string
+	Token          string
+	ContentDir     string
+	GitHubClientID string
 }
 
 func LoadConfig() (Config, error) {
 	cfg := Config{
-		Port:        valueOrDefault("PORT", "8080"),
-		DatabaseURL: strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		Token:       strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_TOKEN")),
-		ContentDir:  valueOrDefault("SHERPA_CONTENT_DIR", "./registry-content"),
+		Port:           valueOrDefault("PORT", "8080"),
+		DatabaseURL:    strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		Token:          strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_TOKEN")),
+		ContentDir:     valueOrDefault("SHERPA_CONTENT_DIR", "./registry-content"),
+		GitHubClientID: strings.TrimSpace(os.Getenv("SHERPA_GITHUB_CLIENT_ID")),
 	}
 
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
-	}
-	if cfg.Token == "" {
-		return Config{}, fmt.Errorf("SHERPA_REGISTRY_TOKEN is required")
 	}
 	return cfg, nil
 }

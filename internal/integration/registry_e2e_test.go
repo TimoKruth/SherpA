@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"sherpa/internal/registry/api"
+	registryauth "sherpa/internal/registry/auth"
 	"sherpa/internal/registry/content"
 	"sherpa/internal/registry/store"
 )
@@ -129,7 +130,7 @@ func startRegistryServer(t *testing.T) string {
 			t.Fatalf("close postgres: %v", err)
 		}
 	})
-	handler := api.New(st, content.NewBareGit(t.TempDir()), "test-token")
+	handler := api.New(st, content.NewBareGit(t.TempDir()), "test-token", &registryauth.FakeGitHubClient{})
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	return srv.URL
