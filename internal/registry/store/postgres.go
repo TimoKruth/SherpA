@@ -37,19 +37,84 @@ func (s *PostgresStore) UpsertUser(ctx context.Context, handle string) (int64, e
 }
 
 func (s *PostgresStore) UpsertUserGitHub(ctx context.Context, login string, githubID int64) (int64, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
 	var id int64
-	err := s.pool.QueryRow(ctx, `
-		with updated as (
-			update users set handle = $1 where github_id = $2 returning id
-		), inserted as (
-			insert into users(handle, github_id)
-			select $1, $2 where not exists (select 1 from updated)
-			on conflict (handle) do update set github_id = excluded.github_id
-			returning id
-		)
-		select id from updated union all select id from inserted limit 1
-	`, login, githubID).Scan(&id)
-	return id, err
+	var currentLogin string
+	err = tx.QueryRow(ctx, `
+		select id, handle from users where github_id = $1 for update
+	`, githubID).Scan(&id, &currentLogin)
+	switch {
+	case err == nil:
+		if currentLogin != login {
+			var ownsStacks bool
+			if err := tx.QueryRow(ctx, `
+				select exists(select 1 from stacks where owner_id = $1)
+			`, id).Scan(&ownsStacks); err != nil {
+				return 0, err
+			}
+			if ownsStacks {
+				return 0, ErrGitHubRenameBlocked
+			}
+
+			var conflictingID int64
+			err := tx.QueryRow(ctx, `
+				select id from users where handle = $1 for update
+			`, login).Scan(&conflictingID)
+			if err == nil && conflictingID != id {
+				return 0, ErrGitHubIdentityConflict
+			}
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return 0, err
+			}
+
+			if _, err := tx.Exec(ctx, `update users set handle = $1 where id = $2`, login, id); err != nil {
+				if isUniqueViolation(err) {
+					return 0, ErrGitHubIdentityConflict
+				}
+				return 0, err
+			}
+		}
+	case errors.Is(err, pgx.ErrNoRows):
+		var boundGitHubID int64
+		err = tx.QueryRow(ctx, `
+			select id, coalesce(github_id, 0) from users where handle = $1 for update
+		`, login).Scan(&id, &boundGitHubID)
+		switch {
+		case err == nil:
+			if boundGitHubID != 0 && boundGitHubID != githubID {
+				return 0, ErrGitHubIdentityConflict
+			}
+			if _, err := tx.Exec(ctx, `update users set github_id = $1 where id = $2`, githubID, id); err != nil {
+				if isUniqueViolation(err) {
+					return 0, ErrGitHubIdentityConflict
+				}
+				return 0, err
+			}
+		case errors.Is(err, pgx.ErrNoRows):
+			if err := tx.QueryRow(ctx, `
+				insert into users(handle, github_id) values ($1, $2) returning id
+			`, login, githubID).Scan(&id); err != nil {
+				if isUniqueViolation(err) {
+					return 0, ErrGitHubIdentityConflict
+				}
+				return 0, err
+			}
+		default:
+			return 0, err
+		}
+	default:
+		return 0, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (s *PostgresStore) CreateSession(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {

@@ -53,3 +53,5 @@ type Store interface {
 
 var ErrVersionExists = errors.New("version already exists")
 var ErrNotFound = errors.New("not found")
+var ErrGitHubIdentityConflict = errors.New("github login is already bound to another identity")
+var ErrGitHubRenameBlocked = errors.New("github login rename is blocked while the user owns stacks")

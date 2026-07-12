@@ -175,3 +175,65 @@ func TestPostgresGitHubSessionsAndTrustTier(t *testing.T) {
 		t.Fatalf("search = %#v, %v", matches, err)
 	}
 }
+
+func TestPostgresGitHubHandleCollisionDoesNotRebindIdentity(t *testing.T) {
+	dsn := StartPostgres(t)
+	ctx := context.Background()
+	st, err := OpenPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	userID, err := st.UpsertUserGitHub(ctx, "alice", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateSession(ctx, userID, "alice-session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.UpsertUserGitHub(ctx, "alice", 99); !errors.Is(err, ErrGitHubIdentityConflict) {
+		t.Fatalf("colliding UpsertUserGitHub error = %v", err)
+	}
+	if got, err := st.SessionUser(ctx, "alice-session"); err != nil || got != "alice" {
+		t.Fatalf("SessionUser after collision = %q, %v", got, err)
+	}
+	if got, err := st.UpsertUserGitHub(ctx, "alice", 42); err != nil || got != userID {
+		t.Fatalf("original identity after collision = %d, %v", got, err)
+	}
+}
+
+func TestPostgresGitHubRenameWithOwnedStackIsRejected(t *testing.T) {
+	dsn := StartPostgres(t)
+	ctx := context.Background()
+	st, err := OpenPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	userID, err := st.UpsertUserGitHub(ctx, "alice", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertStack(ctx, Stack{Owner: "alice", Name: "published"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateSession(ctx, userID, "alice-session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.UpsertUserGitHub(ctx, "alice-renamed", 42); !errors.Is(err, ErrGitHubRenameBlocked) {
+		t.Fatalf("owned-stack rename error = %v", err)
+	}
+	if got, err := st.SessionUser(ctx, "alice-session"); err != nil || got != "alice" {
+		t.Fatalf("SessionUser after blocked rename = %q, %v", got, err)
+	}
+	if _, _, err := st.GetStack(ctx, "alice", "published"); err != nil {
+		t.Fatalf("original stack after blocked rename: %v", err)
+	}
+	if _, _, err := st.GetStack(ctx, "alice-renamed", "published"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("renamed stack lookup error = %v", err)
+	}
+}
