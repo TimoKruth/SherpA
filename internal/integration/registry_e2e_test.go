@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,7 @@ func TestRegistryCLIEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	serverURL := startRegistryServer(t)
+	serverURL, adminStore := startRegistryServerWithGitHub(t, &registryauth.FakeGitHubClient{}, "test-token")
 	t.Setenv("SHERPA_REGISTRY_URL", serverURL)
 	t.Setenv("SHERPA_REGISTRY_TOKEN", "test-token")
 
@@ -55,6 +56,13 @@ func TestRegistryCLIEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(out, "published v2") {
 		t.Fatalf("publish output missing success:\n%s", out)
+	}
+	adminVersion, err := adminStore.GetVersion(context.Background(), "registryowner", "registry-clean", 2)
+	if err != nil {
+		t.Fatalf("get admin version: %v", err)
+	}
+	if adminVersion.TrustTier != "unreviewed" {
+		t.Fatalf("admin trust tier = %q", adminVersion.TrustTier)
 	}
 
 	out, errb, code = runCLI(t, nil, "search", "Registry")
@@ -118,7 +126,56 @@ func TestRegistryCLIEndToEnd(t *testing.T) {
 	assertSearchDoesNotReturn(t, "side-secret-stack")
 }
 
-func startRegistryServer(t *testing.T) string {
+func TestRegistryIdentityEndToEnd(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("SHERPA_HOME", home)
+	t.Setenv("SHERPA_REGISTRY_TOKEN", "")
+	gh := &registryauth.FakeGitHubClient{
+		Device:      registryauth.DeviceCode{DeviceCode: "device", UserCode: "ABCD", VerificationURI: "https://github.com/login/device", Interval: 0, ExpiresIn: 60},
+		PollResults: []registryauth.PollResult{{AccessToken: "github-token"}},
+		Users:       map[string]registryauth.GitHubUser{"github-token": {ID: 42, Login: "alice"}},
+	}
+	serverURL, st := startRegistryServerWithGitHub(t, gh, "admin-token")
+	t.Setenv("SHERPA_REGISTRY_URL", serverURL)
+	if out, errb, code := runCLI(t, nil, "login"); code != 0 || !strings.Contains(out, "alice") {
+		t.Fatalf("login code=%d out=%s err=%s", code, out, errb)
+	}
+	if out, errb, code := runCLI(t, nil, "init"); code != 0 {
+		t.Fatalf("init: %s %s", out, errb)
+	}
+
+	own := makeRegistryFixtureRepo(t, root, "alice", "own-stack", "Own stack", nil)
+	if out, errb, code := runCLI(t, nil, "clone", own, "--name", "own-stack"); code != 0 {
+		t.Fatalf("clone: %s %s", out, errb)
+	}
+	if _, errb, code := runCLI(t, nil, "use", "own-stack"); code != 0 {
+		t.Fatal(errb)
+	}
+	if out, errb, code := runCLI(t, "yes\n", "publish", "--registry", serverURL); code != 0 {
+		t.Fatalf("publish: %s %s", out, errb)
+	}
+	v, err := st.GetVersion(context.Background(), "alice", "own-stack", 2)
+	if err != nil || v.TrustTier != "linked" {
+		t.Fatalf("linked version = %#v, %v", v, err)
+	}
+
+	other := makeRegistryFixtureRepo(t, root, "bob", "other-stack", "Other stack", nil)
+	if out, errb, code := runCLI(t, nil, "clone", other, "--name", "other-stack"); code != 0 {
+		t.Fatalf("clone: %s %s", out, errb)
+	}
+	if _, errb, code := runCLI(t, nil, "use", "other-stack"); code != 0 {
+		t.Fatal(errb)
+	}
+	if out, errb, code := runCLI(t, "yes\n", "publish", "--registry", serverURL); code == 0 || !strings.Contains(errb, "only publish under") {
+		t.Fatalf("wrong-owner code=%d out=%s err=%s", code, out, errb)
+	}
+	if _, err := st.GetVersion(context.Background(), "bob", "other-stack", 2); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("wrong-owner write: %v", err)
+	}
+}
+
+func startRegistryServerWithGitHub(t *testing.T, gh registryauth.GitHubClient, adminToken string) (string, *store.PostgresStore) {
 	t.Helper()
 	dsn := store.StartPostgres(t)
 	st, err := store.OpenPostgres(context.Background(), dsn)
@@ -130,10 +187,10 @@ func startRegistryServer(t *testing.T) string {
 			t.Fatalf("close postgres: %v", err)
 		}
 	})
-	handler := api.New(st, content.NewBareGit(t.TempDir()), "test-token", &registryauth.FakeGitHubClient{})
+	handler := api.New(st, content.NewBareGit(t.TempDir()), adminToken, gh)
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return srv.URL
+	return srv.URL, st
 }
 
 func makeRegistryFixtureRepo(t *testing.T, root, owner, name, summary string, extra map[string]string) string {

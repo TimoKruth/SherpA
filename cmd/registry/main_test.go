@@ -18,10 +18,11 @@ func TestRunBootsRegistryWithPostgres(t *testing.T) {
 	defer cancel()
 
 	handler, cleanup, err := run(ctx, Config{
-		Port:        "0",
-		DatabaseURL: dsn,
-		Token:       "test-token",
-		ContentDir:  t.TempDir(),
+		Port:           "0",
+		DatabaseURL:    dsn,
+		Token:          "test-token",
+		ContentDir:     t.TempDir(),
+		GitHubClientID: "test-client",
 	})
 	if err != nil {
 		t.Fatalf("run registry: %v", err)
