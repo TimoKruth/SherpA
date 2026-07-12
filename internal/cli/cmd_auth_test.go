@@ -45,11 +45,27 @@ func TestLoginLogoutAndTokenPrecedence(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("session mode = %v, err=%v", info.Mode().Perm(), err)
 	}
-	if token, err := registryToken(home); err != nil || token != "sherpa-session" {
+	if token, err := registryToken(home, srv.URL+"/"); err != nil || token != "sherpa-session" {
 		t.Fatalf("token = %q, %v", token, err)
 	}
+	var otherRequests int
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherRequests++
+		t.Fatalf("session token request reached a different registry: %s", r.URL)
+	}))
+	defer other.Close()
+	if token, err := registryToken(home, other.URL); err == nil || token != "" {
+		t.Fatalf("cross-registry token = %q, %v", token, err)
+	}
+	profile := makeExpertRepo(t, true)
+	if err := publishRegistryVersion(ctx, profile, other.URL, "v1"); err == nil {
+		t.Fatal("cross-registry publish unexpectedly proceeded")
+	}
+	if otherRequests != 0 {
+		t.Fatalf("different registry received %d requests", otherRequests)
+	}
 	t.Setenv("SHERPA_REGISTRY_TOKEN", "admin")
-	if token, err := registryToken(home); err != nil || token != "admin" {
+	if token, err := registryToken(home, "not a registry URL"); err != nil || token != "admin" {
 		t.Fatalf("admin precedence = %q, %v", token, err)
 	}
 	if err := cmdLogout(ctx, nil); err != nil {
@@ -57,6 +73,19 @@ func TestLoginLogoutAndTokenPrecedence(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "registry-session.json")); !os.IsNotExist(err) {
 		t.Fatalf("session still exists: %v", err)
+	}
+}
+
+func TestLegacyRegistrySessionFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	legacy := []byte(`{"access_token":"legacy-session","login":"alice"}`)
+	if err := os.WriteFile(registrySessionPath(home), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHERPA_REGISTRY_TOKEN", "")
+	token, err := registryToken(home, "https://registry.example")
+	if err == nil || token != "" {
+		t.Fatalf("legacy token = %q, err = %v", token, err)
 	}
 }
 

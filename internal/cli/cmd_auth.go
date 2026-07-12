@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,6 +19,7 @@ import (
 type registrySession struct {
 	AccessToken string `json:"access_token"`
 	Login       string `json:"login"`
+	RegistryURL string `json:"registry_url"`
 }
 
 type deviceStart struct {
@@ -35,11 +39,15 @@ func registrySessionPath(home string) string {
 	return filepath.Join(home, "registry-session.json")
 }
 
-func saveRegistrySession(home, token, login string) error {
+func saveRegistrySession(home, registryURL, token, login string) error {
+	registryURL, err := normalizeRegistryBase(registryURL)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return err
 	}
-	b, err := json.Marshal(registrySession{AccessToken: token, Login: login})
+	b, err := json.Marshal(registrySession{AccessToken: token, Login: login, RegistryURL: registryURL})
 	if err != nil {
 		return err
 	}
@@ -63,37 +71,94 @@ func saveRegistrySession(home, token, login string) error {
 	return os.Rename(tmpName, registrySessionPath(home))
 }
 
-func loadRegistrySession(home string) (string, string, error) {
+func loadRegistrySession(home string) (string, string, string, error) {
 	b, err := os.ReadFile(registrySessionPath(home))
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	var session registrySession
 	if err := json.Unmarshal(b, &session); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if session.AccessToken == "" {
-		return "", "", errors.New("registry session has no access token")
+		return "", "", "", errors.New("registry session has no access token")
 	}
-	return session.AccessToken, session.Login, nil
+	if session.RegistryURL == "" {
+		return "", "", "", errors.New("registry session has no registry issuer; log in again")
+	}
+	registryURL, err := normalizeRegistryBase(session.RegistryURL)
+	if err != nil {
+		return "", "", "", fmt.Errorf("registry session has invalid registry issuer: %w", err)
+	}
+	return session.AccessToken, session.Login, registryURL, nil
 }
 
-func registryToken(home string) (string, error) {
+func registryToken(home, targetRegistryURL string) (string, error) {
 	if token := strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_TOKEN")); token != "" {
 		return token, nil
 	}
-	token, _, err := loadRegistrySession(home)
+	targetRegistryURL, err := normalizeRegistryBase(targetRegistryURL)
+	if err != nil {
+		return "", err
+	}
+	token, _, sessionRegistryURL, err := loadRegistrySession(home)
 	if os.IsNotExist(err) {
 		return "", nil
 	}
-	return token, err
+	if err != nil {
+		return "", err
+	}
+	if sessionRegistryURL != targetRegistryURL {
+		return "", fmt.Errorf("registry session belongs to %s; log in to %s before publishing", sessionRegistryURL, targetRegistryURL)
+	}
+	return token, nil
+}
+
+func normalizeRegistryBase(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("registry URL is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("registry URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", errors.New("registry URL must include scheme and host")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return "", errors.New("registry URL must not include credentials, query, or fragment")
+	}
+
+	u.Scheme = strings.ToLower(u.Scheme)
+	hostname := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		u.Host = net.JoinHostPort(hostname, port)
+	} else if strings.Contains(hostname, ":") {
+		u.Host = "[" + hostname + "]"
+	} else {
+		u.Host = hostname
+	}
+	u.Path = path.Clean("/" + strings.Trim(u.Path, "/"))
+	if u.Path == "/" {
+		u.Path = ""
+	}
+	u.RawPath = ""
+	return u.String(), nil
 }
 
 func cmdLogin(ctx *Ctx, args []string) error {
 	if len(args) != 0 {
 		return errors.New("usage: sherpa login")
 	}
-	base := strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL"))
+	base, err := normalizeRegistryBase(os.Getenv("SHERPA_REGISTRY_URL"))
+	if err != nil {
+		return err
+	}
 	startURL, err := registryEndpoint(base, "v1", "auth", "device", "start")
 	if err != nil {
 		return err
@@ -153,7 +218,7 @@ func cmdLogin(ctx *Ctx, args []string) error {
 		if err := json.Unmarshal(responseBody, &session); err != nil {
 			return err
 		}
-		if err := saveRegistrySession(ctx.Home, session.AccessToken, session.Login); err != nil {
+		if err := saveRegistrySession(ctx.Home, base, session.AccessToken, session.Login); err != nil {
 			return err
 		}
 		fmt.Fprintf(ctx.Stdout, "logged in as %s\n", session.Login)

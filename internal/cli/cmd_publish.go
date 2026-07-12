@@ -220,7 +220,7 @@ func publishRegistryVersion(ctx *Ctx, dir, registryURL, tag string) error {
 		return err
 	}
 
-	token, err := registryToken(ctx.Home)
+	token, err := registryToken(ctx.Home, registryURL)
 	if err != nil {
 		return fmt.Errorf("load registry session: %w", err)
 	}
