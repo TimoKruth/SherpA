@@ -23,6 +23,19 @@ setup-state barrier on every publish.
 Each gets its own spec→plan→build cycle. This document specifies **2c-i** and sketches the
 seams 2c-ii/iii plug into.
 
+**2c-i carry-ins for 2c-ii** (from the 2c-i whole-branch review — accept-class, none security-relevant):
+1. **Commit-before-InsertVersion orphan window** — `content.Commit` runs before `store.InsertVersion`
+   (spec §8's content-first ordering). A DB failure after Commit leaves scanned-but-unregistered git
+   content, and that version number then 500s on republish because the tag is immutable. Fail-closed
+   holds (the content was scanned). 2c-ii should add a reconcile/GC job and return 409 (not 500) when
+   the tag already exists but no version row does.
+2. **Server-side 500 logging** — 500 paths return a generic message to the client (correct, no leak)
+   but currently log nothing server-side; add `log.Printf` on those paths so ops isn't blind.
+3. **Dead `SHERPA_REGISTRY_URL` re-check** in `cmd_publish.go` (~:197) — one-line cleanup next time
+   the file is touched.
+4. **Publisher identity** — 2c-i's single static token authorizes publishing under ANY owner (in-scope
+   for 2c-i per §3); 2c-ii's GitHub OAuth binds a publisher to the owners they may publish under.
+
 ## 3. Decisions (2026-07-11)
 
 - **Backend: Go**, one module, reusing `internal/stack` (manifest parse/validate) and
