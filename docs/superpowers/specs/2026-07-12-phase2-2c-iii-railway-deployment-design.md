@@ -1,9 +1,18 @@
 # SherpA Phase 2 - Sub-project 2c-iii - Railway Deployment
 
-**Status:** Design for approval
+**Status:** Design for approval (Fable-reviewed 2026-07-12)
 **Date:** 2026-07-12
 **Parent specs:** `2026-07-11-phase2-2c-registry-design.md` (2c decomposition),
 `2026-07-12-phase2-2c-ii-auth-identity-design.md` (authenticated registry)
+
+**Fable review revisions (2026-07-12):** (1) canonical clone/issuer host is pinned via
+`SHERPA_PUBLIC_BASE_URL`, not read from the client-forwardable `X-Forwarded-Host` (§5.3, §6);
+(2) an off-site application-level content export (`git bundle` + `pg_dump` to storage outside
+the Railway project) is required for real DR, since Railway volume backups are same-project and
+wiped with the volume (§8); (3) the CLI session file is registry-scoped so a staging login
+cannot publish against production (§6); (4) `WriteTimeout` must cover the full publish handler,
+not just the upload, bounded by the 50 MiB cap (§5.2); (5) current migrations are additive, so
+image rollback is safe today (§11). Depends on 2c-ii being built first.
 
 ## 1. Goal
 
@@ -142,11 +151,16 @@ bounded and must not turn a transient database delay into unbounded request buil
 
 Replace bare `http.ListenAndServe` with `http.Server` configured with at least:
 
-- `ReadHeaderTimeout`
-- `ReadTimeout` suitable for a 50 MiB multipart publish
-- `WriteTimeout` below Railway's 15-minute request ceiling
-- `IdleTimeout`
-- bounded graceful shutdown on `SIGTERM`/`SIGINT`
+- `ReadHeaderTimeout` (small — seconds).
+- `ReadTimeout` suitable for a 50 MiB multipart publish upload.
+- `WriteTimeout` that covers the **entire publish handler**, not just the upload: after the
+  body is read the handler still unbundles, checks out, scans `git log --all`, and commits —
+  compute that can take seconds-to-minutes for a large history. Set it generously (a few
+  minutes) but well below Railway's 15-minute ceiling; the 50 MiB body cap bounds the worst
+  case. (Fable review: too-low a `WriteTimeout` kills legitimate large publishes; too-high
+  invites slow-response abuse — the body cap is what makes a middle value safe.)
+- `IdleTimeout`.
+- bounded graceful shutdown on `SIGTERM`/`SIGINT`.
 
 Shutdown stops new requests, lets in-flight publishes finish within the grace period, then
 closes the Postgres pool. A killed publish may leave staged files or a scanned orphan tag;
@@ -154,15 +168,23 @@ startup cleanup and the 2c-ii orphan reconciliation path handle those states.
 
 ### 5.3 Public URL generation
 
-Railway terminates TLS before the Go process. `repoURL` must use trusted proxy headers in the
-Railway deployment:
+Railway terminates TLS before the Go process, so `repoURL` (the clone URL clients actually
+`git clone`) cannot be derived from `r.TLS`/`r.Host` alone. **The canonical host is pinned by
+configuration, not read from a request header** — this is a deliberate hardening over the
+original "prefer validated `X-Forwarded-Host`" idea (Fable review 2026-07-12):
 
-1. Prefer `X-Forwarded-Proto=https` over `r.TLS`.
-2. Prefer validated `X-Forwarded-Host` over the internal request host.
-3. Fall back to the current direct-server behavior for local tests.
+1. When `SHERPA_PUBLIC_BASE_URL` is set (e.g. `https://registry.sherpa.dev`), build `repoURL`
+   from it verbatim. The request's `Host`/forwarded headers are **not** consulted for the host.
+2. `X-Forwarded-Proto` is honored only to choose scheme in the fallback case, and only when
+   `SHERPA_TRUST_PROXY=true`.
+3. With neither configured (local tests), fall back to the current direct-server
+   `scheme://r.Host` behavior.
 
-Only honor forwarded headers when deployment configuration explicitly enables trusted-proxy
-mode; arbitrary direct clients must not be able to forge canonical clone URLs.
+Rationale: `X-Forwarded-Host` is client-forwardable; even "in proxy mode" a client can send it,
+and Railway does not strip a client-supplied value. Trusting it enables host-header injection —
+poisoned clone URLs that redirect `clone`/`try` to an attacker-controlled repository, and a
+mismatched session issuer. A pinned `SHERPA_PUBLIC_BASE_URL` removes the header from the trust
+path entirely. (This also settles open question #2: the base URL is the stable session issuer.)
 
 ## 6. Configuration and Secrets
 
@@ -177,9 +199,11 @@ SHERPA_GITHUB_CLIENT_ID=<GitHub OAuth App client id>
 Optional variables:
 
 ```text
+SHERPA_PUBLIC_BASE_URL=https://<canonical registry host>   # pins repo_url + session issuer (§5.3)
 SHERPA_REGISTRY_TOKEN=<admin/CI escape hatch; absent in normal production use>
-SHERPA_TRUST_PROXY=true
+SHERPA_TRUST_PROXY=true                                     # scheme-from-X-Forwarded-Proto only
 PORT=<injected by Railway>
+SHERPA_DB_MAX_CONNS=<pgxpool cap, matched to the Railway Postgres plan's connection limit>
 ```
 
 Rules:
@@ -192,6 +216,12 @@ Rules:
   client ID is required by the public-client device flow.
 - Staging and production use different Railway environments, databases, volumes, admin
   tokens, GitHub OAuth Apps, and public domains.
+- **Client session must be registry-scoped (Fable review):** because staging and production are
+  different domains/issuers, the CLI's 2c-ii session file (`$SHERPA_HOME/registry-session.json`)
+  must record the registry base URL the session was minted for, and `publish` must use a session
+  only when its stored registry matches the active `SHERPA_REGISTRY_URL`/`SHERPA_PUBLIC_BASE_URL`
+  — otherwise re-login. This is a small 2c-ii touch-up (the session file gains a `registry`
+  field); flag it in the 2c-iii plan so a staging login can never publish against production.
 
 ## 7. Public Endpoint Hardening
 
@@ -218,7 +248,19 @@ missing content during ordinary operation.
 
 Configure automated backups for both the Postgres volume and the API Git volume, plus a
 manual backup before migrations or recovery drills. For production, enable Postgres PITR if
-the selected Railway plan supports it; volume snapshots remain the Git recovery mechanism.
+the selected Railway plan supports it; volume snapshots remain the fast Git recovery mechanism.
+
+**Off-site backup is required, not just Railway volume backups (Fable review 2026-07-12).**
+Per §3, Railway volume backups live inside the same project/environment and are *deleted when
+the volume is wiped* — so they protect against redeploy/restart mistakes but not against
+project loss, account compromise, or a region incident. Add an **application-level content
+export** as the durable backup: a scheduled job that, for each stack repo, produces a
+`git bundle --all` and a `pg_dump`, and ships them to storage **outside the Railway project**
+(object storage / a second provider). This is the true DR copy; Railway volume/PITR backups are
+the convenience tier for fast in-project restore. The export is read-only (clone/bundle from the
+bare repos; it never mutates content) and can run as a separate scheduled Railway cron service
+or an external puller — its packaging is a plan decision, but the off-site export itself is
+in-scope for 2c-iii.
 
 Restore runbook:
 
@@ -295,9 +337,12 @@ Production provisioning occurs only after this gate is recorded in the deploymen
 - Monitor availability externally because Railway's deployment healthcheck is not continuous.
 - Alert on 5xx rate, failed GitHub calls, publish rejection classes, database saturation, and
   volume capacity. Never use token values as log fields or metric labels.
-- Rollback application images normally when migrations are backward compatible. A migration
-  that is not backward compatible requires an explicit expand/migrate/contract sequence in
-  its future plan.
+- Rollback application images normally when migrations are backward compatible. **The current
+  2c-i/2c-ii migrations are all additive** (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT
+  EXISTS` with defaults), so an older image runs unchanged against the newer schema — image
+  rollback is therefore safe today without a schema step (Fable review). A future
+  non-additive migration (drop/rename/tighten) requires an explicit expand/migrate/contract
+  sequence in its own plan; note this as a gate on any such migration.
 
 ## 12. Alternatives Considered
 
