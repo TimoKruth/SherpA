@@ -26,6 +26,7 @@ func New(st store.Store, cs content.ContentStore, token string) http.Handler {
 	mux.HandleFunc("GET /v1/stacks/{owner}/{repo}/", s.handleGit)
 	mux.HandleFunc("GET /v1/stacks/{owner}/{name}", s.handleStack)
 	mux.HandleFunc("GET /v1/stacks/{owner}/{name}/versions/{version}", s.handleVersion)
+	mux.HandleFunc("POST /v1/stacks/{owner}/{name}/versions", s.handlePublish)
 	return mux
 }
 
