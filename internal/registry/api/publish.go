@@ -1,12 +1,11 @@
 package api
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,8 +28,14 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	if !s.authorized(r.Header.Get("Authorization")) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+	_, trustTier, authStatus, err := s.authorizePublish(r, owner)
+	if err != nil {
+		if authStatus == http.StatusInternalServerError {
+			log.Printf("authorize publish: %v", err)
+			writeError(w, authStatus, "internal server error")
+		} else {
+			writeError(w, authStatus, err.Error())
+		}
 		return
 	}
 	if !validPublishSegment(owner) || !validPublishSegment(name) {
@@ -153,6 +158,7 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		GitTag:     gitTag,
 		Manifest:   manifestJSON,
 		ScanReport: scanReportJSON,
+		TrustTier:  trustTier,
 	}
 	if err := s.store.InsertVersion(r.Context(), version); errors.Is(err, store.ErrVersionExists) {
 		writeError(w, http.StatusConflict, "version already exists")
@@ -168,20 +174,8 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		Manifest:   rawOrEmptyObject(version.Manifest),
 		ScanReport: rawOrEmptyObject(version.ScanReport),
 		Changelog:  version.Changelog,
+		TrustTier:  version.TrustTier,
 	})
-}
-
-func (s *server) authorized(header string) bool {
-	if s.token == "" {
-		return false
-	}
-	token, ok := strings.CutPrefix(header, "Bearer ")
-	if !ok || token == "" {
-		return false
-	}
-	got := sha256.Sum256([]byte(token))
-	want := sha256.Sum256([]byte(s.token))
-	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }
 
 var errBundleTooLarge = errors.New("bundle too large")

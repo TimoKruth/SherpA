@@ -31,6 +31,7 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 			Tags:       []string{"review", "security"},
 		},
 		Version:     2,
+		TrustTier:   "linked",
 		PublishedAt: testTime(2),
 	}}
 	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
@@ -58,6 +59,7 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 			Tags       []string `json:"tags"`
 			Harness    string   `json:"harness"`
 			Version    int      `json:"version"`
+			TrustTier  string   `json:"trust_tier"`
 			ForkedFrom string   `json:"forked_from"`
 			RepoURL    string   `json:"repo_url"`
 		} `json:"stacks"`
@@ -67,7 +69,7 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 		t.Fatalf("stacks len = %d, want 1: %#v", len(body.Stacks), body.Stacks)
 	}
 	got := body.Stacks[0]
-	if got.Ref != "@alice/reviewer" || got.Name != "reviewer" || got.Owner != "alice" || got.Version != 2 {
+	if got.Ref != "@alice/reviewer" || got.Name != "reviewer" || got.Owner != "alice" || got.Version != 2 || got.TrustTier != "linked" {
 		t.Fatalf("stack identity = %#v", got)
 	}
 	if got.Summary != "Review code with strict security checks" || got.Harness != "claude-code" {
@@ -97,12 +99,14 @@ func TestStackDetailReturnsVersions(t *testing.T) {
 	st.versions["alice/reviewer"] = []store.Version{
 		{
 			Version:     2,
+			TrustTier:   "linked",
 			Changelog:   "Second release",
 			ScanReport:  json.RawMessage(`{"findings":[{"path":"x"},{"path":"y"}]}`),
 			PublishedAt: testTime(2),
 		},
 		{
 			Version:     1,
+			TrustTier:   "linked",
 			Changelog:   "Initial release",
 			ScanReport:  json.RawMessage(`{"findings":[]}`),
 			PublishedAt: testTime(1),
@@ -129,6 +133,7 @@ func TestStackDetailReturnsVersions(t *testing.T) {
 			PublishedAt string `json:"published_at"`
 			Changelog   string `json:"changelog"`
 			ScanSummary string `json:"scan_summary"`
+			TrustTier   string `json:"trust_tier"`
 		} `json:"versions"`
 	}
 	decodeJSON(t, rr, &body)
@@ -141,7 +146,7 @@ func TestStackDetailReturnsVersions(t *testing.T) {
 	if len(body.Versions) != 2 {
 		t.Fatalf("versions len = %d, want 2: %#v", len(body.Versions), body.Versions)
 	}
-	if body.Versions[0].Version != 2 || body.Versions[0].ScanSummary != "2 findings" {
+	if body.Versions[0].Version != 2 || body.Versions[0].ScanSummary != "2 findings" || body.Versions[0].TrustTier != "linked" {
 		t.Fatalf("version 2 summary = %#v", body.Versions[0])
 	}
 	if body.Versions[1].Version != 1 || body.Versions[1].ScanSummary != "clean" {
@@ -167,6 +172,7 @@ func TestVersionDetailReturnsManifestAndScanReport(t *testing.T) {
 		Manifest:    json.RawMessage(`{"name":"reviewer","version":2}`),
 		ScanReport:  json.RawMessage(`{"findings":[]}`),
 		Changelog:   "Second release",
+		TrustTier:   "linked",
 		PublishedAt: testTime(2),
 	}
 	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
@@ -185,9 +191,10 @@ func TestVersionDetailReturnsManifestAndScanReport(t *testing.T) {
 		ScanReport  json.RawMessage `json:"scan_report"`
 		Changelog   string          `json:"changelog"`
 		PublishedAt string          `json:"published_at"`
+		TrustTier   string          `json:"trust_tier"`
 	}
 	decodeJSON(t, rr, &body)
-	if body.Version != 2 || body.GitTag != "v2" || body.Changelog != "Second release" {
+	if body.Version != 2 || body.GitTag != "v2" || body.Changelog != "Second release" || body.TrustTier != "linked" {
 		t.Fatalf("version response = %#v", body)
 	}
 	if string(body.Manifest) != `{"name":"reviewer","version":2}` {

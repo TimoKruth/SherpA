@@ -51,6 +51,65 @@ func TestPublishRequiresBearerTokenBeforeWrites(t *testing.T) {
 	}
 }
 
+func TestPublishAuthorizationMatrixBeforeStaging(t *testing.T) {
+	valid := "session-token"
+	for _, tc := range []struct {
+		name   string
+		owner  string
+		token  string
+		status int
+	}{
+		{"missing", "alice", "", http.StatusUnauthorized},
+		{"invalid", "alice", "bad", http.StatusUnauthorized},
+		{"expired", "alice", "expired", http.StatusUnauthorized},
+		{"wrong owner", "bob", valid, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newPublishSpyStore()
+			st.sessionUsers[registryauth.HashToken(valid)] = "alice"
+			cs := newPublishSpyContent(t)
+			h := New(st, cs, "admin", &registryauth.FakeGitHubClient{})
+			rr := postBundle(t, h, tc.owner, "n", []byte("not staged"), tc.token)
+			if rr.Code != tc.status {
+				t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+			}
+			assertNoPublishWrites(t, st, cs)
+			if cs.stageCalls != 0 {
+				t.Fatalf("StageBundle calls = %d", cs.stageCalls)
+			}
+		})
+	}
+}
+
+func TestPublishTrustTierByCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		owner string
+		token string
+		tier  string
+	}{
+		{"admin any owner", "org", "admin", "unreviewed"},
+		{"session own login", "alice", "session-token", "linked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newPublishSpyStore()
+			st.sessionUsers[registryauth.HashToken("session-token")] = "alice"
+			h := New(st, newPublishSpyContent(t), "admin", &registryauth.FakeGitHubClient{})
+			bundle := buildPublishBundle(t, map[string]string{
+				"stack.yaml": "name: n\nowner: " + tc.owner + "\nversion: 1\nharness: codex\n",
+				"README.md":  "clean\n",
+			})
+			rr := postBundle(t, h, tc.owner, "n", bundle, tc.token)
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+			}
+			if got := st.insertedVersions[0].TrustTier; got != tc.tier {
+				t.Fatalf("TrustTier = %q", got)
+			}
+		})
+	}
+}
+
 func TestPublishBlocksTrackedSecretFailClosed(t *testing.T) {
 	st := newPublishSpyStore()
 	cs := newPublishSpyContent(t)
@@ -212,6 +271,7 @@ func TestPublishCleanBundleCommitsMetadataAndAppearsInDetail(t *testing.T) {
 
 type publishSpyContent struct {
 	inner       *content.BareGit
+	stageCalls  int
 	commitCalls int
 }
 
@@ -225,6 +285,7 @@ func (p *publishSpyContent) EnsureRepo(owner, name string) error {
 }
 
 func (p *publishSpyContent) StageBundle(bundle []byte, gitTag string) (string, string, func(), error) {
+	p.stageCalls++
 	return p.inner.StageBundle(bundle, gitTag)
 }
 

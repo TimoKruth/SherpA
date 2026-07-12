@@ -23,6 +23,7 @@ type searchStackResponse struct {
 	Tags       []string `json:"tags"`
 	Harness    string   `json:"harness"`
 	Version    int      `json:"version"`
+	TrustTier  string   `json:"trust_tier"`
 	ForkedFrom string   `json:"forked_from"`
 	RepoURL    string   `json:"repo_url"`
 }
@@ -42,6 +43,7 @@ type versionSummary struct {
 	PublishedAt string `json:"published_at"`
 	Changelog   string `json:"changelog"`
 	ScanSummary string `json:"scan_summary"`
+	TrustTier   string `json:"trust_tier"`
 }
 
 type versionResponse struct {
@@ -51,6 +53,7 @@ type versionResponse struct {
 	ScanReport  json.RawMessage `json:"scan_report"`
 	Changelog   string          `json:"changelog"`
 	PublishedAt string          `json:"published_at"`
+	TrustTier   string          `json:"trust_tier"`
 }
 
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +74,7 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			Tags:       tagsOrEmpty(match.Tags),
 			Harness:    match.Harness,
 			Version:    match.Version,
+			TrustTier:  match.TrustTier,
 			ForkedFrom: match.ForkedFrom,
 			RepoURL:    repoURL(r, match.Owner, match.Name),
 		})
@@ -107,6 +111,7 @@ func (s *server) handleStack(w http.ResponseWriter, r *http.Request) {
 			PublishedAt: formatTime(version.PublishedAt),
 			Changelog:   version.Changelog,
 			ScanSummary: scanSummary(version.ScanReport),
+			TrustTier:   version.TrustTier,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -138,6 +143,7 @@ func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		ScanReport:  rawOrEmptyObject(version.ScanReport),
 		Changelog:   version.Changelog,
 		PublishedAt: formatTime(version.PublishedAt),
+		TrustTier:   version.TrustTier,
 	})
 }
 

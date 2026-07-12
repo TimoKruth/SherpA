@@ -10,18 +10,18 @@ import (
 )
 
 type server struct {
-	store   store.Store
-	content content.ContentStore
-	token   string
-	github  registryauth.GitHubClient
+	store      store.Store
+	content    content.ContentStore
+	adminToken string
+	github     registryauth.GitHubClient
 }
 
-func New(st store.Store, cs content.ContentStore, token string, github registryauth.GitHubClient) http.Handler {
+func New(st store.Store, cs content.ContentStore, adminToken string, github registryauth.GitHubClient) http.Handler {
 	s := &server{
-		store:   st,
-		content: cs,
-		token:   token,
-		github:  github,
+		store:      st,
+		content:    cs,
+		adminToken: adminToken,
+		github:     github,
 	}
 
 	mux := http.NewServeMux()
