@@ -32,6 +32,54 @@ func TestTagCommit(t *testing.T) {
 	}
 }
 
+func TestBareGitStageUsesBundleAdvertisedHead(t *testing.T) {
+	root := t.TempDir()
+	store := NewBareGit(filepath.Join(root, "content"))
+	src := buildStackRepo(t, root, "v1", map[string]string{
+		"stack.yaml": "name: reviewer\nversion: 1\n",
+	})
+	upstreamMain, err := gitutil.Run(src, "rev-parse", "main")
+	if err != nil {
+		t.Fatalf("resolve upstream main: %v", err)
+	}
+
+	mainBundle := createBundle(t, src, root, "main.bundle")
+	_, mainWorktree, mainCleanup, err := store.StageBundle(mainBundle, "")
+	if err != nil {
+		t.Fatalf("stage main bundle: %v", err)
+	}
+	assertFile(t, mainWorktree, "stack.yaml", "name: reviewer\nversion: 1\n")
+	mainCleanup()
+
+	if _, err := gitutil.Run(src, "checkout", "-b", "local"); err != nil {
+		t.Fatalf("create local branch: %v", err)
+	}
+	commitStackRepo(t, src, "v2", map[string]string{
+		"stack.yaml": "name: reviewer\nversion: 2\n",
+	})
+	bundle := createBundle(t, src, root, "local.bundle")
+	stageDir, worktreeDir, cleanup, err := store.StageBundle(bundle, "")
+	if err != nil {
+		t.Fatalf("stage local-HEAD bundle: %v", err)
+	}
+	t.Cleanup(cleanup)
+	assertFile(t, worktreeDir, "stack.yaml", "name: reviewer\nversion: 2\n")
+	assertGitOutput(t, stageDir, "main", "symbolic-ref", "--short", "HEAD")
+	assertGitOutput(t, stageDir, upstreamMain, "rev-parse", "refs/sherpa/bundle-heads/main")
+
+	if err := store.Commit("alice", "reviewer", stageDir); err != nil {
+		t.Fatalf("commit local-HEAD bundle: %v", err)
+	}
+	cloneDir := filepath.Join(root, "clone-local-head")
+	if err := gitutil.Clone("file://"+store.RepoPath("alice", "reviewer"), cloneDir); err != nil {
+		t.Fatalf("clone local-HEAD repo: %v", err)
+	}
+	assertFile(t, cloneDir, "stack.yaml", "name: reviewer\nversion: 2\n")
+	if _, err := gitutil.Run(cloneDir, "checkout", "-b", "local"); err != nil {
+		t.Fatalf("create SherpA local branch after clone: %v", err)
+	}
+}
+
 func TestBareGitStageCommitAndClone(t *testing.T) {
 	root := t.TempDir()
 	store := NewBareGit(filepath.Join(root, "content"))

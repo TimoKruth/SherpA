@@ -66,7 +66,16 @@ func (b *BareGit) StageBundle(bundle []byte, gitTag string) (stageDir, worktreeD
 	if _, err := gitutil.Run(stageDir, "fetch", bundlePath, "refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"); err != nil {
 		return "", "", nil, fmt.Errorf("fetch bundle: %w", err)
 	}
-	if err := setDefaultHead(stageDir); err != nil {
+	bundleBranch, err := bundleHeadBranch(stageDir, bundlePath)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if bundleBranch != "" {
+		err = promoteBundleHeadToMain(stageDir, bundleBranch)
+	} else {
+		err = setDefaultHead(stageDir)
+	}
+	if err != nil {
 		return "", "", nil, err
 	}
 
@@ -107,7 +116,7 @@ func (b *BareGit) Commit(owner, name, stageDir string) error {
 		if _, err := gitutil.Run(dest, "fetch", stageDir, refspec); err != nil {
 			return fmt.Errorf("fetch staged default branch: %w", err)
 		}
-		if err := setDefaultHead(dest); err != nil {
+		if err := setHeadBranch(dest, branch); err != nil {
 			return err
 		}
 		if _, err := gitutil.Run(dest, "update-server-info"); err != nil {
@@ -156,6 +165,10 @@ func setDefaultHead(repo string) error {
 	if err != nil {
 		return err
 	}
+	return setHeadBranch(repo, branch)
+}
+
+func setHeadBranch(repo, branch string) error {
 	if _, err := gitutil.Run(repo, "symbolic-ref", "HEAD", "refs/heads/"+branch); err != nil {
 		return fmt.Errorf("set default HEAD: %w", err)
 	}
@@ -163,6 +176,11 @@ func setDefaultHead(repo string) error {
 }
 
 func defaultBranch(repo string) (string, error) {
+	if branch, err := gitutil.Run(repo, "symbolic-ref", "--short", "HEAD"); err == nil && branch != "" {
+		if _, err := gitutil.Run(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+			return branch, nil
+		}
+	}
 	if _, err := gitutil.Run(repo, "rev-parse", "--verify", "--quiet", "refs/heads/main"); err == nil {
 		return "main", nil
 	}
@@ -177,6 +195,47 @@ func defaultBranch(repo string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("staged repo has no branches")
+}
+
+func bundleHeadBranch(repo, bundlePath string) (string, error) {
+	out, err := gitutil.Run(filepath.Dir(bundlePath), "bundle", "list-heads", bundlePath, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("inspect bundle HEAD: %w", err)
+	}
+	fields := strings.Fields(out)
+	if len(fields) < 2 || fields[1] != "HEAD" {
+		return "", nil
+	}
+	headCommit := fields[0]
+	branches, err := gitutil.Run(repo, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads")
+	if err != nil {
+		return "", fmt.Errorf("list staged branches: %w", err)
+	}
+	var matches []string
+	for _, line := range strings.Split(branches, "\n") {
+		parts := strings.Fields(line)
+		if len(parts) == 2 && parts[1] == headCommit {
+			matches = append(matches, parts[0])
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	return "", nil
+}
+
+func promoteBundleHeadToMain(repo, bundleBranch string) error {
+	if bundleBranch != "main" {
+		if _, err := gitutil.Run(repo, "rev-parse", "--verify", "--quiet", "refs/heads/main"); err == nil {
+			if _, err := gitutil.Run(repo, "update-ref", "refs/sherpa/bundle-heads/main", "refs/heads/main"); err != nil {
+				return fmt.Errorf("preserve bundled main: %w", err)
+			}
+		}
+		if _, err := gitutil.Run(repo, "update-ref", "refs/heads/main", "refs/heads/"+bundleBranch); err != nil {
+			return fmt.Errorf("promote bundle HEAD to main: %w", err)
+		}
+	}
+	return setHeadBranch(repo, "main")
 }
 
 func validateOwnerName(owner, name string) error {
