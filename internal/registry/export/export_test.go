@@ -259,6 +259,18 @@ func TestStartSchedulerDisabledAndPartialConfiguration(t *testing.T) {
 	}
 }
 
+func TestValidateSchedulerConfigRejectsTokenOnlyAndInsecureCollector(t *testing.T) {
+	if err := ValidateSchedulerConfig(SchedulerConfig{Token: "secret"}); err == nil {
+		t.Fatal("token-only scheduler configuration accepted")
+	}
+	err := ValidateSchedulerConfig(SchedulerConfig{
+		ContentDir: t.TempDir(), CollectorURL: "http://collector.example/upload", Interval: time.Hour,
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("insecure collector error = %v", err)
+	}
+}
+
 func createBareRepository(t *testing.T, contentDir, owner, name string) {
 	t.Helper()
 	work := t.TempDir()
