@@ -3,9 +3,11 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 	"sherpa/internal/harness"
 	"sherpa/internal/publishscan"
 	"sherpa/internal/sanitize"
+	"sherpa/internal/stack"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,9 +27,12 @@ func init() {
 }
 
 func cmdPublish(ctx *Ctx, args []string) error {
-	remote, err := parsePublishArgs(args)
+	req, err := parsePublishArgs(args)
 	if err != nil {
 		return err
+	}
+	if req.registry == "" && req.remote == "" {
+		req.registry = strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL"))
 	}
 	profile, err := activeProfile(ctx)
 	if err != nil {
@@ -37,7 +43,7 @@ func cmdPublish(ctx *Ctx, args []string) error {
 		return err
 	}
 
-	historyRange, err := publishHistoryRange(profile.Path, remote)
+	historyRange, err := publishHistoryRangeForRequest(profile.Path, req)
 	if err != nil {
 		return err
 	}
@@ -86,6 +92,10 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	if _, err := gitutil.Run(profile.Path, "tag", tag); err != nil {
 		return err
 	}
+	if req.registry != "" {
+		return publishRegistryVersion(ctx, profile.Path, req.registry, tag)
+	}
+	remote := req.remote
 	if _, err := gitutil.Run(profile.Path, "push", remote, "local:main", "refs/tags/"+tag); err != nil {
 		return err
 	}
@@ -93,29 +103,45 @@ func cmdPublish(ctx *Ctx, args []string) error {
 	return nil
 }
 
-func parsePublishArgs(args []string) (string, error) {
-	var remote string
+type publishRequest struct {
+	remote   string
+	registry string
+}
+
+func parsePublishArgs(args []string) (publishRequest, error) {
+	var req publishRequest
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--remote":
 			i++
 			if i >= len(args) {
-				return "", fmt.Errorf("--remote requires a value")
+				return publishRequest{}, fmt.Errorf("--remote requires a value")
 			}
-			remote = args[i]
+			req.remote = args[i]
 		case strings.HasPrefix(a, "--remote="):
-			remote = strings.TrimPrefix(a, "--remote=")
+			req.remote = strings.TrimPrefix(a, "--remote=")
+		case a == "--registry":
+			i++
+			if i >= len(args) {
+				return publishRequest{}, fmt.Errorf("--registry requires a value")
+			}
+			req.registry = args[i]
+		case strings.HasPrefix(a, "--registry="):
+			req.registry = strings.TrimPrefix(a, "--registry=")
 		case strings.HasPrefix(a, "-"):
-			return "", fmt.Errorf("unknown flag %q", a)
+			return publishRequest{}, fmt.Errorf("unknown flag %q", a)
 		default:
-			return "", fmt.Errorf("unexpected argument %q", a)
+			return publishRequest{}, fmt.Errorf("unexpected argument %q", a)
 		}
 	}
-	if remote == "" {
-		return "", fmt.Errorf("usage: sherpa publish --remote <git-url>")
+	if req.remote != "" && req.registry != "" {
+		return publishRequest{}, fmt.Errorf("use only one of --remote or --registry")
 	}
-	return remote, nil
+	if req.remote == "" && req.registry == "" && strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL")) == "" {
+		return publishRequest{}, fmt.Errorf("usage: sherpa publish --remote <git-url> or sherpa publish --registry <url>")
+	}
+	return req, nil
 }
 
 func hasSecretFindings(findings []sanitize.Finding) bool {
@@ -165,6 +191,76 @@ func parseRemoteMainSHA(out string) string {
 		}
 	}
 	return ""
+}
+
+func publishHistoryRangeForRequest(dir string, req publishRequest) (string, error) {
+	if req.registry != "" || (req.remote == "" && strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL")) != "") {
+		return "local", nil
+	}
+	return publishHistoryRange(dir, req.remote)
+}
+
+func publishRegistryVersion(ctx *Ctx, dir, registryURL, tag string) error {
+	m, err := readStackManifest(dir)
+	if err != nil {
+		return err
+	}
+	owner := strings.TrimPrefix(m.Owner, "@")
+	if owner == "" {
+		return fmt.Errorf("stack.yaml: owner is required for registry publish")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "sherpa-publish-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	bundlePath := filepath.Join(tmpDir, "stack.bundle")
+	if _, err := gitutil.Run(dir, "bundle", "create", bundlePath, "--all"); err != nil {
+		return err
+	}
+
+	status, body, err := publishToRegistry(registryURL, os.Getenv("SHERPA_REGISTRY_TOKEN"), owner, m.Name, bundlePath)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusCreated {
+		fmt.Fprintf(ctx.Stdout, "published %s to %s\n", tag, registryURL)
+		return nil
+	}
+	printRegistryPublishError(ctx.Stderr, status, body)
+	return fmt.Errorf("registry publish failed: HTTP %d", status)
+}
+
+func readStackManifest(dir string) (*stack.Manifest, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "stack.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("stack.yaml: %w", err)
+	}
+	return stack.Parse(b)
+}
+
+func printRegistryPublishError(w io.Writer, status int, body []byte) {
+	var resp registryPublishError
+	if err := json.Unmarshal(body, &resp); err == nil {
+		for _, finding := range resp.Findings {
+			fmt.Fprintf(w, "%s:%d: %s: %s\n", finding.File, finding.Line, finding.Kind, finding.Excerpt)
+		}
+		for _, violation := range resp.Violations {
+			fmt.Fprintf(w, "validation: %s\n", violation)
+		}
+		if resp.Error != "" {
+			fmt.Fprintf(w, "%s\n", resp.Error)
+		}
+		if len(resp.Findings) > 0 || len(resp.Violations) > 0 || resp.Error != "" {
+			return
+		}
+	}
+	if len(strings.TrimSpace(string(body))) > 0 {
+		fmt.Fprintln(w, strings.TrimSpace(string(body)))
+		return
+	}
+	fmt.Fprintf(w, "registry publish failed: HTTP %d\n", status)
 }
 
 func confirm(in *bufio.Reader, out io.Writer, prompt string) error {

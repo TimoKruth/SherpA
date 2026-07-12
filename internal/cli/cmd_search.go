@@ -40,11 +40,8 @@ func cmdSearch(ctx *Ctx, args []string) error {
 		return fmt.Errorf("usage: sherpa search <query>")
 	}
 	indexURL := os.Getenv("SHERPA_INDEX_URL")
-	if indexURL == "" {
-		return fmt.Errorf("SHERPA_INDEX_URL is required for Phase 1 search")
-	}
-
-	doc, err := loadIndex(indexURL)
+	registryURL := os.Getenv("SHERPA_REGISTRY_URL")
+	doc, err := loadSearchDocument(registryURL, indexURL, query)
 	if err != nil {
 		return err
 	}
@@ -58,6 +55,16 @@ func cmdSearch(ctx *Ctx, args []string) error {
 	}
 	fmt.Fprintf(ctx.Stdout, "try: sherpa try %s\n", matches[0].RepoURL)
 	return nil
+}
+
+func loadSearchDocument(registryURL, indexURL, query string) (indexDocument, error) {
+	if registryURL != "" {
+		return loadRegistrySearch(registryURL, query)
+	}
+	if indexURL == "" {
+		return indexDocument{}, fmt.Errorf("SHERPA_INDEX_URL is required for Phase 1 search")
+	}
+	return loadIndex(indexURL)
 }
 
 func loadIndex(indexURL string) (indexDocument, error) {

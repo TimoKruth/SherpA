@@ -71,7 +71,11 @@ func (b *BareGit) StageBundle(bundle []byte, gitTag string) (stageDir, worktreeD
 	}
 
 	worktreeDir = filepath.Join(tmpDir, "worktree")
-	if _, err := gitutil.Run(stageDir, "worktree", "add", worktreeDir, gitTag); err != nil {
+	checkoutRef := gitTag
+	if checkoutRef == "" {
+		checkoutRef = "HEAD"
+	}
+	if _, err := gitutil.Run(stageDir, "worktree", "add", worktreeDir, checkoutRef); err != nil {
 		return "", "", nil, fmt.Errorf("add worktree: %w", err)
 	}
 

@@ -54,7 +54,11 @@ func cmdTry(ctx *Ctx, args []string) error {
 			return err
 		}
 	} else {
-		installed, err := installStack(ctx, req.target, req.name)
+		cloneURL, err := resolveRegistryRef(req.target)
+		if err != nil {
+			return err
+		}
+		installed, err := installStack(ctx, cloneURL, req.name)
 		if err != nil {
 			return err
 		}

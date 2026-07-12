@@ -69,7 +69,7 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeValidationError(w, []string{fmt.Sprintf("stack.yaml name %q does not match path name %q", m.Name, name)})
 		return
 	}
-	if m.Owner != "" && m.Owner != owner {
+	if m.Owner != "" && strings.TrimPrefix(m.Owner, "@") != owner {
 		writeValidationError(w, []string{fmt.Sprintf("stack.yaml owner %q does not match path owner %q", m.Owner, owner)})
 		return
 	}

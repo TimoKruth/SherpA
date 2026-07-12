@@ -27,7 +27,11 @@ func cmdClone(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
-	installed, err := installStack(ctx, req.url, req.name)
+	cloneURL, err := resolveRegistryRef(req.url)
+	if err != nil {
+		return err
+	}
+	installed, err := installStack(ctx, cloneURL, req.name)
 	if err != nil {
 		return err
 	}
