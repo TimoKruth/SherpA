@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -32,6 +34,48 @@ func OpenPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 
 func (s *PostgresStore) UpsertUser(ctx context.Context, handle string) (int64, error) {
 	return upsertUser(ctx, s.pool, handle)
+}
+
+func (s *PostgresStore) UpsertUserGitHub(ctx context.Context, login string, githubID int64) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx, `
+		with updated as (
+			update users set handle = $1 where github_id = $2 returning id
+		), inserted as (
+			insert into users(handle, github_id)
+			select $1, $2 where not exists (select 1 from updated)
+			on conflict (handle) do update set github_id = excluded.github_id
+			returning id
+		)
+		select id from updated union all select id from inserted limit 1
+	`, login, githubID).Scan(&id)
+	return id, err
+}
+
+func (s *PostgresStore) CreateSession(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
+	_, err := s.pool.Exec(ctx, `
+		insert into sessions(user_id, token_hash, expires_at)
+		values ($1, $2, now() + $3::interval)
+	`, userID, tokenHash, pgInterval(ttl))
+	return err
+}
+
+func (s *PostgresStore) SessionUser(ctx context.Context, tokenHash string) (string, error) {
+	var login string
+	err := s.pool.QueryRow(ctx, `
+		update sessions se set last_used_at = now()
+		from users u
+		where se.user_id = u.id and se.token_hash = $1 and se.expires_at > now()
+		returning u.handle
+	`, tokenHash).Scan(&login)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return login, err
+}
+
+func pgInterval(ttl time.Duration) string {
+	return fmt.Sprintf("%f seconds", ttl.Seconds())
 }
 
 type queryRower interface {
@@ -83,9 +127,9 @@ func (s *PostgresStore) UpsertStack(ctx context.Context, stack Stack) (int64, er
 
 func (s *PostgresStore) InsertVersion(ctx context.Context, version Version) error {
 	_, err := s.pool.Exec(ctx, `
-		insert into stack_versions(stack_id, version, git_tag, manifest, scan_report, changelog)
-		values ($1, $2, $3, $4, $5, $6)
-	`, version.StackID, version.Version, version.GitTag, jsonOrNil(version.Manifest), jsonOrNil(version.ScanReport), version.Changelog)
+		insert into stack_versions(stack_id, version, git_tag, manifest, scan_report, changelog, trust_tier)
+		values ($1, $2, $3, $4, $5, $6, $7)
+	`, version.StackID, version.Version, version.GitTag, jsonOrNil(version.Manifest), jsonOrNil(version.ScanReport), version.Changelog, version.TrustTier)
 	if isUniqueViolation(err) {
 		return ErrVersionExists
 	}
@@ -97,11 +141,11 @@ func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string) ([]S
 		select
 			s.id, u.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
 			coalesce(s.forked_from, ''), coalesce(s.tags, array[]::text[]), s.created_at,
-			v.version, coalesce(v.git_tag, ''), v.published_at
+			v.version, coalesce(v.git_tag, ''), coalesce(v.trust_tier, 'unreviewed'), v.published_at
 		from stacks s
 		join users u on u.id = s.owner_id
 		join lateral (
-			select version, git_tag, published_at
+			select version, git_tag, trust_tier, published_at
 			from stack_versions
 			where stack_id = s.id
 			order by version desc
@@ -133,6 +177,7 @@ func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string) ([]S
 			&match.CreatedAt,
 			&match.Version,
 			&match.GitTag,
+			&match.TrustTier,
 			&match.PublishedAt,
 		); err != nil {
 			return nil, err
@@ -178,7 +223,7 @@ func (s *PostgresStore) GetVersion(ctx context.Context, owner, name string, v in
 	var version Version
 	err := s.pool.QueryRow(ctx, `
 		select sv.id, sv.stack_id, sv.version, coalesce(sv.git_tag, ''), sv.manifest,
-			sv.scan_report, coalesce(sv.changelog, ''), sv.published_at
+			sv.scan_report, coalesce(sv.changelog, ''), coalesce(sv.trust_tier, 'unreviewed'), sv.published_at
 		from stack_versions sv
 		join stacks s on s.id = sv.stack_id
 		join users u on u.id = s.owner_id
@@ -191,6 +236,7 @@ func (s *PostgresStore) GetVersion(ctx context.Context, owner, name string, v in
 		&version.Manifest,
 		&version.ScanReport,
 		&version.Changelog,
+		&version.TrustTier,
 		&version.PublishedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -210,7 +256,7 @@ func (s *PostgresStore) Close() error {
 func (s *PostgresStore) versionsForStack(ctx context.Context, stackID int64) ([]Version, error) {
 	rows, err := s.pool.Query(ctx, `
 		select id, stack_id, version, coalesce(git_tag, ''), manifest, scan_report,
-			coalesce(changelog, ''), published_at
+			coalesce(changelog, ''), coalesce(trust_tier, 'unreviewed'), published_at
 		from stack_versions
 		where stack_id = $1
 		order by version desc
@@ -231,6 +277,7 @@ func (s *PostgresStore) versionsForStack(ctx context.Context, stackID int64) ([]
 			&version.Manifest,
 			&version.ScanReport,
 			&version.Changelog,
+			&version.TrustTier,
 			&version.PublishedAt,
 		); err != nil {
 			return nil, err

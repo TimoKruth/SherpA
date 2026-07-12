@@ -26,6 +26,7 @@ type Version struct {
 	Manifest    json.RawMessage
 	ScanReport  json.RawMessage
 	Changelog   string
+	TrustTier   string
 	PublishedAt time.Time
 }
 
@@ -33,11 +34,15 @@ type StackWithLatest struct {
 	Stack
 	Version     int
 	GitTag      string
+	TrustTier   string
 	PublishedAt time.Time
 }
 
 type Store interface {
 	UpsertUser(ctx context.Context, handle string) (userID int64, err error)
+	UpsertUserGitHub(ctx context.Context, login string, githubID int64) (userID int64, err error)
+	CreateSession(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error
+	SessionUser(ctx context.Context, tokenHash string) (login string, err error)
 	UpsertStack(ctx context.Context, s Stack) (stackID int64, err error)
 	InsertVersion(ctx context.Context, v Version) error
 	Search(ctx context.Context, q, harness, tag string) ([]StackWithLatest, error)

@@ -126,3 +126,52 @@ func TestPostgresStoreContract(t *testing.T) {
 		t.Fatalf("missing stack error = %v, want %v", err, ErrNotFound)
 	}
 }
+
+func TestPostgresGitHubSessionsAndTrustTier(t *testing.T) {
+	dsn := StartPostgres(t)
+	ctx := context.Background()
+	st, err := OpenPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	first, err := st.UpsertUserGitHub(ctx, "alice", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.UpsertUserGitHub(ctx, "alice-renamed", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("user IDs = %d and %d", first, second)
+	}
+	if err := st.CreateSession(ctx, first, "valid-hash", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.SessionUser(ctx, "valid-hash"); err != nil || got != "alice-renamed" {
+		t.Fatalf("SessionUser = %q, %v", got, err)
+	}
+	if err := st.CreateSession(ctx, first, "expired-hash", -time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SessionUser(ctx, "expired-hash"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired SessionUser error = %v", err)
+	}
+	stackID, err := st.UpsertStack(ctx, Stack{Owner: "alice-renamed", Name: "trusted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertVersion(ctx, Version{StackID: stackID, Version: 1, GitTag: "v1", TrustTier: "linked"}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := st.GetVersion(ctx, "alice-renamed", "trusted", 1)
+	if err != nil || v.TrustTier != "linked" {
+		t.Fatalf("version = %#v, %v", v, err)
+	}
+	matches, err := st.Search(ctx, "trusted", "", "")
+	if err != nil || len(matches) != 1 || matches[0].TrustTier != "linked" {
+		t.Fatalf("search = %#v, %v", matches, err)
+	}
+}

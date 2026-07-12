@@ -39,6 +39,16 @@ var migrations = []string{
 		published_at timestamptz default now(),
 		unique(stack_id, version)
 	)`,
+	`alter table users add column if not exists github_id bigint unique`,
+	`create table if not exists sessions (
+		id bigserial primary key,
+		user_id bigint references users(id),
+		token_hash text unique not null,
+		created_at timestamptz default now(),
+		last_used_at timestamptz,
+		expires_at timestamptz not null
+	)`,
+	`alter table stack_versions add column if not exists trust_tier text not null default 'unreviewed'`,
 }
 
 func Migrate(ctx context.Context, db migrationDB) error {
