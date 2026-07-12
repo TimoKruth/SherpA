@@ -18,6 +18,10 @@ func NewBareGit(root string) *BareGit {
 }
 
 func (b *BareGit) EnsureRepo(owner, name string) error {
+	if err := validateOwnerName(owner, name); err != nil {
+		return err
+	}
+
 	path := b.RepoPath(owner, name)
 	if _, err := os.Stat(path); err == nil {
 		return nil
@@ -34,46 +38,50 @@ func (b *BareGit) EnsureRepo(owner, name string) error {
 	return nil
 }
 
-func (b *BareGit) StageBundle(bundle []byte, gitTag string) (stageDir, worktreeDir string, err error) {
+func (b *BareGit) StageBundle(bundle []byte, gitTag string) (stageDir, worktreeDir string, cleanup func(), err error) {
 	if err := os.MkdirAll(b.root, 0o755); err != nil {
-		return "", "", fmt.Errorf("create content root: %w", err)
+		return "", "", nil, fmt.Errorf("create content root: %w", err)
 	}
 
 	tmpDir, err := os.MkdirTemp(b.root, ".stage-*")
 	if err != nil {
-		return "", "", fmt.Errorf("create stage temp dir: %w", err)
+		return "", "", nil, fmt.Errorf("create stage temp dir: %w", err)
 	}
+	cleanup = func() { _ = os.RemoveAll(tmpDir) }
 	defer func() {
 		if err != nil {
-			_ = os.RemoveAll(tmpDir)
+			cleanup()
 		}
 	}()
 
 	stageDir = filepath.Join(tmpDir, "repo.git")
 	if _, err := gitutil.Run(tmpDir, "init", "--bare", stageDir); err != nil {
-		return "", "", fmt.Errorf("init stage repo: %w", err)
+		return "", "", nil, fmt.Errorf("init stage repo: %w", err)
 	}
 
 	bundlePath := filepath.Join(tmpDir, "bundle")
 	if err := os.WriteFile(bundlePath, bundle, 0o600); err != nil {
-		return "", "", fmt.Errorf("write bundle: %w", err)
+		return "", "", nil, fmt.Errorf("write bundle: %w", err)
 	}
 	if _, err := gitutil.Run(stageDir, "fetch", bundlePath, "refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"); err != nil {
-		return "", "", fmt.Errorf("fetch bundle: %w", err)
+		return "", "", nil, fmt.Errorf("fetch bundle: %w", err)
 	}
 	if err := setDefaultHead(stageDir); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 
 	worktreeDir = filepath.Join(tmpDir, "worktree")
 	if _, err := gitutil.Run(stageDir, "worktree", "add", worktreeDir, gitTag); err != nil {
-		return "", "", fmt.Errorf("add worktree: %w", err)
+		return "", "", nil, fmt.Errorf("add worktree: %w", err)
 	}
 
-	return stageDir, worktreeDir, nil
+	return stageDir, worktreeDir, cleanup, nil
 }
 
 func (b *BareGit) Commit(owner, name, stageDir string) error {
+	if err := validateOwnerName(owner, name); err != nil {
+		return err
+	}
 	if err := removeWorktrees(stageDir); err != nil {
 		return err
 	}
@@ -84,8 +92,16 @@ func (b *BareGit) Commit(owner, name, stageDir string) error {
 	}
 
 	if _, err := os.Stat(dest); err == nil {
-		if _, err := gitutil.Run(dest, "fetch", stageDir, "refs/*:refs/*"); err != nil {
-			return fmt.Errorf("fetch staged refs: %w", err)
+		branch, err := defaultBranch(stageDir)
+		if err != nil {
+			return err
+		}
+		if _, err := gitutil.Run(dest, "fetch", stageDir, "refs/tags/*:refs/tags/*"); err != nil {
+			return fmt.Errorf("fetch staged tags: %w", err)
+		}
+		refspec := fmt.Sprintf("+refs/heads/%s:refs/heads/%s", branch, branch)
+		if _, err := gitutil.Run(dest, "fetch", stageDir, refspec); err != nil {
+			return fmt.Errorf("fetch staged default branch: %w", err)
 		}
 		if err := setDefaultHead(dest); err != nil {
 			return err
@@ -114,15 +130,70 @@ func (b *BareGit) Commit(owner, name, stageDir string) error {
 }
 
 func (b *BareGit) RepoPath(owner, name string) string {
+	if validateOwnerName(owner, name) != nil {
+		return filepath.Join(b.root, "profiles", "_invalid", "_invalid.git")
+	}
 	return filepath.Join(b.root, "profiles", owner, name+".git")
 }
 
 func setDefaultHead(repo string) error {
-	if _, err := gitutil.Run(repo, "rev-parse", "--verify", "--quiet", "refs/heads/main"); err != nil {
-		return nil
+	branch, err := defaultBranch(repo)
+	if err != nil {
+		return err
 	}
-	if _, err := gitutil.Run(repo, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
+	if _, err := gitutil.Run(repo, "symbolic-ref", "HEAD", "refs/heads/"+branch); err != nil {
 		return fmt.Errorf("set default HEAD: %w", err)
+	}
+	return nil
+}
+
+func defaultBranch(repo string) (string, error) {
+	if _, err := gitutil.Run(repo, "rev-parse", "--verify", "--quiet", "refs/heads/main"); err == nil {
+		return "main", nil
+	}
+
+	out, err := gitutil.Run(repo, "for-each-ref", "--format=%(refname:short)", "--sort=refname", "refs/heads")
+	if err != nil {
+		return "", fmt.Errorf("list branches: %w", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if line != "" {
+			return line, nil
+		}
+	}
+	return "", fmt.Errorf("staged repo has no branches")
+}
+
+func validateOwnerName(owner, name string) error {
+	if err := validateSegment(owner); err != nil {
+		return fmt.Errorf("invalid owner: %w", err)
+	}
+	if err := validateSegment(name); err != nil {
+		return fmt.Errorf("invalid name: %w", err)
+	}
+	return nil
+}
+
+func validateSegment(s string) error {
+	if s == "" {
+		return fmt.Errorf("empty segment")
+	}
+	if strings.ContainsAny(s, `/\`) {
+		return fmt.Errorf("segment contains path separator")
+	}
+	if s == ".." || strings.HasPrefix(s, ".") {
+		return fmt.Errorf("segment must not be hidden or parent traversal")
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-':
+		case r == '.':
+		default:
+			return fmt.Errorf("segment contains invalid character %q", r)
+		}
 	}
 	return nil
 }

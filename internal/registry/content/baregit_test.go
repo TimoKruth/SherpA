@@ -19,12 +19,11 @@ func TestBareGitStageCommitAndClone(t *testing.T) {
 	})
 	firstBundle := createBundle(t, firstRepo, root, "first.bundle")
 
-	stageDir, worktreeDir, err := store.StageBundle(firstBundle, "v1")
+	stageDir, worktreeDir, cleanup, err := store.StageBundle(firstBundle, "v1")
 	if err != nil {
 		t.Fatalf("stage first bundle: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(stageDir) })
-	t.Cleanup(func() { _ = os.RemoveAll(worktreeDir) })
+	t.Cleanup(cleanup)
 
 	assertFile(t, worktreeDir, "stack.yaml", "name: reviewer\nversion: 1\n")
 	assertFile(t, worktreeDir, "CLAUDE.md", "Review code carefully.\n")
@@ -51,12 +50,10 @@ func TestBareGitStageCommitAndClone(t *testing.T) {
 	})
 	secondBundle := createBundle(t, secondRepo, root, "second.bundle")
 
-	secondStage, secondWorktree, err := store.StageBundle(secondBundle, "v2")
+	_, secondWorktree, secondCleanup, err := store.StageBundle(secondBundle, "v2")
 	if err != nil {
 		t.Fatalf("stage second bundle: %v", err)
 	}
-	defer os.RemoveAll(secondStage)
-	defer os.RemoveAll(secondWorktree)
 
 	assertFile(t, secondWorktree, "NEW.md", "This file must not appear without commit.\n")
 
@@ -69,6 +66,121 @@ func TestBareGitStageCommitAndClone(t *testing.T) {
 		t.Fatalf("NEW.md exists after uncommitted stage, stat err = %v", err)
 	}
 	assertGitOutput(t, cloneAfterDiscard, "", "tag", "-l", "v2")
+
+	secondCleanup()
+	assertNoStageWrappers(t, filepath.Join(root, "content"))
+}
+
+func TestBareGitCommitSecondVersionPreservesTagsAndUpdatesLatest(t *testing.T) {
+	root := t.TempDir()
+	store := NewBareGit(filepath.Join(root, "content"))
+
+	src := buildStackRepo(t, root, "v1", map[string]string{
+		"stack.yaml": "name: reviewer\nversion: 1\n",
+	})
+	firstBundle := createBundle(t, src, root, "first.bundle")
+	firstStage, _, firstCleanup, err := store.StageBundle(firstBundle, "v1")
+	if err != nil {
+		t.Fatalf("stage first bundle: %v", err)
+	}
+	t.Cleanup(firstCleanup)
+	if err := store.Commit("alice", "reviewer", firstStage); err != nil {
+		t.Fatalf("commit first bundle: %v", err)
+	}
+
+	commitStackRepo(t, src, "v2", map[string]string{
+		"stack.yaml": "name: reviewer\nversion: 2\n",
+		"NEW.md":     "second version\n",
+	})
+	secondBundle := createBundle(t, src, root, "second.bundle")
+	secondStage, _, secondCleanup, err := store.StageBundle(secondBundle, "v2")
+	if err != nil {
+		t.Fatalf("stage second bundle: %v", err)
+	}
+	t.Cleanup(secondCleanup)
+	if err := store.Commit("alice", "reviewer", secondStage); err != nil {
+		t.Fatalf("commit second bundle: %v", err)
+	}
+
+	repoPath := store.RepoPath("alice", "reviewer")
+	assertGitOutput(t, repoPath, "v1", "tag", "-l", "v1")
+	assertGitOutput(t, repoPath, "v2", "tag", "-l", "v2")
+
+	cloneDir := filepath.Join(root, "clone-v2")
+	if err := gitutil.Clone("file://"+repoPath, cloneDir); err != nil {
+		t.Fatalf("clone committed repo: %v", err)
+	}
+	assertFile(t, cloneDir, "stack.yaml", "name: reviewer\nversion: 2\n")
+	assertFile(t, cloneDir, "NEW.md", "second version\n")
+}
+
+func TestBareGitCommitDivergentSecondVersionForceUpdatesLatest(t *testing.T) {
+	root := t.TempDir()
+	store := NewBareGit(filepath.Join(root, "content"))
+
+	firstRepo := buildStackRepo(t, root, "v1", map[string]string{
+		"stack.yaml": "name: reviewer\nversion: 1\n",
+	})
+	firstBundle := createBundle(t, firstRepo, root, "first.bundle")
+	firstStage, _, firstCleanup, err := store.StageBundle(firstBundle, "v1")
+	if err != nil {
+		t.Fatalf("stage first bundle: %v", err)
+	}
+	t.Cleanup(firstCleanup)
+	if err := store.Commit("alice", "reviewer", firstStage); err != nil {
+		t.Fatalf("commit first bundle: %v", err)
+	}
+
+	secondRepo := buildStackRepo(t, root, "v2", map[string]string{
+		"stack.yaml": "name: reviewer\nversion: 2 divergent\n",
+		"NEW.md":     "independent history\n",
+	})
+	secondBundle := createBundle(t, secondRepo, root, "second.bundle")
+	secondStage, _, secondCleanup, err := store.StageBundle(secondBundle, "v2")
+	if err != nil {
+		t.Fatalf("stage divergent second bundle: %v", err)
+	}
+	t.Cleanup(secondCleanup)
+	if err := store.Commit("alice", "reviewer", secondStage); err != nil {
+		t.Fatalf("commit divergent second bundle: %v", err)
+	}
+
+	repoPath := store.RepoPath("alice", "reviewer")
+	assertGitOutput(t, repoPath, "v1", "tag", "-l", "v1")
+	assertGitOutput(t, repoPath, "v2", "tag", "-l", "v2")
+
+	cloneDir := filepath.Join(root, "clone-divergent")
+	if err := gitutil.Clone("file://"+repoPath, cloneDir); err != nil {
+		t.Fatalf("clone committed repo: %v", err)
+	}
+	assertFile(t, cloneDir, "stack.yaml", "name: reviewer\nversion: 2 divergent\n")
+	assertFile(t, cloneDir, "NEW.md", "independent history\n")
+}
+
+func TestBareGitRejectsInvalidOwnerNameSegments(t *testing.T) {
+	root := t.TempDir()
+	contentRoot := filepath.Join(root, "content")
+	store := NewBareGit(contentRoot)
+
+	src := buildStackRepo(t, root, "v1", map[string]string{
+		"stack.yaml": "name: reviewer\nversion: 1\n",
+	})
+	bundle := createBundle(t, src, root, "first.bundle")
+	stageDir, _, cleanup, err := store.StageBundle(bundle, "v1")
+	if err != nil {
+		t.Fatalf("stage bundle: %v", err)
+	}
+	t.Cleanup(cleanup)
+
+	if err := store.Commit("../evil", "reviewer", stageDir); err == nil {
+		t.Fatal("Commit accepted invalid owner segment")
+	}
+	if _, err := os.Stat(filepath.Join(root, "evil")); !os.IsNotExist(err) {
+		t.Fatalf("invalid owner created path outside content root, stat err = %v", err)
+	}
+	if err := store.EnsureRepo("alice", "../evil"); err == nil {
+		t.Fatal("EnsureRepo accepted invalid name segment")
+	}
 }
 
 func buildStackRepo(t *testing.T, root, tag string, files map[string]string) string {
@@ -108,6 +220,29 @@ func buildStackRepo(t *testing.T, root, tag string, files map[string]string) str
 	return dir
 }
 
+func commitStackRepo(t *testing.T, dir, tag string, files map[string]string) {
+	t.Helper()
+
+	for name, body := range files {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir file parent: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if _, err := gitutil.Run(dir, "add", "-A"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if _, err := gitutil.Run(dir, "commit", "-m", "stack "+tag); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	if _, err := gitutil.Run(dir, "tag", tag); err != nil {
+		t.Fatalf("git tag: %v", err)
+	}
+}
+
 func createBundle(t *testing.T, repo, root, name string) []byte {
 	t.Helper()
 
@@ -143,5 +278,17 @@ func assertGitOutput(t *testing.T, dir, want string, args ...string) {
 	}
 	if got != want {
 		t.Fatalf("git %s = %q, want %q", strings.Join(args, " "), got, want)
+	}
+}
+
+func assertNoStageWrappers(t *testing.T, root string) {
+	t.Helper()
+
+	matches, err := filepath.Glob(filepath.Join(root, ".stage-*"))
+	if err != nil {
+		t.Fatalf("glob stage wrappers: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("stage wrappers still exist: %v", matches)
 	}
 }
