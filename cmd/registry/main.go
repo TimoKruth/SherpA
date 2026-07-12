@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"sherpa/internal/registry/api"
 	registryauth "sherpa/internal/registry/auth"
 	"sherpa/internal/registry/content"
+	registryexport "sherpa/internal/registry/export"
 	"sherpa/internal/registry/store"
 )
 
@@ -33,6 +36,9 @@ const (
 
 type postgresOpener func(context.Context, string, ...int) (*store.PostgresStore, error)
 type retrySleeper func(context.Context, time.Duration) error
+
+var validateExportScheduler = registryexport.ValidateSchedulerConfig
+var startExportScheduler = registryexport.StartScheduler
 
 func sleepWithContext(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
@@ -73,15 +79,32 @@ func openPostgresWithRetry(ctx context.Context, dsn string, maxConns int, open p
 }
 
 func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {
+	exportCfg := registryexport.SchedulerConfig{
+		ContentDir: cfg.ContentDir, DatabaseURL: cfg.DatabaseURL,
+		ArchiveDir: cfg.ExportArchiveDir, CollectorURL: cfg.ExportURL,
+		Token: cfg.ExportToken, Interval: cfg.ExportInterval,
+	}
+	if err := validateExportScheduler(exportCfg); err != nil {
+		return nil, nil, fmt.Errorf("configure off-site export: %w", err)
+	}
 	st, err := openPostgresWithRetry(ctx, cfg.DatabaseURL, cfg.DBMaxConns, store.OpenPostgres, sleepWithContext)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	var cleanupOnce sync.Once
+	schedulerCtx, stopScheduler := context.WithCancel(ctx)
+	var schedulerDone chan struct{}
 	cleanup := func() {
-		if err := st.Close(); err != nil {
-			log.Printf("close registry store: %v", err)
-		}
+		cleanupOnce.Do(func() {
+			stopScheduler()
+			if schedulerDone != nil {
+				<-schedulerDone
+			}
+			if err := st.Close(); err != nil {
+				log.Printf("close registry store: %v", err)
+			}
+		})
 	}
 
 	cs := content.NewBareGit(cfg.ContentDir)
@@ -97,11 +120,23 @@ func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {
 	if removed > 0 {
 		log.Printf("removed %d abandoned content stage directories", removed)
 	}
+	if cfg.ExportURL != "" {
+		schedulerDone = make(chan struct{})
+		go func() {
+			defer close(schedulerDone)
+			if err := startExportScheduler(schedulerCtx, exportCfg); err != nil && schedulerCtx.Err() == nil {
+				log.Printf("off-site export scheduler stopped: %v", err)
+			}
+		}()
+	}
 	github := registryauth.NewGitHubClient(cfg.GitHubClientID)
 	var ready atomic.Bool
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", api.HealthHandler(&ready))
-	mux.Handle("/", api.NewWithOptions(st, cs, cfg.Token, github, api.Options{TrustProxy: cfg.TrustProxy}))
+	mux.Handle("/", api.NewWithOptions(st, cs, cfg.Token, github, api.Options{
+		TrustProxy:    cfg.TrustProxy,
+		PublicBaseURL: cfg.PublicBaseURL,
+	}))
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           mux,
@@ -117,16 +152,43 @@ func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if len(os.Args) > 1 && os.Args[1] == "audit" {
-		cfg, err := LoadConfig()
-		if err != nil {
-			log.Print(err)
-			os.Exit(2)
-		}
-		os.Exit(runAudit(ctx, cfg, os.Stdout, os.Stderr))
+	if handled, code := dispatch(ctx, os.Args[1:], os.Stdout, os.Stderr); handled {
+		os.Exit(code)
 	}
 	if err := serve(ctx); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func dispatch(ctx context.Context, args []string, stdout, stderr io.Writer) (bool, int) {
+	if len(args) == 0 {
+		return false, 0
+	}
+	switch args[0] {
+	case "audit":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "usage: registry audit")
+			return true, 2
+		}
+		cfg, err := LoadConfig()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return true, 2
+		}
+		return true, runAudit(ctx, cfg, stdout, stderr)
+	case "export":
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "usage: registry export <archive-path>")
+			return true, 2
+		}
+		cfg, err := LoadConfig()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return true, 2
+		}
+		return true, runExportCommand(ctx, cfg, args[1], stdout, stderr)
+	default:
+		return false, 0
 	}
 }
 

@@ -86,6 +86,75 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 	}
 }
 
+func TestSearchRepoURLUsesPinnedPublicBase(t *testing.T) {
+	handler := searchHandlerWithOptions(t, Options{
+		PublicBaseURL: "https://registry.example/prefix",
+		TrustProxy:    true,
+	})
+	req := httptest.NewRequest(http.MethodGet, "http://evil.example/v1/search", nil)
+	req.Host = "evil.example"
+	req.Header.Set("X-Forwarded-Host", "attacker.example")
+	req.Header.Set("X-Forwarded-Proto", "http")
+
+	if got := searchRepoURL(t, handler, req); got != "https://registry.example/prefix/v1/stacks/alice/reviewer.git" {
+		t.Fatalf("repo_url = %q", got)
+	}
+}
+
+func TestSearchRepoURLFallbackProxyHandling(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		trustProxy bool
+		forwarded  string
+		requestURL string
+		want       string
+	}{
+		{name: "trusted HTTPS scheme", trustProxy: true, forwarded: "https", requestURL: "http://registry.internal/v1/search", want: "https://registry.internal/v1/stacks/alice/reviewer.git"},
+		{name: "untrusted forwarded scheme", trustProxy: false, forwarded: "https", requestURL: "http://registry.internal/v1/search", want: "http://registry.internal/v1/stacks/alice/reviewer.git"},
+		{name: "invalid forwarded scheme", trustProxy: true, forwarded: "ftp", requestURL: "http://registry.internal/v1/search", want: "http://registry.internal/v1/stacks/alice/reviewer.git"},
+		{name: "direct TLS wins without proxy trust", trustProxy: false, forwarded: "http", requestURL: "https://registry.internal/v1/search", want: "https://registry.internal/v1/stacks/alice/reviewer.git"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := searchHandlerWithOptions(t, Options{TrustProxy: tc.trustProxy})
+			req := httptest.NewRequest(http.MethodGet, tc.requestURL, nil)
+			req.Header.Set("X-Forwarded-Proto", tc.forwarded)
+			req.Header.Set("X-Forwarded-Host", "attacker.example")
+			if got := searchRepoURL(t, handler, req); got != tc.want {
+				t.Fatalf("repo_url = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func searchHandlerWithOptions(t *testing.T, options Options) http.Handler {
+	t.Helper()
+	st := newFakeStore()
+	st.searchResults = []store.StackWithLatest{{
+		Stack:   store.Stack{Owner: "alice", Name: "reviewer"},
+		Version: 1,
+	}}
+	return NewWithOptions(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{}, options)
+}
+
+func searchRepoURL(t *testing.T, handler http.Handler, req *http.Request) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Stacks []struct {
+			RepoURL string `json:"repo_url"`
+		} `json:"stacks"`
+	}
+	decodeJSON(t, rr, &body)
+	if len(body.Stacks) != 1 {
+		t.Fatalf("stacks = %#v", body.Stacks)
+	}
+	return body.Stacks[0].RepoURL
+}
+
 func TestStackDetailReturnsVersions(t *testing.T) {
 	st := newFakeStore()
 	st.stacks["alice/reviewer"] = store.Stack{

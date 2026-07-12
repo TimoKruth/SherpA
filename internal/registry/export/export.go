@@ -365,14 +365,19 @@ type SchedulerConfig struct {
 var runExport = Run
 var uploadArchive = Upload
 
-// StartScheduler blocks until ctx is cancelled. Empty collector and interval
-// settings disable it; setting only one is a configuration error.
-func StartScheduler(ctx context.Context, cfg SchedulerConfig) error {
-	if cfg.CollectorURL == "" && cfg.Interval == 0 {
+// ValidateSchedulerConfig checks scheduler settings without starting background
+// work. This lets the registry fail startup on partial or unsafe configuration.
+func ValidateSchedulerConfig(cfg SchedulerConfig) error {
+	configured := cfg.CollectorURL != "" || cfg.Token != "" || cfg.Interval != 0 || cfg.ArchiveDir != ""
+	if !configured {
 		return nil
 	}
 	if cfg.CollectorURL == "" || cfg.Interval <= 0 {
 		return errors.New("export collector URL and positive interval must be configured together")
+	}
+	parsed, err := url.Parse(cfg.CollectorURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && !isLoopbackHTTP(parsed)) {
+		return errors.New("export collector must be an HTTPS URL")
 	}
 	archiveDir := cfg.ArchiveDir
 	if archiveDir == "" {
@@ -384,6 +389,22 @@ func StartScheduler(ctx context.Context, cfg SchedulerConfig) error {
 	}
 	if inside {
 		return errors.New("export archive directory must be outside the content directory")
+	}
+	return nil
+}
+
+// StartScheduler blocks until ctx is cancelled. Empty collector and interval
+// settings disable it; setting only one is a configuration error.
+func StartScheduler(ctx context.Context, cfg SchedulerConfig) error {
+	if err := ValidateSchedulerConfig(cfg); err != nil {
+		return err
+	}
+	if cfg.CollectorURL == "" {
+		return nil
+	}
+	archiveDir := cfg.ArchiveDir
+	if archiveDir == "" {
+		archiveDir = os.TempDir()
 	}
 	logger := cfg.Logger
 	if logger == nil {

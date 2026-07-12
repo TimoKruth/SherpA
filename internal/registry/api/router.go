@@ -13,20 +13,22 @@ import (
 )
 
 type server struct {
-	store      store.Store
-	content    content.ContentStore
-	adminToken string
-	github     registryauth.GitHubClient
-	limiter    *authLimiter
-	trustProxy bool
-	now        func() time.Time
-	logger     *log.Logger
+	store         store.Store
+	content       content.ContentStore
+	adminToken    string
+	github        registryauth.GitHubClient
+	limiter       *authLimiter
+	trustProxy    bool
+	publicBaseURL string
+	now           func() time.Time
+	logger        *log.Logger
 }
 
 type Options struct {
-	TrustProxy bool
-	Now        func() time.Time
-	Logger     *log.Logger
+	TrustProxy    bool
+	PublicBaseURL string
+	Now           func() time.Time
+	Logger        *log.Logger
 }
 
 func HealthHandler(ready *atomic.Bool) http.Handler {
@@ -54,14 +56,15 @@ func NewWithOptions(st store.Store, cs content.ContentStore, adminToken string, 
 		logger = log.Default()
 	}
 	s := &server{
-		store:      st,
-		content:    cs,
-		adminToken: adminToken,
-		github:     github,
-		limiter:    newAuthLimiter(now),
-		trustProxy: options.TrustProxy,
-		now:        now,
-		logger:     logger,
+		store:         st,
+		content:       cs,
+		adminToken:    adminToken,
+		github:        github,
+		limiter:       newAuthLimiter(now),
+		trustProxy:    options.TrustProxy,
+		publicBaseURL: options.PublicBaseURL,
+		now:           now,
+		logger:        logger,
 	}
 
 	mux := http.NewServeMux()

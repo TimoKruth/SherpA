@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	registryexport "sherpa/internal/registry/export"
 	"sherpa/internal/registry/store"
 )
 
@@ -100,6 +102,10 @@ func TestLoadConfigDefaultsAndEnv(t *testing.T) {
 	t.Setenv("SHERPA_PUBLIC_BASE_URL", "https://registry.example")
 	t.Setenv("SHERPA_TRUST_PROXY", "true")
 	t.Setenv("SHERPA_DB_MAX_CONNS", "12")
+	t.Setenv("SHERPA_EXPORT_URL", "https://backups.example/upload")
+	t.Setenv("SHERPA_EXPORT_TOKEN", "backup-secret")
+	t.Setenv("SHERPA_EXPORT_INTERVAL", "6h")
+	t.Setenv("SHERPA_EXPORT_ARCHIVE_DIR", "/tmp/sherpa-exports")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -129,6 +135,9 @@ func TestLoadConfigDefaultsAndEnv(t *testing.T) {
 	if cfg.DBMaxConns != 12 {
 		t.Fatalf("DBMaxConns = %d, want 12", cfg.DBMaxConns)
 	}
+	if cfg.ExportURL != "https://backups.example/upload" || cfg.ExportToken != "backup-secret" || cfg.ExportInterval != 6*time.Hour || cfg.ExportArchiveDir != "/tmp/sherpa-exports" {
+		t.Fatalf("export config = %#v", cfg)
+	}
 }
 
 func TestLoadConfigOptionalDeploymentDefaults(t *testing.T) {
@@ -136,12 +145,16 @@ func TestLoadConfigOptionalDeploymentDefaults(t *testing.T) {
 	t.Setenv("SHERPA_PUBLIC_BASE_URL", "")
 	t.Setenv("SHERPA_TRUST_PROXY", "")
 	t.Setenv("SHERPA_DB_MAX_CONNS", "")
+	t.Setenv("SHERPA_EXPORT_URL", "")
+	t.Setenv("SHERPA_EXPORT_TOKEN", "")
+	t.Setenv("SHERPA_EXPORT_INTERVAL", "")
+	t.Setenv("SHERPA_EXPORT_ARCHIVE_DIR", "")
 
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.PublicBaseURL != "" || cfg.TrustProxy || cfg.DBMaxConns != 0 {
+	if cfg.PublicBaseURL != "" || cfg.TrustProxy || cfg.DBMaxConns != 0 || cfg.ExportURL != "" || cfg.ExportToken != "" || cfg.ExportInterval != 0 || cfg.ExportArchiveDir != "" {
 		t.Fatalf("deployment defaults = %#v", cfg)
 	}
 }
@@ -155,11 +168,17 @@ func TestLoadConfigRejectsMalformedDeploymentValues(t *testing.T) {
 		{name: "trust proxy", key: "SHERPA_TRUST_PROXY", value: "sometimes"},
 		{name: "max connections text", key: "SHERPA_DB_MAX_CONNS", value: "many"},
 		{name: "max connections negative", key: "SHERPA_DB_MAX_CONNS", value: "-1"},
+		{name: "export interval text", key: "SHERPA_EXPORT_INTERVAL", value: "daily"},
+		{name: "export interval zero", key: "SHERPA_EXPORT_INTERVAL", value: "0s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DATABASE_URL", "postgres://example/sherpa")
 			t.Setenv("SHERPA_TRUST_PROXY", "")
 			t.Setenv("SHERPA_DB_MAX_CONNS", "")
+			t.Setenv("SHERPA_EXPORT_URL", "")
+			t.Setenv("SHERPA_EXPORT_TOKEN", "")
+			t.Setenv("SHERPA_EXPORT_INTERVAL", "")
+			t.Setenv("SHERPA_EXPORT_ARCHIVE_DIR", "")
 			t.Setenv(tc.key, tc.value)
 
 			_, err := LoadConfig()
@@ -168,6 +187,105 @@ func TestLoadConfigRejectsMalformedDeploymentValues(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadConfigRejectsPartialExportConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name, url, token, interval, archiveDir string
+	}{
+		{name: "URL only", url: "https://backups.example/upload"},
+		{name: "interval only", interval: "1h"},
+		{name: "token only", token: "secret"},
+		{name: "archive directory only", archiveDir: t.TempDir()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://example/sherpa")
+			t.Setenv("SHERPA_EXPORT_URL", tc.url)
+			t.Setenv("SHERPA_EXPORT_TOKEN", tc.token)
+			t.Setenv("SHERPA_EXPORT_INTERVAL", tc.interval)
+			t.Setenv("SHERPA_EXPORT_ARCHIVE_DIR", tc.archiveDir)
+			if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "SHERPA_EXPORT_URL") {
+				t.Fatalf("LoadConfig error = %v, want partial export configuration error", err)
+			}
+		})
+	}
+}
+
+func TestDispatchExportCreatesArchive(t *testing.T) {
+	binDir := t.TempDir()
+	pgDump := filepath.Join(binDir, "pg_dump")
+	script := "#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--file\" ]; then shift; printf dump > \"$1\"; exit 0; fi\n  shift\ndone\nexit 1\n"
+	if err := os.WriteFile(pgDump, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DATABASE_URL", "postgres://dispatch-secret")
+	t.Setenv("SHERPA_CONTENT_DIR", t.TempDir())
+	t.Setenv("SHERPA_EXPORT_URL", "")
+	t.Setenv("SHERPA_EXPORT_TOKEN", "")
+	t.Setenv("SHERPA_EXPORT_INTERVAL", "")
+	t.Setenv("SHERPA_EXPORT_ARCHIVE_DIR", "")
+	archivePath := filepath.Join(t.TempDir(), "manual.tar.gz")
+	var stdout, stderr strings.Builder
+	handled, code := dispatch(context.Background(), []string{"export", archivePath}, &stdout, &stderr)
+	if !handled || code != 0 {
+		t.Fatalf("dispatch handled=%v code=%d stdout=%q stderr=%q", handled, code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(archivePath); err != nil {
+		t.Fatalf("export archive: %v", err)
+	}
+	if !strings.Contains(stdout.String(), archivePath) || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestDispatchExportUsageAndUnknownCommand(t *testing.T) {
+	var stdout, stderr strings.Builder
+	handled, code := dispatch(context.Background(), []string{"export"}, &stdout, &stderr)
+	if !handled || code != 2 || !strings.Contains(stderr.String(), "usage: registry export") {
+		t.Fatalf("dispatch handled=%v code=%d stderr=%q", handled, code, stderr.String())
+	}
+	handled, code = dispatch(context.Background(), []string{"unknown"}, io.Discard, io.Discard)
+	if handled || code != 0 {
+		t.Fatalf("unknown dispatch handled=%v code=%d", handled, code)
+	}
+}
+
+func TestRunCleanupStopsExportSchedulerBeforeReturning(t *testing.T) {
+	dsn := store.StartPostgres(t)
+	originalStart := startExportScheduler
+	t.Cleanup(func() { startExportScheduler = originalStart })
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	startExportScheduler = func(ctx context.Context, _ registryexport.SchedulerConfig) error {
+		close(started)
+		<-ctx.Done()
+		time.Sleep(10 * time.Millisecond)
+		close(stopped)
+		return nil
+	}
+	srv, cleanup, err := run(context.Background(), Config{
+		DatabaseURL: dsn, ContentDir: t.TempDir(), ExportURL: "https://backups.example/upload",
+		ExportInterval: time.Hour, ExportArchiveDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv == nil {
+		t.Fatal("run returned no server")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("export scheduler did not start")
+	}
+	cleanup()
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("cleanup returned before export scheduler stopped")
+	}
+	cleanup() // cleanup is intentionally idempotent.
 }
 
 func TestOpenPostgresWithRetry(t *testing.T) {
@@ -199,6 +317,19 @@ func TestOpenPostgresWithRetry(t *testing.T) {
 	wantDelays := []time.Duration{250 * time.Millisecond, 500 * time.Millisecond}
 	if len(delays) != len(wantDelays) || delays[0] != wantDelays[0] || delays[1] != wantDelays[1] {
 		t.Fatalf("delays = %v, want %v", delays, wantDelays)
+	}
+}
+
+func TestRunRejectsUnsafeExportConfigurationBeforeOpeningDatabase(t *testing.T) {
+	srv, cleanup, err := run(context.Background(), Config{
+		DatabaseURL: "postgres://must-not-be-opened", ContentDir: t.TempDir(),
+		ExportURL: "http://collector.example/upload", ExportInterval: time.Hour,
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("run error = %v, want HTTPS collector error", err)
+	}
+	if srv != nil || cleanup != nil {
+		t.Fatal("invalid export configuration returned server or cleanup")
 	}
 }
 

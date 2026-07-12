@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"sherpa/internal/registry/store"
@@ -76,7 +77,7 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			Version:    match.Version,
 			TrustTier:  match.TrustTier,
 			ForkedFrom: match.ForkedFrom,
-			RepoURL:    repoURL(r, match.Owner, match.Name),
+			RepoURL:    s.repoURL(r, match.Owner, match.Name),
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -147,12 +148,22 @@ func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func repoURL(r *http.Request, owner, name string) string {
+func (s *server) repoURL(r *http.Request, owner, name string) string {
+	path := "/v1/stacks/" + owner + "/" + name + ".git"
+	if s.publicBaseURL != "" {
+		return s.publicBaseURL + path
+	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	return scheme + "://" + r.Host + "/v1/stacks/" + owner + "/" + name + ".git"
+	if s.trustProxy {
+		forwardedScheme := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+		if forwardedScheme == "http" || forwardedScheme == "https" {
+			scheme = forwardedScheme
+		}
+	}
+	return scheme + "://" + r.Host + path
 }
 
 func tagsOrEmpty(tags []string) []string {
