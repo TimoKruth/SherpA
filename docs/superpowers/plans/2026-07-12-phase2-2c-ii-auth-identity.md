@@ -22,6 +22,18 @@
 - gofmt/vet clean
 - new deps minimal
 
+## Fable review notes (2026-07-12, amendments to the gpt-5.6-sol draft)
+
+Plan reviewed and approved for execution. Two clarifications for implementers/reviewers:
+- **`SHERPA_REGISTRY_TOKEN` becomes OPTIONAL in 2c-ii** (it was required in 2c-i). An empty
+  admin token is valid and means "no admin escape hatch — GitHub sessions only"; a non-empty
+  one keeps the any-owner admin/CI path. This is an intended behavior change, **not** a
+  regression — reviewers should not flag the relaxed config check. `DATABASE_URL` stays required.
+- **Task 1 must map all three device-flow poll errors**: GitHub `authorization_pending` →
+  `ErrAuthPending`, `slow_down` → `ErrSlowDown`, `expired_token` → `ErrExpired`. The wire-format
+  test covers `authorization_pending`; add assertions (or at least implement) for `slow_down`
+  and `expired_token` so the CLI poll loop can honor back-off and expiry.
+
 ## Codex Delegation
 
 Codex implements via `~/.claude/skills/codex-call/codex-run.sh --mode workspace-write --cwd /Users/timokruth/Projekte/feat --timeout 700 --prompt-file <task>`; the controller verifies and commits because Codex cannot write `.git`. Use the offline environment `GOFLAGS=-mod=mod GOPROXY=off GOCACHE=/private/tmp/sherpa-go-build`. Reviews use Opus generally and Fable for Tasks 3 and 4, the auth/authz security surface.
