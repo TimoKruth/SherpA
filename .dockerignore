@@ -1,0 +1,16 @@
+.git
+.github
+.codex
+.superpowers
+dist
+docs
+spike
+registry-content
+*.out
+coverage*
+.env
+.env.*
+*.key
+*.pem
+Dockerfile*
+deploy/smoke_build.sh
