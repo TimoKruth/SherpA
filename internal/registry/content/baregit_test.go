@@ -33,6 +33,62 @@ func TestTagCommit(t *testing.T) {
 	}
 }
 
+func TestCleanAbandonedStagesRemovesOnlyRootStageDirectories(t *testing.T) {
+	root := t.TempDir()
+	cs := NewBareGit(root)
+	src := buildStackRepo(t, root, "v1", map[string]string{"stack.yaml": "name: n\nversion: 1\n"})
+	bundle := createBundle(t, src, root, "cleanup.bundle")
+	stage, _, cleanup, err := cs.StageBundle(bundle, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := cs.Commit("alice", "n", stage); err != nil {
+		t.Fatal(err)
+	}
+
+	abandoned := filepath.Join(root, ".stage-abandoned")
+	if err := os.MkdirAll(filepath.Join(abandoned, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stageFile := filepath.Join(root, ".stage-file")
+	if err := os.WriteFile(stageFile, []byte("leave me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profilesStage := filepath.Join(root, "profiles", ".stage-preserved")
+	if err := os.MkdirAll(profilesStage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := cs.CleanAbandonedStages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
+		t.Fatalf("abandoned stage stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(stageFile); err != nil {
+		t.Fatalf("stage-shaped file was removed: %v", err)
+	}
+	if _, err := os.Stat(profilesStage); err != nil {
+		t.Fatalf("nested profiles directory was removed: %v", err)
+	}
+	if _, err := cs.TagCommit("alice", "n", "v1"); err != nil {
+		t.Fatalf("published repository was damaged: %v", err)
+	}
+}
+
+func TestCleanAbandonedStagesAllowsMissingRoot(t *testing.T) {
+	cs := NewBareGit(filepath.Join(t.TempDir(), "missing"))
+	removed, err := cs.CleanAbandonedStages()
+	if err != nil || removed != 0 {
+		t.Fatalf("CleanAbandonedStages = %d, %v; want 0, nil", removed, err)
+	}
+}
+
 func TestListRepositoriesAndTagsIncludesContentWithoutMetadata(t *testing.T) {
 	root := t.TempDir()
 	store := NewBareGit(root)

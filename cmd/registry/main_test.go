@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,18 +19,33 @@ func TestRunBootsRegistryWithPostgres(t *testing.T) {
 	dsn := store.StartPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
+	contentDir := t.TempDir()
+	abandonedStage := filepath.Join(contentDir, ".stage-abandoned")
+	if err := os.MkdirAll(abandonedStage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stageFile := filepath.Join(contentDir, ".stage-file")
+	if err := os.WriteFile(stageFile, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	srv, cleanup, err := run(ctx, Config{
 		Port:           "0",
 		DatabaseURL:    dsn,
 		Token:          "test-token",
-		ContentDir:     t.TempDir(),
+		ContentDir:     contentDir,
 		GitHubClientID: "test-client",
 	})
 	if err != nil {
 		t.Fatalf("run registry: %v", err)
 	}
 	t.Cleanup(cleanup)
+	if _, err := os.Stat(abandonedStage); !os.IsNotExist(err) {
+		t.Fatalf("abandoned stage stat error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(stageFile); err != nil {
+		t.Fatalf("stage-shaped file was removed: %v", err)
+	}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://registry.test/v1/search", nil)
@@ -55,6 +72,22 @@ func TestRunBootsRegistryWithPostgres(t *testing.T) {
 	}
 	if srv.ReadHeaderTimeout == 0 || srv.ReadTimeout == 0 || srv.WriteTimeout == 0 || srv.IdleTimeout == 0 {
 		t.Fatalf("server timeouts must all be non-zero: %#v", srv)
+	}
+
+	invalidContentDir := filepath.Join(t.TempDir(), "content-file")
+	if err := os.WriteFile(invalidContentDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badServer, badCleanup, err := run(ctx, Config{
+		Port:        "0",
+		DatabaseURL: dsn,
+		ContentDir:  invalidContentDir,
+	})
+	if err == nil || !strings.Contains(err.Error(), "prepare registry content directory") {
+		t.Fatalf("invalid content run error = %v, want preparation failure", err)
+	}
+	if badServer != nil || badCleanup != nil {
+		t.Fatal("invalid content run returned a server or cleanup function")
 	}
 }
 

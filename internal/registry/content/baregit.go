@@ -18,6 +18,30 @@ func NewBareGit(root string) *BareGit {
 	return &BareGit{root: root}
 }
 
+// CleanAbandonedStages removes incomplete publish staging directories left by a
+// previous process. Startup is single-replica, so no live stage can exist yet.
+func (b *BareGit) CleanAbandonedStages() (int, error) {
+	entries, err := os.ReadDir(b.root)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("list content root: %w", err)
+	}
+
+	removed := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".stage-") {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(b.root, entry.Name())); err != nil {
+			return removed, fmt.Errorf("remove abandoned stage %s: %w", entry.Name(), err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
 func (b *BareGit) EnsureRepo(owner, name string) error {
 	if err := validateOwnerName(owner, name); err != nil {
 		return err

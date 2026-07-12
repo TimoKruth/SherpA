@@ -85,11 +85,23 @@ func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {
 	}
 
 	cs := content.NewBareGit(cfg.ContentDir)
+	if err := os.MkdirAll(cfg.ContentDir, 0o755); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("prepare registry content directory: %w", err)
+	}
+	removed, err := cs.CleanAbandonedStages()
+	if err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("clean abandoned content stages: %w", err)
+	}
+	if removed > 0 {
+		log.Printf("removed %d abandoned content stage directories", removed)
+	}
 	github := registryauth.NewGitHubClient(cfg.GitHubClientID)
 	var ready atomic.Bool
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", api.HealthHandler(&ready))
-	mux.Handle("/", api.New(st, cs, cfg.Token, github))
+	mux.Handle("/", api.NewWithOptions(st, cs, cfg.Token, github, api.Options{TrustProxy: cfg.TrustProxy}))
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           mux,
