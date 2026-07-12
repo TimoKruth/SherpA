@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	registryauth "sherpa/internal/registry/auth"
@@ -43,4 +44,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func internalServerError(w http.ResponseWriter, operation string, err error) {
+	log.Printf("%s: %v", operation, err)
+	writeError(w, http.StatusInternalServerError, "internal server error")
 }

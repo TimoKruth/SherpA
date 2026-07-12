@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -107,6 +108,65 @@ func TestPublishTrustTierByCredential(t *testing.T) {
 				t.Fatalf("TrustTier = %q", got)
 			}
 		})
+	}
+}
+
+func TestMatchingOrphanTagIsAdopted(t *testing.T) {
+	st := newPublishSpyStore()
+	cs := newPublishSpyContent(t)
+	h := New(st, cs, "admin", &registryauth.FakeGitHubClient{})
+	bundle := buildPublishBundle(t, map[string]string{
+		"stack.yaml": "name: n\nowner: o\nversion: 1\nharness: codex\n",
+		"README.md":  "clean\n",
+	})
+	first := postBundle(t, h, "o", "n", bundle, "admin")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first = %d %s", first.Code, first.Body.String())
+	}
+	delete(st.versionByKey, "o/n/1")
+	st.versions["o/n"] = nil
+	st.insertVersionCalls = 0
+	st.insertedVersions = nil
+	second := postBundle(t, h, "o", "n", bundle, "admin")
+	if second.Code != http.StatusCreated {
+		t.Fatalf("adopt = %d %s", second.Code, second.Body.String())
+	}
+	if cs.commitCalls != 1 || st.insertVersionCalls != 1 {
+		t.Fatalf("commit=%d insert=%d", cs.commitCalls, st.insertVersionCalls)
+	}
+}
+
+func TestConflictingOrphanTagReturns409(t *testing.T) {
+	st := newPublishSpyStore()
+	cs := newPublishSpyContent(t)
+	cs.tagCommits["o/n/v1"] = "different"
+	h := New(st, cs, "admin", &registryauth.FakeGitHubClient{})
+	bundle := buildPublishBundle(t, map[string]string{
+		"stack.yaml": "name: n\nowner: o\nversion: 1\nharness: codex\n",
+		"README.md":  "clean\n",
+	})
+	rr := postBundle(t, h, "o", "n", bundle, "admin")
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "orphan tag") {
+		t.Fatalf("response = %d %s", rr.Code, rr.Body.String())
+	}
+	assertNoPublishWrites(t, st, cs)
+}
+
+func TestPublishInternalErrorIsLogged(t *testing.T) {
+	st := newPublishSpyStore()
+	st.getVersionErr = errors.New("database unavailable")
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(old) })
+	h := New(st, newPublishSpyContent(t), "admin", &registryauth.FakeGitHubClient{})
+	bundle := buildPublishBundle(t, map[string]string{"stack.yaml": "name: n\nowner: o\nversion: 1\nharness: codex\n"})
+	rr := postBundle(t, h, "o", "n", bundle, "admin")
+	if rr.Code != http.StatusInternalServerError || !strings.Contains(logs.String(), "database unavailable") {
+		t.Fatalf("response=%d logs=%q", rr.Code, logs.String())
+	}
+	if strings.Contains(rr.Body.String(), "database unavailable") {
+		t.Fatalf("client leaked internal error: %s", rr.Body.String())
 	}
 }
 
@@ -273,11 +333,15 @@ type publishSpyContent struct {
 	inner       *content.BareGit
 	stageCalls  int
 	commitCalls int
+	tagCommits  map[string]string
 }
 
 func newPublishSpyContent(t *testing.T) *publishSpyContent {
 	t.Helper()
-	return &publishSpyContent{inner: content.NewBareGit(filepath.Join(t.TempDir(), "content"))}
+	return &publishSpyContent{
+		inner:      content.NewBareGit(filepath.Join(t.TempDir(), "content")),
+		tagCommits: map[string]string{},
+	}
 }
 
 func (p *publishSpyContent) EnsureRepo(owner, name string) error {
@@ -291,7 +355,20 @@ func (p *publishSpyContent) StageBundle(bundle []byte, gitTag string) (string, s
 
 func (p *publishSpyContent) Commit(owner, name, stageDir string) error {
 	p.commitCalls++
-	return p.inner.Commit(owner, name, stageDir)
+	if err := p.inner.Commit(owner, name, stageDir); err != nil {
+		return err
+	}
+	if commit, err := p.inner.TagCommit(owner, name, "v1"); err == nil {
+		p.tagCommits[owner+"/"+name+"/v1"] = commit
+	}
+	return nil
+}
+
+func (p *publishSpyContent) TagCommit(owner, name, tag string) (string, error) {
+	if commit, ok := p.tagCommits[owner+"/"+name+"/"+tag]; ok {
+		return commit, nil
+	}
+	return p.inner.TagCommit(owner, name, tag)
 }
 
 func (p *publishSpyContent) RepoPath(owner, name string) string {
@@ -310,6 +387,7 @@ type publishSpyStore struct {
 	versionByKey       map[string]store.Version
 	insertedVersions   []store.Version
 	insertErr          error
+	getVersionErr      error
 	githubUserID       int64
 	githubLogin        string
 	createdSessionHash string
@@ -408,6 +486,9 @@ func (p *publishSpyStore) GetStack(_ context.Context, owner, name string) (store
 }
 
 func (p *publishSpyStore) GetVersion(_ context.Context, owner, name string, v int) (store.Version, error) {
+	if p.getVersionErr != nil {
+		return store.Version{}, p.getVersionErr
+	}
 	version, ok := p.versionByKey[owner+"/"+name+"/"+strconv.Itoa(v)]
 	if !ok {
 		return store.Version{}, store.ErrNotFound

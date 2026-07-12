@@ -1,6 +1,7 @@
 package content
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,28 @@ import (
 
 	"sherpa/internal/gitutil"
 )
+
+func TestTagCommit(t *testing.T) {
+	root := t.TempDir()
+	cs := NewBareGit(root)
+	src := buildStackRepo(t, root, "v1", map[string]string{"stack.yaml": "name: n\nversion: 1\n"})
+	bundle := createBundle(t, src, root, "tag-commit.bundle")
+	stage, _, cleanup, err := cs.StageBundle(bundle, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := cs.Commit("alice", "n", stage); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cs.TagCommit("alice", "n", "v1")
+	if err != nil || len(got) != 40 {
+		t.Fatalf("TagCommit = %q, %v", got, err)
+	}
+	if _, err := cs.TagCommit("alice", "n", "v2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing tag error = %v", err)
+	}
+}
 
 func TestBareGitStageCommitAndClone(t *testing.T) {
 	root := t.TempDir()

@@ -133,6 +133,17 @@ func (b *BareGit) Commit(owner, name, stageDir string) error {
 	return nil
 }
 
+func (b *BareGit) TagCommit(owner, name, tag string) (string, error) {
+	if err := validateOwnerName(owner, name); err != nil {
+		return "", err
+	}
+	out, err := gitutil.Run(b.RepoPath(owner, name), "rev-parse", "--verify", tag+"^{commit}")
+	if err != nil {
+		return "", ErrNotFound
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func (b *BareGit) RepoPath(owner, name string) string {
 	if validateOwnerName(owner, name) != nil {
 		return filepath.Join(b.root, "profiles", "_invalid", "_invalid.git")

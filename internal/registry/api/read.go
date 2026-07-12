@@ -60,7 +60,7 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	matches, err := s.store.Search(r.Context(), q.Get("q"), q.Get("harness"), q.Get("tag"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "search stacks", err)
 		return
 	}
 
@@ -92,7 +92,7 @@ func (s *server) handleStack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "get stack", err)
 		return
 	}
 
@@ -132,7 +132,7 @@ func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "get version", err)
 		return
 	}
 

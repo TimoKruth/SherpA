@@ -15,6 +15,7 @@ import (
 	"sherpa/internal/gitutil"
 	"sherpa/internal/harness"
 	"sherpa/internal/publishscan"
+	"sherpa/internal/registry/content"
 	"sherpa/internal/registry/store"
 	"sherpa/internal/sanitize"
 	"sherpa/internal/stack"
@@ -85,7 +86,7 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 	pointsAtHead, err := stagedTagPointsAtHead(stageDir, gitTag)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "resolve staged tag", err)
 		return
 	}
 	if !pointsAtHead {
@@ -105,7 +106,7 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 
 	findings, err := publishscan.ScanRepo(worktreeDir, h, "")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "scan published content", err)
 		return
 	}
 	if len(findings) > 0 {
@@ -117,27 +118,47 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "version already exists")
 		return
 	} else if !errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "lookup version", err)
+		return
+	}
+
+	stagedCommit, err := gitutil.Run(stageDir, "rev-parse", gitTag+"^{commit}")
+	if err != nil {
+		internalServerError(w, "resolve staged tag", err)
+		return
+	}
+	orphanCommit, orphanErr := s.content.TagCommit(owner, name, gitTag)
+	adoptOrphan := false
+	switch {
+	case orphanErr == nil && strings.TrimSpace(orphanCommit) == strings.TrimSpace(stagedCommit):
+		adoptOrphan = true
+	case orphanErr == nil:
+		writeError(w, http.StatusConflict, "orphan tag exists with different content; reconcile before publishing")
+		return
+	case !errors.Is(orphanErr, content.ErrNotFound):
+		internalServerError(w, "inspect orphan tag", orphanErr)
 		return
 	}
 
 	manifestJSON, err := manifestSnapshotJSON(manifestBytes)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "snapshot manifest", err)
 		return
 	}
 	scanReportJSON, err := json.Marshal(map[string]any{"findings": publishFindingResponses(findings)})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "encode scan report", err)
 		return
 	}
 
-	if err := s.content.Commit(owner, name, stageDir); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+	if !adoptOrphan {
+		if err := s.content.Commit(owner, name, stageDir); err != nil {
+			internalServerError(w, "commit published content", err)
+			return
+		}
 	}
 	if _, err := s.store.UpsertUser(r.Context(), owner); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "upsert owner", err)
 		return
 	}
 	stackID, err := s.store.UpsertStack(r.Context(), store.Stack{
@@ -149,7 +170,7 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		Tags:       m.Tags,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "upsert stack", err)
 		return
 	}
 	version := store.Version{
@@ -164,7 +185,7 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "version already exists")
 		return
 	} else if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		internalServerError(w, "insert version", err)
 		return
 	}
 
