@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+func TestPostgresPoolConfigMaxConns(t *testing.T) {
+	config, err := postgresPoolConfig("postgres://localhost/sherpa", 9)
+	if err != nil {
+		t.Fatalf("postgresPoolConfig: %v", err)
+	}
+	if config.MaxConns != 9 {
+		t.Fatalf("MaxConns = %d, want 9", config.MaxConns)
+	}
+}
+
 func TestPostgresStoreContract(t *testing.T) {
 	dsn := StartPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -120,6 +130,14 @@ func TestPostgresStoreContract(t *testing.T) {
 	}
 	if version.StackID != stackID || version.Version != 1 || version.GitTag != "v1" {
 		t.Fatalf("version = %#v, want stack %d v1 tag v1", version, stackID)
+	}
+
+	refs, err := store.AllVersionRefs(ctx)
+	if err != nil {
+		t.Fatalf("all version refs: %v", err)
+	}
+	if len(refs) != 2 || refs[0] != (VersionRef{Owner: "alice", Name: "reviewer", Version: 1, GitTag: "v1"}) || refs[1] != (VersionRef{Owner: "alice", Name: "reviewer", Version: 2, GitTag: "v2"}) {
+		t.Fatalf("AllVersionRefs = %#v, want alice/reviewer v1,v2", refs)
 	}
 
 	if _, _, err := store.GetStack(ctx, "alice", "missing"); !errors.Is(err, ErrNotFound) {

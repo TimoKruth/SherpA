@@ -371,6 +371,14 @@ func (p *publishSpyContent) TagCommit(owner, name, tag string) (string, error) {
 	return p.inner.TagCommit(owner, name, tag)
 }
 
+func (p *publishSpyContent) ListRepositories() ([]content.RepositoryRef, error) {
+	return p.inner.ListRepositories()
+}
+
+func (p *publishSpyContent) ListTags(owner, name string) ([]string, error) {
+	return p.inner.ListTags(owner, name)
+}
+
 func (p *publishSpyContent) RepoPath(owner, name string) string {
 	return p.inner.RepoPath(owner, name)
 }
@@ -429,6 +437,17 @@ func (p *publishSpyStore) SessionUser(_ context.Context, hash string) (string, e
 		return "", store.ErrNotFound
 	}
 	return login, nil
+}
+
+func (p *publishSpyStore) AllVersionRefs(context.Context) ([]store.VersionRef, error) {
+	var refs []store.VersionRef
+	for key, versions := range p.versions {
+		owner, name, _ := strings.Cut(key, "/")
+		for _, version := range versions {
+			refs = append(refs, store.VersionRef{Owner: owner, Name: name, Version: version.Version, GitTag: version.GitTag})
+		}
+	}
+	return refs, nil
 }
 
 func (p *publishSpyStore) UpsertStack(_ context.Context, s store.Stack) (int64, error) {

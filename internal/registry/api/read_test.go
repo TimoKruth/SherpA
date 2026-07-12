@@ -322,6 +322,10 @@ func (f *fakeStore) GetVersion(_ context.Context, owner, name string, v int) (st
 	return version, nil
 }
 
+func (f *fakeStore) AllVersionRefs(context.Context) ([]store.VersionRef, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) Close() error {
 	return nil
 }

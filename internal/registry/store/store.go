@@ -38,6 +38,14 @@ type StackWithLatest struct {
 	PublishedAt time.Time
 }
 
+// VersionRef is the durable identity of a version's Git tag.
+type VersionRef struct {
+	Owner   string
+	Name    string
+	Version int
+	GitTag  string
+}
+
 type Store interface {
 	UpsertUser(ctx context.Context, handle string) (userID int64, err error)
 	UpsertUserGitHub(ctx context.Context, login string, githubID int64) (userID int64, err error)
@@ -48,6 +56,7 @@ type Store interface {
 	Search(ctx context.Context, q, harness, tag string) ([]StackWithLatest, error)
 	GetStack(ctx context.Context, owner, name string) (Stack, []Version, error)
 	GetVersion(ctx context.Context, owner, name string, v int) (Version, error)
+	AllVersionRefs(ctx context.Context) ([]VersionRef, error)
 	Close() error
 }
 

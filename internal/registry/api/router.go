@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync/atomic"
 
 	registryauth "sherpa/internal/registry/auth"
 	"sherpa/internal/registry/content"
@@ -15,6 +16,17 @@ type server struct {
 	content    content.ContentStore
 	adminToken string
 	github     registryauth.GitHubClient
+}
+
+func HealthHandler(ready *atomic.Bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !ready.Load() {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 }
 
 func New(st store.Store, cs content.ContentStore, adminToken string, github registryauth.GitHubClient) http.Handler {

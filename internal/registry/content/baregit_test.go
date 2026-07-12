@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -29,6 +30,79 @@ func TestTagCommit(t *testing.T) {
 	}
 	if _, err := cs.TagCommit("alice", "n", "v2"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing tag error = %v", err)
+	}
+}
+
+func TestListRepositoriesAndTagsIncludesContentWithoutMetadata(t *testing.T) {
+	root := t.TempDir()
+	store := NewBareGit(root)
+	createBareRepoWithTag(t, store.RepoPath("zoe", "writer"), "v2")
+	createBareRepoWithTag(t, store.RepoPath("alice", "reviewer"), "v1")
+
+	// Inventory ignores unrelated and invalid-depth filesystem entries.
+	if err := os.MkdirAll(filepath.Join(root, "profiles", ".hidden", "ignored.git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "profiles", "alice", "note"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repos, err := store.ListRepositories()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []RepositoryRef{{Owner: "alice", Name: "reviewer"}, {Owner: "zoe", Name: "writer"}}
+	if !reflect.DeepEqual(repos, want) {
+		t.Fatalf("ListRepositories = %#v, want %#v", repos, want)
+	}
+	tags, err := store.ListTags("alice", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(tags, []string{"v1"}) {
+		t.Fatalf("ListTags = %#v, want [v1]", tags)
+	}
+}
+
+func createBareRepoWithTag(t *testing.T, repoPath, tag string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(repoPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitutil.Run(filepath.Dir(repoPath), "init", "--bare", repoPath); err != nil {
+		t.Fatal(err)
+	}
+	// A tag must resolve to a real object. Reuse the test fixture helper instead of
+	// manufacturing a loose object by writing Git internals.
+	src := t.TempDir()
+	if _, err := gitutil.Run(src, "init", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitutil.Run(src, "config", "user.email", "test@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitutil.Run(src, "config", "user.name", "Test User"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "file"), []byte(tag), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitutil.Run(src, "add", "file"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitutil.Run(src, "commit", "-m", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := gitutil.Run(src, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := strings.TrimSpace(out)
+	if _, err := gitutil.Run(src, "push", repoPath, "HEAD:refs/heads/main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitutil.Run(repoPath, "update-ref", "refs/tags/"+tag, commit); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"sherpa/internal/gitutil"
@@ -151,6 +152,70 @@ func (b *BareGit) TagCommit(owner, name, tag string) (string, error) {
 		return "", ErrNotFound
 	}
 	return strings.TrimSpace(out), nil
+}
+
+func (b *BareGit) ListRepositories() ([]RepositoryRef, error) {
+	profilesDir := filepath.Join(b.root, "profiles")
+	owners, err := os.ReadDir(profilesDir)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list profile owners: %w", err)
+	}
+
+	var repos []RepositoryRef
+	for _, ownerEntry := range owners {
+		owner := ownerEntry.Name()
+		if !ownerEntry.IsDir() || validateSegment(owner) != nil {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(profilesDir, owner))
+		if err != nil {
+			return nil, fmt.Errorf("list repositories for %s: %w", owner, err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || !strings.HasSuffix(entry.Name(), ".git") {
+				continue
+			}
+			name := strings.TrimSuffix(entry.Name(), ".git")
+			if validateOwnerName(owner, name) != nil {
+				continue
+			}
+			repos = append(repos, RepositoryRef{Owner: owner, Name: name})
+		}
+	}
+	slices.SortFunc(repos, func(a, b RepositoryRef) int {
+		if c := strings.Compare(a.Owner, b.Owner); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return repos, nil
+}
+
+func (b *BareGit) ListTags(owner, name string) ([]string, error) {
+	if err := validateOwnerName(owner, name); err != nil {
+		return nil, err
+	}
+	repoPath := b.RepoPath(owner, name)
+	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+		return nil, ErrNotFound
+	} else if err != nil {
+		return nil, fmt.Errorf("stat repository: %w", err)
+	}
+	out, err := gitutil.Run(repoPath, "tag", "--list")
+	if err != nil {
+		return nil, fmt.Errorf("list tags: %w", err)
+	}
+	var tags []string
+	for _, tag := range strings.Split(out, "\n") {
+		if tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	slices.Sort(tags)
+	return tags, nil
 }
 
 func (b *BareGit) RepoPath(owner, name string) string {

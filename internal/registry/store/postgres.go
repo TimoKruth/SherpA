@@ -16,8 +16,12 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
-func OpenPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+func OpenPostgres(ctx context.Context, dsn string, maxConns ...int) (*PostgresStore, error) {
+	poolConfig, err := postgresPoolConfig(dsn, maxConns...)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -30,6 +34,20 @@ func OpenPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
 		return nil, err
 	}
 	return &PostgresStore{pool: pool}, nil
+}
+
+func postgresPoolConfig(dsn string, maxConns ...int) (*pgxpool.Config, error) {
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if len(maxConns) > 0 && maxConns[0] > 0 {
+		if uint64(maxConns[0]) > uint64(^uint32(0)>>1) {
+			return nil, fmt.Errorf("database max connections exceeds supported range")
+		}
+		config.MaxConns = int32(maxConns[0])
+	}
+	return config, nil
 }
 
 func (s *PostgresStore) UpsertUser(ctx context.Context, handle string) (int64, error) {
@@ -308,6 +326,30 @@ func (s *PostgresStore) GetVersion(ctx context.Context, owner, name string, v in
 		return Version{}, ErrNotFound
 	}
 	return version, err
+}
+
+func (s *PostgresStore) AllVersionRefs(ctx context.Context) ([]VersionRef, error) {
+	rows, err := s.pool.Query(ctx, `
+		select u.handle, s.name, sv.version, coalesce(sv.git_tag, '')
+		from stack_versions sv
+		join stacks s on s.id = sv.stack_id
+		join users u on u.id = s.owner_id
+		order by u.handle, s.name, sv.version, sv.git_tag
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []VersionRef
+	for rows.Next() {
+		var ref VersionRef
+		if err := rows.Scan(&ref.Owner, &ref.Name, &ref.Version, &ref.GitTag); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
 }
 
 func (s *PostgresStore) Close() error {
