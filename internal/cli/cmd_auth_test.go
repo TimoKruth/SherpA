@@ -54,7 +54,7 @@ func TestLoginLogoutAndTokenPrecedence(t *testing.T) {
 		t.Fatalf("session token request reached a different registry: %s", r.URL)
 	}))
 	defer other.Close()
-	if token, err := registryToken(home, other.URL); err == nil || token != "" {
+	if token, err := registryToken(home, other.URL); err == nil || token != "" || !strings.Contains(err.Error(), "registry session belongs to") || !strings.Contains(err.Error(), "log in to") {
 		t.Fatalf("cross-registry token = %q, %v", token, err)
 	}
 	profile := makeExpertRepo(t, true)
@@ -84,7 +84,7 @@ func TestLegacyRegistrySessionFailsClosed(t *testing.T) {
 	}
 	t.Setenv("SHERPA_REGISTRY_TOKEN", "")
 	token, err := registryToken(home, "https://registry.example")
-	if err == nil || token != "" {
+	if err == nil || token != "" || !strings.Contains(err.Error(), "no registry issuer; log in again") {
 		t.Fatalf("legacy token = %q, err = %v", token, err)
 	}
 }

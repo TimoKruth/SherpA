@@ -1,5 +1,9 @@
 # Phase 2 · 2c-iii — Railway Deployment Implementation Plan
 
+**Implementation status (2026-07-12):** Tasks 1, 1B, and 2-7 are implemented on `main`.
+Automated Go, race, vet, formatting, Docker build/run, Postgres-16 `pg_dump`, non-root PID 1,
+and artifact checks pass. The live Railway staging gate remains an operator acceptance step.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship the authenticated registry as a production-shaped Railway service — hardened HTTP server + `/healthz` + graceful shutdown, bounded public auth endpoints, pinned public clone/issuer URL, startup staging-cleanup, a consistency-audit and scheduled off-site export, a non-root Docker image + `railway.json` + entrypoint, and a staging runbook/gate — without weakening any 2c-i/2c-ii invariant.
@@ -150,7 +154,7 @@ func TestHealthzReadyGate(t *testing.T) {
 
 - [ ] **Step 1: Write failing tests** — seed two repos + temp Postgres; the runner records that `pg_dump` completes before the first bundle command; unpacked archive has cloneable bundles under collision-free owner/name paths, non-empty dump, and a final manifest whose hashes/sizes verify. A failed command leaves no final archive. `Upload` sends the complete gzip bytes to `httptest.Server`, sets only the configured Bearer, rejects non-HTTPS collectors except loopback tests, and never places DB/export credentials in command args or errors. Scheduler cancellation stops cleanly and an upload failure is logged without its URL query/token.
 - [ ] **Step 2: Verify fail.**
-- [ ] **Step 3: Implement** — create a temp workspace beside the requested archive; invoke `pg_dump` **first** with the DSN in `PGDATABASE` environment (never argv/logs); enumerate validated repos and create `--all` bundles; hash artifacts and write `manifest.json` last; tar/gzip the workspace to a temp archive, fsync/close, then rename to the final path. On any error remove temps. Upload via Go `net/http` POST, not shell. Scheduler uses a context-aware ticker, writes temp archives outside the content tree, uploads, then deletes local archives only after a 2xx response. Empty export URL/interval disables scheduling; partial configuration fails startup.
+- [ ] **Step 3: Implement** — create a temp workspace beside the requested archive; parse the Postgres URL into libpq `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`/`PGSSLMODE` environment variables and invoke `pg_dump` **first** (never put the DSN/password in argv/logs); enumerate validated repos and create `--all` bundles; hash artifacts and write `manifest.json` last; tar/gzip the workspace to a temp archive, fsync/close, then rename to the final path. On any error remove temps. Upload via a bounded Go `net/http` client, not shell. Scheduler uses a context-aware ticker, writes temp archives outside the content tree, and deletes only after 2xx; on upload failure it retries that one pending archive and creates no new archive until success. Empty export URL/interval disables scheduling; partial configuration fails startup.
 - [ ] **Step 4: Verify** — `go test ./internal/registry/export/ ./...` → PASS.
 - [ ] **Step 5: Commit** — `git add -A && git commit -m "feat: off-site DR export (git bundle + pg_dump) command"`
 
@@ -175,8 +179,8 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOFLAGS=-trimpath go build -o /out/registry ./cmd/registry
 # runtime
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates postgresql-client util-linux \
+FROM postgres:16-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --create-home --shell /usr/sbin/nologin sherpa
 COPY --from=build /out/registry /usr/local/bin/registry
