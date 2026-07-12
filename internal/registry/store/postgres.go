@@ -4,42 +4,43 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type PostgresStore struct {
-	mu   sync.Mutex
-	conn *pgx.Conn
+	pool *pgxpool.Pool
 }
 
 func OpenPostgres(ctx context.Context, dsn string) (*PostgresStore, error) {
-	conn, err := pgx.Connect(ctx, dsn)
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, err
 	}
-	if err := conn.Ping(ctx); err != nil {
-		_ = conn.Close(ctx)
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
 		return nil, err
 	}
-	if err := Migrate(ctx, conn); err != nil {
-		_ = conn.Close(ctx)
+	if err := Migrate(ctx, pool); err != nil {
+		pool.Close()
 		return nil, err
 	}
-	return &PostgresStore{conn: conn}, nil
+	return &PostgresStore{pool: pool}, nil
 }
 
 func (s *PostgresStore) UpsertUser(ctx context.Context, handle string) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.upsertUserLocked(ctx, handle)
+	return upsertUser(ctx, s.pool, handle)
 }
 
-func (s *PostgresStore) upsertUserLocked(ctx context.Context, handle string) (int64, error) {
+type queryRower interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func upsertUser(ctx context.Context, db queryRower, handle string) (int64, error) {
 	var id int64
-	err := s.conn.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		insert into users(handle)
 		values ($1)
 		on conflict (handle) do update set handle = excluded.handle
@@ -49,16 +50,19 @@ func (s *PostgresStore) upsertUserLocked(ctx context.Context, handle string) (in
 }
 
 func (s *PostgresStore) UpsertStack(ctx context.Context, stack Stack) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
 
-	ownerID, err := s.upsertUserLocked(ctx, stack.Owner)
+	ownerID, err := upsertUser(ctx, tx, stack.Owner)
 	if err != nil {
 		return 0, err
 	}
 
 	var id int64
-	err = s.conn.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		insert into stacks(owner_id, name, summary, tags, harness, forked_from)
 		values ($1, $2, $3, $4, $5, $6)
 		on conflict (owner_id, name) do update set
@@ -68,14 +72,17 @@ func (s *PostgresStore) UpsertStack(ctx context.Context, stack Stack) (int64, er
 			forked_from = excluded.forked_from
 		returning id
 	`, ownerID, stack.Name, stack.Summary, stack.Tags, stack.Harness, stack.ForkedFrom).Scan(&id)
-	return id, err
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (s *PostgresStore) InsertVersion(ctx context.Context, version Version) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.conn.Exec(ctx, `
+	_, err := s.pool.Exec(ctx, `
 		insert into stack_versions(stack_id, version, git_tag, manifest, scan_report, changelog)
 		values ($1, $2, $3, $4, $5, $6)
 	`, version.StackID, version.Version, version.GitTag, jsonOrNil(version.Manifest), jsonOrNil(version.ScanReport), version.Changelog)
@@ -86,10 +93,7 @@ func (s *PostgresStore) InsertVersion(ctx context.Context, version Version) erro
 }
 
 func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string) ([]StackWithLatest, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	rows, err := s.conn.Query(ctx, `
+	rows, err := s.pool.Query(ctx, `
 		select
 			s.id, u.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
 			coalesce(s.forked_from, ''), coalesce(s.tags, array[]::text[]), s.created_at,
@@ -106,7 +110,7 @@ func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string) ([]S
 		where
 			($1 = '' or s.name ilike '%' || $1 || '%' or coalesce(s.summary, '') ilike '%' || $1 || '%'
 				or exists (select 1 from unnest(coalesce(s.tags, array[]::text[])) t where t ilike '%' || $1 || '%'))
-			and ($2 = '' or s.harness = $2)
+			and ($2 = '' or lower(s.harness) = lower($2))
 			and ($3 = '' or exists (select 1 from unnest(coalesce(s.tags, array[]::text[])) t where lower(t) = lower($3)))
 		order by v.published_at desc, s.name
 	`, q, harness, tag)
@@ -139,11 +143,8 @@ func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string) ([]S
 }
 
 func (s *PostgresStore) GetStack(ctx context.Context, owner, name string) (Stack, []Version, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	var stack Stack
-	err := s.conn.QueryRow(ctx, `
+	err := s.pool.QueryRow(ctx, `
 		select s.id, u.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
 			coalesce(s.forked_from, ''), coalesce(s.tags, array[]::text[]), s.created_at
 		from stacks s
@@ -166,7 +167,7 @@ func (s *PostgresStore) GetStack(ctx context.Context, owner, name string) (Stack
 		return Stack{}, nil, err
 	}
 
-	versions, err := s.versionsForStackLocked(ctx, stack.ID)
+	versions, err := s.versionsForStack(ctx, stack.ID)
 	if err != nil {
 		return Stack{}, nil, err
 	}
@@ -174,11 +175,8 @@ func (s *PostgresStore) GetStack(ctx context.Context, owner, name string) (Stack
 }
 
 func (s *PostgresStore) GetVersion(ctx context.Context, owner, name string, v int) (Version, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	var version Version
-	err := s.conn.QueryRow(ctx, `
+	err := s.pool.QueryRow(ctx, `
 		select sv.id, sv.stack_id, sv.version, coalesce(sv.git_tag, ''), sv.manifest,
 			sv.scan_report, coalesce(sv.changelog, ''), sv.published_at
 		from stack_versions sv
@@ -202,16 +200,15 @@ func (s *PostgresStore) GetVersion(ctx context.Context, owner, name string, v in
 }
 
 func (s *PostgresStore) Close() error {
-	if s == nil || s.conn == nil {
+	if s == nil || s.pool == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.conn.Close(context.Background())
+	s.pool.Close()
+	return nil
 }
 
-func (s *PostgresStore) versionsForStackLocked(ctx context.Context, stackID int64) ([]Version, error) {
-	rows, err := s.conn.Query(ctx, `
+func (s *PostgresStore) versionsForStack(ctx context.Context, stackID int64) ([]Version, error) {
+	rows, err := s.pool.Query(ctx, `
 		select id, stack_id, version, coalesce(git_tag, ''), manifest, scan_report,
 			coalesce(changelog, ''), published_at
 		from stack_versions

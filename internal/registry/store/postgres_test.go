@@ -76,7 +76,7 @@ func TestPostgresStoreContract(t *testing.T) {
 		t.Fatalf("duplicate insert error = %v, want %v", err, ErrVersionExists)
 	}
 
-	matches, err := store.Search(ctx, "SECUR", "claude-code", "")
+	matches, err := store.Search(ctx, "SECUR", "CLAUDE-CODE", "")
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
