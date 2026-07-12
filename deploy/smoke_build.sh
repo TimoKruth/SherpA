@@ -70,7 +70,14 @@ fi
 docker exec --user sherpa "$registry_container" sh -c \
   'test -w /data/git && : > /data/git/.smoke-write && rm /data/git/.smoke-write'
 docker exec --user sherpa "$registry_container" git --version >/dev/null
-docker exec --user sherpa "$registry_container" pg_dump --version >/dev/null
+docker exec --user sherpa \
+  --env "PGHOST=${postgres_container}" \
+  --env PGPORT=5432 \
+  --env PGUSER=postgres \
+  --env PGPASSWORD=smoke-password \
+  --env PGDATABASE=sherpa \
+  "$registry_container" \
+  sh -c 'pg_dump --schema-only --file /tmp/sherpa-smoke-schema.sql && test -s /tmp/sherpa-smoke-schema.sql && rm /tmp/sherpa-smoke-schema.sql'
 
 docker run --rm --entrypoint /bin/sh "$image" -c \
   'test ! -e /src && test ! -e /usr/local/go && ! command -v go >/dev/null 2>&1'

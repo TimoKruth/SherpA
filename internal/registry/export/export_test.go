@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -30,13 +31,18 @@ func TestRunDumpsDatabaseBeforeBundlesAndBuildsVerifiableArchive(t *testing.T) {
 	original := runCommand
 	t.Cleanup(func() { runCommand = original })
 	var calls []string
+	databaseURL := "postgresql://exporter:p%40ss@db.internal:5433/sherpa?sslmode=require"
 	runCommand = func(ctx context.Context, dir, name string, args, env []string) error {
 		calls = append(calls, name)
 		if name == "pg_dump" {
-			if strings.Contains(strings.Join(args, " "), "postgres://secret") {
+			if strings.Contains(strings.Join(args, " "), databaseURL) || strings.Contains(strings.Join(args, " "), "p@ss") {
 				t.Fatal("database URL appeared in pg_dump arguments")
 			}
-			if len(env) != 1 || env[0] != "PGDATABASE=postgres://secret" {
+			wantEnv := []string{
+				"PGHOST=db.internal", "PGPORT=5433", "PGUSER=exporter",
+				"PGPASSWORD=p@ss", "PGDATABASE=sherpa", "PGSSLMODE=require",
+			}
+			if !slices.Equal(env, wantEnv) {
 				t.Fatalf("pg_dump environment = %q", env)
 			}
 			return os.WriteFile(args[2], []byte("database dump"), 0o600)
@@ -44,7 +50,7 @@ func TestRunDumpsDatabaseBeforeBundlesAndBuildsVerifiableArchive(t *testing.T) {
 		return execCommand(ctx, dir, name, args, env)
 	}
 
-	if err := Run(context.Background(), contentDir, "postgres://secret", archivePath); err != nil {
+	if err := Run(context.Background(), contentDir, databaseURL, archivePath); err != nil {
 		t.Fatal(err)
 	}
 	if len(calls) != 3 || calls[0] != "pg_dump" || calls[1] != "git" || calls[2] != "git" {
@@ -102,8 +108,9 @@ func TestRunFailureLeavesNoArchiveOrTemporaryFiles(t *testing.T) {
 		return errors.New("failed")
 	}
 
-	err := Run(context.Background(), t.TempDir(), "postgres://hidden", archivePath)
-	if err == nil || strings.Contains(err.Error(), "postgres://hidden") {
+	databaseURL := "postgres://user:hidden@db.internal/sherpa"
+	err := Run(context.Background(), t.TempDir(), databaseURL, archivePath)
+	if err == nil || strings.Contains(err.Error(), "hidden") || strings.Contains(err.Error(), databaseURL) {
 		t.Fatalf("Run error = %q", err)
 	}
 	entries, readErr := os.ReadDir(parent)
@@ -112,6 +119,39 @@ func TestRunFailureLeavesNoArchiveOrTemporaryFiles(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("failure left files: %v", entries)
+	}
+}
+
+func TestDatabaseEnvironmentDefaultsAndRejectsMalformedURLsWithoutSecrets(t *testing.T) {
+	environment, err := databaseEnvironment("postgres://exporter@db.internal/sherpa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"PGHOST=db.internal", "PGPORT=5432", "PGUSER=exporter",
+		"PGPASSWORD=", "PGDATABASE=sherpa", "PGSSLMODE=prefer",
+	}
+	if !slices.Equal(environment, want) {
+		t.Fatalf("database environment = %q, want %q", environment, want)
+	}
+
+	for _, databaseURL := range []string{
+		"mysql://user:top-secret@db.internal/sherpa",
+		"postgres://user:top-secret@/sherpa",
+		"postgres://user:top-secret@db.internal/",
+		"postgres://user:top-secret@db.internal/one/two",
+		"postgres://user:top-secret@db.internal/sherpa?connect_timeout=10",
+		"postgres://user:top-secret@db.internal/sherpa?sslmode=unsafe",
+		"postgres://user:top-secret@db.internal/sherpa#fragment",
+	} {
+		_, err := databaseEnvironment(databaseURL)
+		if err == nil {
+			t.Errorf("databaseEnvironment(%q) succeeded", databaseURL)
+			continue
+		}
+		if strings.Contains(err.Error(), "top-secret") || strings.Contains(err.Error(), databaseURL) {
+			t.Errorf("databaseEnvironment error %q exposes credentials", err)
+		}
 	}
 }
 
@@ -193,16 +233,18 @@ func TestUploadDoesNotFollowRedirectsWithCredentials(t *testing.T) {
 	}
 }
 
-func TestStartSchedulerCancellationStopsAndLogsSafeUploadFailure(t *testing.T) {
+func TestStartSchedulerRetriesOnePendingArchiveAndCancelsCleanly(t *testing.T) {
 	originalRun, originalUpload := runExport, uploadArchive
 	t.Cleanup(func() { runExport, uploadArchive = originalRun, originalUpload })
 	dir := t.TempDir()
 	var runs atomic.Int32
+	var uploads atomic.Int32
 	runExport = func(_ context.Context, _, _, path string) error {
 		runs.Add(1)
 		return os.WriteFile(path, []byte("archive"), 0o600)
 	}
 	uploadArchive = func(context.Context, string, string, string) error {
+		uploads.Add(1)
 		return errors.New("collector returned HTTP 503")
 	}
 	var logs bytes.Buffer
@@ -216,8 +258,14 @@ func TestStartSchedulerCancellationStopsAndLogsSafeUploadFailure(t *testing.T) {
 		})
 	}()
 	deadline := time.Now().Add(time.Second)
-	for runs.Load() == 0 && time.Now().Before(deadline) {
+	for uploads.Load() < 3 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
+	}
+	if uploads.Load() < 3 {
+		t.Fatalf("upload attempts = %d, want at least 3", uploads.Load())
+	}
+	if runs.Load() != 1 {
+		t.Fatalf("export runs = %d, want 1 while retrying pending archive", runs.Load())
 	}
 	cancel()
 	select {

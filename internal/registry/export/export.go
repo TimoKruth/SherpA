@@ -19,13 +19,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"sherpa/internal/registry/content"
 )
 
-const archiveMode = 0o600
+const (
+	archiveMode         = 0o600
+	exportUploadTimeout = 10 * time.Minute
+)
 
 type manifest struct {
 	Artifacts []artifact `json:"artifacts"`
@@ -107,7 +111,11 @@ func Run(ctx context.Context, contentDir, dbURL, archivePath string) (err error)
 	}
 
 	dumpPath := filepath.Join(workspace, "postgres.dump")
-	if err := runCommand(ctx, workspace, "pg_dump", []string{"--format=custom", "--file", dumpPath}, []string{"PGDATABASE=" + dbURL}); err != nil {
+	databaseEnv, err := databaseEnvironment(dbURL)
+	if err != nil {
+		return err
+	}
+	if err := runCommand(ctx, workspace, "pg_dump", []string{"--format=custom", "--file", dumpPath}, databaseEnv); err != nil {
 		return fmt.Errorf("dump database: %w", err)
 	}
 	if err := requireRegularFile(dumpPath); err != nil {
@@ -162,6 +170,63 @@ func Run(ctx context.Context, contentDir, dbURL, archivePath string) (err error)
 		return fmt.Errorf("sync archive directory: %w", err)
 	}
 	return nil
+}
+
+func databaseEnvironment(databaseURL string) ([]string, error) {
+	parsed, err := url.Parse(databaseURL)
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+		return nil, errors.New("DATABASE_URL must be a valid postgres or postgresql URL")
+	}
+	if parsed.Opaque != "" || parsed.Hostname() == "" || parsed.User == nil || parsed.User.Username() == "" || parsed.Fragment != "" {
+		return nil, errors.New("DATABASE_URL must include a host, user, and database")
+	}
+	database := strings.TrimPrefix(parsed.Path, "/")
+	if database == "" || strings.Contains(database, "/") {
+		return nil, errors.New("DATABASE_URL must include one database name")
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "5432"
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return nil, errors.New("DATABASE_URL has an invalid port")
+	}
+
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return nil, errors.New("DATABASE_URL contains invalid connection options")
+	}
+	for key, values := range query {
+		if key != "sslmode" || len(values) != 1 || values[0] == "" {
+			return nil, errors.New("DATABASE_URL contains unsupported connection options")
+		}
+	}
+	sslMode := query.Get("sslmode")
+	if sslMode == "" {
+		sslMode = "prefer"
+	}
+	if !validSSLMode(sslMode) {
+		return nil, errors.New("DATABASE_URL has an invalid sslmode")
+	}
+	password, _ := parsed.User.Password()
+	return []string{
+		"PGHOST=" + parsed.Hostname(),
+		"PGPORT=" + port,
+		"PGUSER=" + parsed.User.Username(),
+		"PGPASSWORD=" + password,
+		"PGDATABASE=" + database,
+		"PGSSLMODE=" + sslMode,
+	}, nil
+}
+
+func validSSLMode(mode string) bool {
+	switch mode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+		return true
+	default:
+		return false
+	}
 }
 
 func requireRegularFile(path string) error {
@@ -323,6 +388,7 @@ func Upload(ctx context.Context, archivePath, collectorURL, token string) error 
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	client := &http.Client{
+		Timeout: exportUploadTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -413,29 +479,35 @@ func StartScheduler(ctx context.Context, cfg SchedulerConfig) error {
 
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
+	var pendingArchive string
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case now := <-ticker.C:
-			archivePath := filepath.Join(archiveDir, fmt.Sprintf("sherpa-%s-%d.tar.gz", now.UTC().Format("20060102T150405Z"), now.UnixNano()))
-			if err := runExport(ctx, cfg.ContentDir, cfg.DatabaseURL, archivePath); err != nil {
-				if ctx.Err() != nil {
-					return nil
+			if pendingArchive == "" {
+				pendingArchive = filepath.Join(archiveDir, fmt.Sprintf("sherpa-%s-%d.tar.gz", now.UTC().Format("20060102T150405Z"), now.UnixNano()))
+				if err := runExport(ctx, cfg.ContentDir, cfg.DatabaseURL, pendingArchive); err != nil {
+					pendingArchive = ""
+					if ctx.Err() != nil {
+						return nil
+					}
+					logger.Printf("off-site export creation failed: %v", err)
+					continue
 				}
-				logger.Printf("off-site export creation failed: %v", err)
-				continue
 			}
-			if err := uploadArchive(ctx, archivePath, cfg.CollectorURL, cfg.Token); err != nil {
+			if err := uploadArchive(ctx, pendingArchive, cfg.CollectorURL, cfg.Token); err != nil {
 				if ctx.Err() != nil {
 					return nil
 				}
 				logger.Printf("off-site export upload failed: %v", err)
 				continue
 			}
-			if err := os.Remove(archivePath); err != nil {
+			if err := os.Remove(pendingArchive); err != nil {
 				logger.Printf("remove uploaded export archive: %v", err)
+				continue
 			}
+			pendingArchive = ""
 		}
 	}
 }

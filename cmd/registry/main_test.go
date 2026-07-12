@@ -219,7 +219,7 @@ func TestDispatchExportCreatesArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("DATABASE_URL", "postgres://dispatch-secret")
+	t.Setenv("DATABASE_URL", "postgres://exporter:dispatch-secret@db.internal/sherpa")
 	t.Setenv("SHERPA_CONTENT_DIR", t.TempDir())
 	t.Setenv("SHERPA_EXPORT_URL", "")
 	t.Setenv("SHERPA_EXPORT_TOKEN", "")
