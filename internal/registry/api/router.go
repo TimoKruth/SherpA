@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	registryauth "sherpa/internal/registry/auth"
 	"sherpa/internal/registry/content"
@@ -16,6 +17,16 @@ type server struct {
 	content    content.ContentStore
 	adminToken string
 	github     registryauth.GitHubClient
+	limiter    *authLimiter
+	trustProxy bool
+	now        func() time.Time
+	logger     *log.Logger
+}
+
+type Options struct {
+	TrustProxy bool
+	Now        func() time.Time
+	Logger     *log.Logger
 }
 
 func HealthHandler(ready *atomic.Bool) http.Handler {
@@ -30,11 +41,27 @@ func HealthHandler(ready *atomic.Bool) http.Handler {
 }
 
 func New(st store.Store, cs content.ContentStore, adminToken string, github registryauth.GitHubClient) http.Handler {
+	return NewWithOptions(st, cs, adminToken, github, Options{})
+}
+
+func NewWithOptions(st store.Store, cs content.ContentStore, adminToken string, github registryauth.GitHubClient, options Options) http.Handler {
+	now := options.Now
+	if now == nil {
+		now = time.Now
+	}
+	logger := options.Logger
+	if logger == nil {
+		logger = log.Default()
+	}
 	s := &server{
 		store:      st,
 		content:    cs,
 		adminToken: adminToken,
 		github:     github,
+		limiter:    newAuthLimiter(now),
+		trustProxy: options.TrustProxy,
+		now:        now,
+		logger:     logger,
 	}
 
 	mux := http.NewServeMux()
@@ -45,7 +72,7 @@ func New(st store.Store, cs content.ContentStore, adminToken string, github regi
 	mux.HandleFunc("GET /v1/stacks/{owner}/{name}", s.handleStack)
 	mux.HandleFunc("GET /v1/stacks/{owner}/{name}/versions/{version}", s.handleVersion)
 	mux.HandleFunc("POST /v1/stacks/{owner}/{name}/versions", s.handlePublish)
-	return mux
+	return s.logRequests(mux)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

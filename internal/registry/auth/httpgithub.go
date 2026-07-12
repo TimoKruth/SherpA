@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 type HTTPGitHubClient struct {
@@ -25,7 +26,7 @@ func NewGitHubClient(clientID string, httpBaseURLs ...string) *HTTPGitHubClient 
 	if len(httpBaseURLs) > 1 {
 		apiURL = strings.TrimRight(httpBaseURLs[1], "/")
 	}
-	return &HTTPGitHubClient{clientID: clientID, loginURL: loginURL, apiURL: apiURL, client: http.DefaultClient}
+	return &HTTPGitHubClient{clientID: clientID, loginURL: loginURL, apiURL: apiURL, client: &http.Client{Timeout: 30 * time.Second}}
 }
 
 func (g *HTTPGitHubClient) StartDeviceFlow(ctx context.Context) (DeviceCode, error) {
@@ -34,6 +35,9 @@ func (g *HTTPGitHubClient) StartDeviceFlow(ctx context.Context) (DeviceCode, err
 	}
 	var out DeviceCode
 	err := g.postForm(ctx, g.loginURL+"/login/device/code", url.Values{"client_id": {g.clientID}}, &out)
+	if err == nil && out.Interval <= 0 {
+		out.Interval = 5
+	}
 	return out, err
 }
 
