@@ -220,7 +220,11 @@ func publishRegistryVersion(ctx *Ctx, dir, registryURL, tag string) error {
 		return err
 	}
 
-	status, body, err := publishToRegistry(registryURL, os.Getenv("SHERPA_REGISTRY_TOKEN"), owner, m.Name, bundlePath)
+	token, err := registryToken(ctx.Home)
+	if err != nil {
+		return fmt.Errorf("load registry session: %w", err)
+	}
+	status, body, err := publishToRegistry(registryURL, token, owner, m.Name, bundlePath)
 	if err != nil {
 		return err
 	}
@@ -241,6 +245,10 @@ func readStackManifest(dir string) (*stack.Manifest, error) {
 }
 
 func printRegistryPublishError(w io.Writer, status int, body []byte) {
+	if status == http.StatusForbidden {
+		fmt.Fprintln(w, "you can only publish under @<your-github-login>")
+		return
+	}
 	var resp registryPublishError
 	if err := json.Unmarshal(body, &resp); err == nil {
 		for _, finding := range resp.Findings {

@@ -1,0 +1,69 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestLoginLogoutAndTokenPrecedence(t *testing.T) {
+	polls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/device/start":
+			_ = json.NewEncoder(w).Encode(map[string]any{"device_code": "device", "user_code": "ABCD", "verification_uri": "https://github.com/login/device", "interval": 0, "expires_in": 900})
+		case "/v1/auth/device/poll":
+			polls++
+			if polls == 1 {
+				w.WriteHeader(http.StatusAccepted)
+				_ = json.NewEncoder(w).Encode(map[string]string{"status": "pending"})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "sherpa-session", "login": "alice"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	home := t.TempDir()
+	t.Setenv("SHERPA_REGISTRY_URL", srv.URL)
+	t.Setenv("SHERPA_REGISTRY_TOKEN", "")
+	var out bytes.Buffer
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &out, Stdin: strings.NewReader("")}
+	if err := cmdLogin(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "ABCD") || !strings.Contains(out.String(), "alice") {
+		t.Fatalf("output = %q", out.String())
+	}
+	info, err := os.Stat(filepath.Join(home, "registry-session.json"))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("session mode = %v, err=%v", info.Mode().Perm(), err)
+	}
+	if token, err := registryToken(home); err != nil || token != "sherpa-session" {
+		t.Fatalf("token = %q, %v", token, err)
+	}
+	t.Setenv("SHERPA_REGISTRY_TOKEN", "admin")
+	if token, err := registryToken(home); err != nil || token != "admin" {
+		t.Fatalf("admin precedence = %q, %v", token, err)
+	}
+	if err := cmdLogout(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "registry-session.json")); !os.IsNotExist(err) {
+		t.Fatalf("session still exists: %v", err)
+	}
+}
+
+func TestRegistryPublishForbiddenExplainsOwnerScope(t *testing.T) {
+	var out bytes.Buffer
+	printRegistryPublishError(&out, http.StatusForbidden, []byte(`{"error":"forbidden"}`))
+	if got := out.String(); got != "you can only publish under @<your-github-login>\n" {
+		t.Fatalf("output = %q", got)
+	}
+}
