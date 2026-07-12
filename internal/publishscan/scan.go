@@ -61,7 +61,9 @@ func publishScanFiles(dir string) ([]string, error) {
 
 func scanPublishHistoryPatch(dir, historyRange string) (string, error) {
 	args := []string{"log", "-m", "-p"}
-	if historyRange != "" {
+	if historyRange == "" {
+		args = append(args, "--all")
+	} else {
 		args = append(args, historyRange)
 	}
 	return gitutil.Run(dir, args...)

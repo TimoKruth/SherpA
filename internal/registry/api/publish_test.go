@@ -65,10 +65,7 @@ func TestPublishBlocksTrackedSecretFailClosed(t *testing.T) {
 		t.Fatalf("status = %d, want 422; body %s", rr.Code, rr.Body.String())
 	}
 	var body struct {
-		Findings []struct {
-			File string `json:"File"`
-			Kind string `json:"Kind"`
-		} `json:"findings"`
+		Findings []publishFinding `json:"findings"`
 	}
 	decodeJSON(t, rr, &body)
 	if len(body.Findings) == 0 {
@@ -93,16 +90,30 @@ func TestPublishBlocksCodexSetupStateFailClosed(t *testing.T) {
 		t.Fatalf("status = %d, want 422; body %s", rr.Code, rr.Body.String())
 	}
 	var body struct {
-		Findings []struct {
-			File string `json:"File"`
-			Kind string `json:"Kind"`
-		} `json:"findings"`
+		Findings []publishFinding `json:"findings"`
 	}
 	decodeJSON(t, rr, &body)
 	if len(body.Findings) == 0 {
 		t.Fatalf("findings = %#v, want at least one", body.Findings)
 	}
 	assertFinding(t, body.Findings, "auth.json", "setup-state")
+	assertNoPublishWrites(t, st, cs)
+}
+
+func TestPublishRejectsVersionTagThatDoesNotPointAtPublishedHeadBeforeWrites(t *testing.T) {
+	st := newPublishSpyStore()
+	cs := newPublishSpyContent(t)
+	handler := New(st, cs, "registry-token")
+
+	bundle := buildPublishBundleWithMismatchedVersionTag(t)
+	rr := postBundle(t, handler, "o", "n", bundle, "registry-token")
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "version tag v1 does not point at the published HEAD") {
+		t.Fatalf("body = %s, want tag mismatch validation", rr.Body.String())
+	}
 	assertNoPublishWrites(t, st, cs)
 }
 
@@ -335,10 +346,12 @@ func assertNoPublishWrites(t *testing.T, st *publishSpyStore, cs *publishSpyCont
 	}
 }
 
-func assertFinding(t *testing.T, findings []struct {
-	File string `json:"File"`
-	Kind string `json:"Kind"`
-}, file, kind string) {
+type publishFinding struct {
+	File string `json:"file"`
+	Kind string `json:"kind"`
+}
+
+func assertFinding(t *testing.T, findings []publishFinding, file, kind string) {
 	t.Helper()
 	for _, finding := range findings {
 		if finding.File == file && finding.Kind == kind {
@@ -409,4 +422,49 @@ func buildPublishBundle(t *testing.T, files map[string]string) []byte {
 		t.Fatalf("read bundle: %v", err)
 	}
 	return bundle
+}
+
+func buildPublishBundleWithMismatchedVersionTag(t *testing.T) []byte {
+	t.Helper()
+	root := t.TempDir()
+	repo := filepath.Join(root, "src")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	runGit(t, repo, "init", "-b", "main")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "Test User")
+	runGit(t, repo, "config", "commit.gpgsign", "false")
+	writeBundleFile(t, repo, "stack.yaml", "name: n\nowner: o\nversion: 1\nharness: codex\nsummary: clean summary\n")
+	writeBundleFile(t, repo, "README.md", "clean\n")
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-m", "clean head")
+
+	runGit(t, repo, "checkout", "-b", "tagged-secret")
+	writeBundleFile(t, repo, "settings.json", `{"token":"ghp_`+strings.Repeat("x", 36)+`"}`+"\n")
+	runGit(t, repo, "add", "-A")
+	runGit(t, repo, "commit", "-m", "secret tag target")
+	runGit(t, repo, "tag", "v1")
+	runGit(t, repo, "checkout", "main")
+
+	path := filepath.Join(root, "stack.bundle")
+	if _, err := gitutil.Run(repo, "bundle", "create", path, "--all"); err != nil {
+		t.Fatalf("git bundle create: %v", err)
+	}
+	bundle, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read bundle: %v", err)
+	}
+	return bundle
+}
+
+func writeBundleFile(t *testing.T, repo, name, content string) {
+	t.Helper()
+	path := filepath.Join(repo, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s parent: %v", name, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
 }

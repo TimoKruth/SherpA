@@ -17,6 +17,7 @@ import (
 	"sherpa/internal/harness"
 	"sherpa/internal/publishscan"
 	"sherpa/internal/registry/store"
+	"sherpa/internal/sanitize"
 	"sherpa/internal/stack"
 
 	"gopkg.in/yaml.v3"
@@ -77,6 +78,15 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeValidationError(w, []string{fmt.Sprintf("stack.yaml version %d has no matching tag %s", m.Version, gitTag)})
 		return
 	}
+	pointsAtHead, err := stagedTagPointsAtHead(stageDir, gitTag)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if !pointsAtHead {
+		writeValidationError(w, []string{fmt.Sprintf("version tag %s does not point at the published HEAD", gitTag)})
+		return
+	}
 
 	h, err := harness.For(m.Harness)
 	if err != nil {
@@ -94,7 +104,7 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(findings) > 0 {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"findings": findings})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"findings": publishFindingResponses(findings)})
 		return
 	}
 
@@ -102,6 +112,17 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "version already exists")
 		return
 	} else if !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	manifestJSON, err := manifestSnapshotJSON(manifestBytes)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	scanReportJSON, err := json.Marshal(map[string]any{"findings": publishFindingResponses(findings)})
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
@@ -122,17 +143,6 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		ForkedFrom: m.ForkedFrom,
 		Tags:       m.Tags,
 	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
-	manifestJSON, err := manifestSnapshotJSON(manifestBytes)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	scanReportJSON, err := json.Marshal(map[string]any{"findings": findings})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -229,6 +239,38 @@ func manifestSnapshotJSON(manifestBytes []byte) (json.RawMessage, error) {
 func stagedTagExists(stageDir, tag string) bool {
 	out, err := gitutil.Run(stageDir, "tag", "-l", tag)
 	return err == nil && strings.TrimSpace(out) == tag
+}
+
+func stagedTagPointsAtHead(stageDir, tag string) (bool, error) {
+	tagCommit, err := gitutil.Run(stageDir, "rev-parse", tag+"^{commit}")
+	if err != nil {
+		return false, err
+	}
+	headCommit, err := gitutil.Run(stageDir, "rev-parse", "HEAD")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(tagCommit) == strings.TrimSpace(headCommit), nil
+}
+
+type publishFindingResponse struct {
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+	Kind    string `json:"kind"`
+	Excerpt string `json:"excerpt"`
+}
+
+func publishFindingResponses(findings []sanitize.Finding) []publishFindingResponse {
+	resp := make([]publishFindingResponse, 0, len(findings))
+	for _, finding := range findings {
+		resp = append(resp, publishFindingResponse{
+			File:    finding.File,
+			Line:    finding.Line,
+			Kind:    finding.Kind,
+			Excerpt: finding.Excerpt,
+		})
+	}
+	return resp
 }
 
 func validPublishSegment(s string) bool {
