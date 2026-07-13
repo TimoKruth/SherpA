@@ -23,12 +23,13 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 	st := newFakeStore()
 	st.searchResults = []store.StackWithLatest{{
 		Stack: store.Stack{
-			Owner:      "alice",
-			Name:       "reviewer",
-			Summary:    "Review code with strict security checks",
-			Harness:    "claude-code",
-			ForkedFrom: "@origin/reviewer",
-			Tags:       []string{"review", "security"},
+			Owner:         "alice",
+			Name:          "reviewer",
+			Summary:       "Review code with strict security checks",
+			Harness:       "claude-code",
+			ForkedFrom:    "@origin/reviewer",
+			Tags:          []string{"review", "security"},
+			FollowerCount: 12,
 		},
 		Version:     2,
 		TrustTier:   "linked",
@@ -55,16 +56,17 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 
 	var body struct {
 		Stacks []struct {
-			Ref        string   `json:"ref"`
-			Name       string   `json:"name"`
-			Owner      string   `json:"owner"`
-			Summary    string   `json:"summary"`
-			Tags       []string `json:"tags"`
-			Harness    string   `json:"harness"`
-			Version    int      `json:"version"`
-			TrustTier  string   `json:"trust_tier"`
-			ForkedFrom string   `json:"forked_from"`
-			RepoURL    string   `json:"repo_url"`
+			Ref           string   `json:"ref"`
+			Name          string   `json:"name"`
+			Owner         string   `json:"owner"`
+			Summary       string   `json:"summary"`
+			Tags          []string `json:"tags"`
+			Harness       string   `json:"harness"`
+			Version       int      `json:"version"`
+			TrustTier     string   `json:"trust_tier"`
+			ForkedFrom    string   `json:"forked_from"`
+			RepoURL       string   `json:"repo_url"`
+			FollowerCount int      `json:"follower_count"`
 		} `json:"stacks"`
 	}
 	decodeJSON(t, rr, &body)
@@ -77,6 +79,9 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 	got := body.Stacks[0]
 	if got.Ref != "@alice/reviewer" || got.Name != "reviewer" || got.Owner != "alice" || got.Version != 2 || got.TrustTier != "linked" {
 		t.Fatalf("stack identity = %#v", got)
+	}
+	if got.FollowerCount != 12 {
+		t.Fatalf("follower_count = %d, want 12", got.FollowerCount)
 	}
 	if got.Summary != "Review code with strict security checks" || got.Harness != "claude-code" {
 		t.Fatalf("stack metadata = %#v", got)
@@ -225,12 +230,13 @@ func searchRepoURL(t *testing.T, handler http.Handler, req *http.Request) string
 func TestStackDetailReturnsVersions(t *testing.T) {
 	st := newFakeStore()
 	st.stacks["alice/reviewer"] = store.Stack{
-		Owner:      "alice",
-		Name:       "reviewer",
-		Summary:    "Review code",
-		Harness:    "codex",
-		ForkedFrom: "",
-		Tags:       []string{"review"},
+		Owner:         "alice",
+		Name:          "reviewer",
+		Summary:       "Review code",
+		Harness:       "codex",
+		ForkedFrom:    "",
+		Tags:          []string{"review"},
+		FollowerCount: 9,
 	}
 	st.versions["alice/reviewer"] = []store.Version{
 		{
@@ -258,13 +264,14 @@ func TestStackDetailReturnsVersions(t *testing.T) {
 		t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
 	}
 	var body struct {
-		Name       string   `json:"name"`
-		Owner      string   `json:"owner"`
-		Summary    string   `json:"summary"`
-		Tags       []string `json:"tags"`
-		Harness    string   `json:"harness"`
-		ForkedFrom string   `json:"forked_from"`
-		Versions   []struct {
+		Name          string   `json:"name"`
+		Owner         string   `json:"owner"`
+		Summary       string   `json:"summary"`
+		Tags          []string `json:"tags"`
+		Harness       string   `json:"harness"`
+		ForkedFrom    string   `json:"forked_from"`
+		FollowerCount int      `json:"follower_count"`
+		Versions      []struct {
 			Version     int    `json:"version"`
 			PublishedAt string `json:"published_at"`
 			Changelog   string `json:"changelog"`
@@ -278,6 +285,9 @@ func TestStackDetailReturnsVersions(t *testing.T) {
 	}
 	if body.Owner != "alice" || body.Name != "reviewer" || body.Summary != "Review code" || body.Harness != "codex" {
 		t.Fatalf("stack detail = %#v", body)
+	}
+	if body.FollowerCount != 9 {
+		t.Fatalf("follower_count = %d, want 9", body.FollowerCount)
 	}
 	if strings.Join(body.Tags, ",") != "review" {
 		t.Fatalf("tags = %#v", body.Tags)
@@ -415,6 +425,65 @@ func TestVersionDetailMissingReturns404(t *testing.T) {
 	assertJSONError(t, rr, http.StatusNotFound)
 }
 
+func TestUserProfileIsBoundedAndPublic(t *testing.T) {
+	st := newFakeStore()
+	st.userProfile = store.UserProfile{Handle: "alice", TotalStackFollows: 42}
+	for i := 0; i < defaultSocialPageSize+1; i++ {
+		st.userStacks = append(st.userStacks, store.StackWithLatest{
+			Stack:   store.Stack{Owner: "alice", Name: "stack-" + strconv.Itoa(i), FollowerCount: i},
+			Version: i + 1, TrustTier: "linked",
+		})
+	}
+	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://registry.test/v1/users/alice", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Handle            string                `json:"handle"`
+		TotalStackFollows int                   `json:"total_stack_follows"`
+		Stacks            []searchStackResponse `json:"stacks"`
+		NextOffset        *int                  `json:"next_offset"`
+	}
+	decodeJSON(t, rr, &body)
+	if body.Handle != "alice" || body.TotalStackFollows != 42 || len(body.Stacks) != defaultSocialPageSize {
+		t.Fatalf("profile = %#v", body)
+	}
+	if body.NextOffset == nil || *body.NextOffset != defaultSocialPageSize || st.userMaxRows != defaultSocialPageSize+1 || st.userOffset != 0 {
+		t.Fatalf("pagination next=%v store=(%d,%d)", body.NextOffset, st.userMaxRows, st.userOffset)
+	}
+	if body.Stacks[3].FollowerCount != 3 || body.Stacks[3].RepoURL != "http://registry.test/v1/stacks/alice/stack-3.git" {
+		t.Fatalf("stack = %#v", body.Stacks[3])
+	}
+}
+
+func TestUserProfileErrorsAndExplicitPagination(t *testing.T) {
+	st := newFakeStore()
+	st.userProfile = store.UserProfile{Handle: "alice"}
+	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://registry.test/v1/users/alice?limit=2&offset=3", nil))
+	if rr.Code != http.StatusOK || st.userMaxRows != 3 || st.userOffset != 3 {
+		t.Fatalf("pagination status=%d store=(%d,%d)", rr.Code, st.userMaxRows, st.userOffset)
+	}
+
+	for _, path := range []string{"/v1/users/bad!", "/v1/users/alice?offset=1", "/v1/users/alice?limit=51"} {
+		rr = httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://registry.test"+path, nil))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d", path, rr.Code)
+		}
+	}
+
+	st.userErr = store.ErrNotFound
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://registry.test/v1/users/missing", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d", rr.Code)
+	}
+}
+
 func TestGitRouteServesBareRepoInfoRefs(t *testing.T) {
 	root := t.TempDir()
 	cs := content.NewBareGit(filepath.Join(root, "content"))
@@ -458,6 +527,11 @@ type fakeStore struct {
 	stacks           map[string]store.Stack
 	versions         map[string][]store.Version
 	versionByKey     map[string]store.Version
+	userProfile      store.UserProfile
+	userStacks       []store.StackWithLatest
+	userErr          error
+	userMaxRows      int
+	userOffset       int
 }
 
 func newFakeStore() *fakeStore {
@@ -492,6 +566,33 @@ func (f *fakeStore) CreateWebGrant(context.Context, int64, string, string, time.
 
 func (f *fakeStore) ExchangeWebGrant(context.Context, string, string, string, time.Duration) (store.SessionIdentity, error) {
 	return store.SessionIdentity{}, store.ErrWebGrantUnavailable
+}
+
+func (f *fakeStore) FollowStack(context.Context, int64, string, string) (store.Follow, error) {
+	return store.Follow{}, store.ErrNotFound
+}
+
+func (f *fakeStore) UnfollowStack(context.Context, int64, string, string) error { return nil }
+
+func (f *fakeStore) ListFollows(context.Context, int64, store.FollowPage) ([]store.Follow, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) ListUpdates(context.Context, int64, store.UpdatePage) ([]store.Update, error) {
+	return nil, nil
+}
+
+func (f *fakeStore) MarkSeen(context.Context, int64, string, string, int) (store.Follow, error) {
+	return store.Follow{}, store.ErrNotFound
+}
+
+func (f *fakeStore) PutTrialFeedback(context.Context, int64, string, string, int, store.Verdict) error {
+	return store.ErrNotFound
+}
+
+func (f *fakeStore) GetUser(_ context.Context, _ string, maxRows, offset int) (store.UserProfile, []store.StackWithLatest, error) {
+	f.userMaxRows, f.userOffset = maxRows, offset
+	return f.userProfile, f.userStacks, f.userErr
 }
 
 func (f *fakeStore) UpsertStack(context.Context, store.Stack) (int64, error) {

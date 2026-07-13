@@ -18,16 +18,17 @@ type searchResponse struct {
 }
 
 type searchStackResponse struct {
-	Ref        string   `json:"ref"`
-	Name       string   `json:"name"`
-	Owner      string   `json:"owner"`
-	Summary    string   `json:"summary"`
-	Tags       []string `json:"tags"`
-	Harness    string   `json:"harness"`
-	Version    int      `json:"version"`
-	TrustTier  string   `json:"trust_tier"`
-	ForkedFrom string   `json:"forked_from"`
-	RepoURL    string   `json:"repo_url"`
+	Ref           string   `json:"ref"`
+	Name          string   `json:"name"`
+	Owner         string   `json:"owner"`
+	Summary       string   `json:"summary"`
+	Tags          []string `json:"tags"`
+	Harness       string   `json:"harness"`
+	Version       int      `json:"version"`
+	TrustTier     string   `json:"trust_tier"`
+	ForkedFrom    string   `json:"forked_from"`
+	RepoURL       string   `json:"repo_url"`
+	FollowerCount int      `json:"follower_count"`
 }
 
 type stackResponse struct {
@@ -38,8 +39,16 @@ type stackResponse struct {
 	Harness            string           `json:"harness"`
 	ForkedFrom         string           `json:"forked_from"`
 	RepoURL            string           `json:"repo_url"`
+	FollowerCount      int              `json:"follower_count"`
 	Versions           []versionSummary `json:"versions"`
 	NextVersionsOffset *int             `json:"next_versions_offset,omitempty"`
+}
+
+type userResponse struct {
+	Handle            string                `json:"handle"`
+	TotalStackFollows int                   `json:"total_stack_follows"`
+	Stacks            []searchStackResponse `json:"stacks"`
+	NextOffset        *int                  `json:"next_offset,omitempty"`
 }
 
 type versionSummary struct {
@@ -89,16 +98,17 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	resp := searchResponse{Stacks: make([]searchStackResponse, 0, len(matches)), NextOffset: nextOffset}
 	for _, match := range matches {
 		resp.Stacks = append(resp.Stacks, searchStackResponse{
-			Ref:        "@" + match.Owner + "/" + match.Name,
-			Name:       match.Name,
-			Owner:      match.Owner,
-			Summary:    match.Summary,
-			Tags:       tagsOrEmpty(match.Tags),
-			Harness:    match.Harness,
-			Version:    match.Version,
-			TrustTier:  match.TrustTier,
-			ForkedFrom: match.ForkedFrom,
-			RepoURL:    s.repoURL(r, match.Owner, match.Name),
+			Ref:           "@" + match.Owner + "/" + match.Name,
+			Name:          match.Name,
+			Owner:         match.Owner,
+			Summary:       match.Summary,
+			Tags:          tagsOrEmpty(match.Tags),
+			Harness:       match.Harness,
+			Version:       match.Version,
+			TrustTier:     match.TrustTier,
+			ForkedFrom:    match.ForkedFrom,
+			RepoURL:       s.repoURL(r, match.Owner, match.Name),
+			FollowerCount: match.FollowerCount,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -141,6 +151,7 @@ func (s *server) handleStack(w http.ResponseWriter, r *http.Request) {
 		Harness:            stack.Harness,
 		ForkedFrom:         stack.ForkedFrom,
 		RepoURL:            s.repoURL(r, stack.Owner, stack.Name),
+		FollowerCount:      stack.FollowerCount,
 		Versions:           make([]versionSummary, 0, len(versions)),
 		NextVersionsOffset: nextOffset,
 	}
@@ -154,6 +165,50 @@ func (s *server) handleStack(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *server) handleUser(w http.ResponseWriter, r *http.Request) {
+	handle := r.PathValue("handle")
+	if !validPublishSegment(handle) {
+		writeError(w, http.StatusBadRequest, "invalid handle")
+		return
+	}
+	limit, offset, err := parsePage(r, "limit", "offset")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid pagination")
+		return
+	}
+	if limit == 0 {
+		limit = defaultSocialPageSize
+	}
+	profile, stacks, err := s.store.GetUser(r.Context(), handle, limit+1, offset)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		internalServerError(w, "get user", err)
+		return
+	}
+	var nextOffset *int
+	if len(stacks) > limit {
+		stacks = stacks[:limit]
+		next := offset + limit
+		nextOffset = &next
+	}
+	response := userResponse{
+		Handle: profile.Handle, TotalStackFollows: profile.TotalStackFollows,
+		Stacks: make([]searchStackResponse, 0, len(stacks)), NextOffset: nextOffset,
+	}
+	for _, stack := range stacks {
+		response.Stacks = append(response.Stacks, searchStackResponse{
+			Ref: "@" + stack.Owner + "/" + stack.Name, Name: stack.Name, Owner: stack.Owner,
+			Summary: stack.Summary, Tags: tagsOrEmpty(stack.Tags), Harness: stack.Harness,
+			Version: stack.Version, TrustTier: stack.TrustTier, ForkedFrom: stack.ForkedFrom,
+			RepoURL: s.repoURL(r, stack.Owner, stack.Name), FollowerCount: stack.FollowerCount,
+		})
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {

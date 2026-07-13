@@ -20,11 +20,8 @@ func (s *server) authorizePublish(r *http.Request, owner string) (string, string
 	if !ok || strings.TrimSpace(token) == "" {
 		return "", "", http.StatusUnauthorized, errUnauthorized
 	}
-	if s.adminToken != "" {
-		got, want := sha256.Sum256([]byte(token)), sha256.Sum256([]byte(s.adminToken))
-		if subtle.ConstantTimeCompare(got[:], want[:]) == 1 {
-			return owner, "unreviewed", 0, nil
-		}
+	if s.isAdminToken(token) {
+		return owner, "unreviewed", 0, nil
 	}
 	identity, err := s.store.SessionIdentity(r.Context(), registryauth.HashToken(token))
 	if errors.Is(err, store.ErrNotFound) {
@@ -40,4 +37,12 @@ func (s *server) authorizePublish(r *http.Request, owner string) (string, string
 		return identity.Login, "", http.StatusForbidden, errWrongOwner
 	}
 	return identity.Login, "linked", 0, nil
+}
+
+func (s *server) isAdminToken(token string) bool {
+	if s.adminToken == "" {
+		return false
+	}
+	got, want := sha256.Sum256([]byte(token)), sha256.Sum256([]byte(s.adminToken))
+	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }

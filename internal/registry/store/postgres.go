@@ -246,6 +246,277 @@ func (s *PostgresStore) ExchangeWebGrant(ctx context.Context, grantHash, handoff
 	return identity, nil
 }
 
+func (s *PostgresStore) FollowStack(ctx context.Context, userID int64, owner, name string) (Follow, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Follow{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var stackID, latestVersionID int64
+	err = tx.QueryRow(ctx, `
+		select s.id, sv.id
+		from stacks s
+		join users u on u.id = s.owner_id
+		join lateral (
+			select id from stack_versions where stack_id = s.id order by version desc limit 1
+		) sv on true
+		where u.handle = $1 and s.name = $2
+	`, owner, name).Scan(&stackID, &latestVersionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Follow{}, ErrNotFound
+	}
+	if err != nil {
+		return Follow{}, err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into follows(user_id, stack_id, last_seen_version_id)
+		values ($1, $2, $3)
+		on conflict (user_id, stack_id) do nothing
+	`, userID, stackID, latestVersionID); err != nil {
+		return Follow{}, err
+	}
+	follow, err := getFollow(ctx, tx, userID, stackID)
+	if err != nil {
+		return Follow{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Follow{}, err
+	}
+	return follow, nil
+}
+
+func (s *PostgresStore) UnfollowStack(ctx context.Context, userID int64, owner, name string) error {
+	_, err := s.pool.Exec(ctx, `
+		delete from follows f
+		using stacks s, users u
+		where f.user_id = $1 and f.stack_id = s.id and s.owner_id = u.id
+			and u.handle = $2 and s.name = $3
+	`, userID, owner, name)
+	return err
+}
+
+func (s *PostgresStore) ListFollows(ctx context.Context, userID int64, page FollowPage) ([]Follow, error) {
+	rows, err := s.pool.Query(ctx, `
+		select s.id, owner.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
+			coalesce(s.tags, array[]::text[]), latest.version, coalesce(latest.git_tag, ''),
+			coalesce(latest.trust_tier, 'unreviewed'), latest.published_at,
+			coalesce(seen.version, 0), (select count(*) from follows fc where fc.stack_id = s.id),
+			f.created_at
+		from follows f
+		join stacks s on s.id = f.stack_id
+		join users owner on owner.id = s.owner_id
+		join lateral (
+			select version, git_tag, trust_tier, published_at
+			from stack_versions where stack_id = s.id order by version desc limit 1
+		) latest on true
+		left join stack_versions seen on seen.id = f.last_seen_version_id
+		where f.user_id = $1
+			and ($2 = '' or (owner.handle, s.name) > ($2, $3))
+		order by owner.handle, s.name
+		limit nullif($4, 0)
+	`, userID, page.AfterOwner, page.AfterName, page.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var follows []Follow
+	for rows.Next() {
+		follow, err := scanFollow(rows)
+		if err != nil {
+			return nil, err
+		}
+		follows = append(follows, follow)
+	}
+	return follows, rows.Err()
+}
+
+func (s *PostgresStore) ListUpdates(ctx context.Context, userID int64, page UpdatePage) ([]Update, error) {
+	rows, err := s.pool.Query(ctx, `
+		select e.id, owner.handle, s.name, sv.version, coalesce(sv.git_tag, ''),
+			coalesce(sv.changelog, ''), coalesce(sv.trust_tier, 'unreviewed'), sv.published_at,
+			coalesce(seen.version, 0)
+		from follows f
+		join stacks s on s.id = f.stack_id
+		join users owner on owner.id = s.owner_id
+		join stack_versions sv on sv.stack_id = s.id
+		join events e on e.stack_version_id = sv.id and e.type = 'stack_published'
+		left join stack_versions seen on seen.id = f.last_seen_version_id
+		where f.user_id = $1 and sv.version > coalesce(seen.version, 0)
+			and ($2 = 0 or e.id < $2)
+		order by e.id desc
+		limit nullif($3, 0)
+	`, userID, page.BeforeEventID, page.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var updates []Update
+	for rows.Next() {
+		var update Update
+		if err := rows.Scan(
+			&update.EventID, &update.Owner, &update.Name, &update.Version, &update.GitTag,
+			&update.Changelog, &update.TrustTier, &update.PublishedAt, &update.SeenVersion,
+		); err != nil {
+			return nil, err
+		}
+		updates = append(updates, update)
+	}
+	return updates, rows.Err()
+}
+
+func (s *PostgresStore) MarkSeen(ctx context.Context, userID int64, owner, name string, version int) (Follow, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Follow{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var stackID, versionID int64
+	err = tx.QueryRow(ctx, `
+		select s.id, sv.id
+		from stacks s
+		join users u on u.id = s.owner_id
+		join stack_versions sv on sv.stack_id = s.id and sv.version = $3
+		where u.handle = $1 and s.name = $2
+	`, owner, name, version).Scan(&stackID, &versionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Follow{}, ErrNotFound
+	}
+	if err != nil {
+		return Follow{}, err
+	}
+	command, err := tx.Exec(ctx, `
+		update follows f set last_seen_version_id = $3
+		where f.user_id = $1 and f.stack_id = $2
+			and coalesce((select version from stack_versions where id = f.last_seen_version_id), 0) < $4
+	`, userID, stackID, versionID, version)
+	if err != nil {
+		return Follow{}, err
+	}
+	if command.RowsAffected() == 0 {
+		var exists bool
+		if err := tx.QueryRow(ctx, `select exists(select 1 from follows where user_id = $1 and stack_id = $2)`, userID, stackID).Scan(&exists); err != nil {
+			return Follow{}, err
+		}
+		if !exists {
+			return Follow{}, ErrNotFound
+		}
+	}
+	follow, err := getFollow(ctx, tx, userID, stackID)
+	if err != nil {
+		return Follow{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Follow{}, err
+	}
+	return follow, nil
+}
+
+func (s *PostgresStore) PutTrialFeedback(ctx context.Context, userID int64, owner, name string, version int, verdict Verdict) error {
+	if !verdict.Valid() {
+		return ErrInvalidVerdict
+	}
+	command, err := s.pool.Exec(ctx, `
+		insert into trial_feedback(user_id, stack_version_id, verdict)
+		select $1, sv.id, $5
+		from stack_versions sv
+		join stacks s on s.id = sv.stack_id
+		join users u on u.id = s.owner_id
+		where u.handle = $2 and s.name = $3 and sv.version = $4
+		on conflict (user_id, stack_version_id) do update set
+			verdict = excluded.verdict, updated_at = now()
+	`, userID, owner, name, version, verdict)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetUser(ctx context.Context, handle string, maxRows, offset int) (UserProfile, []StackWithLatest, error) {
+	var profile UserProfile
+	var userID int64
+	err := s.pool.QueryRow(ctx, `
+		select u.id, u.handle, coalesce((
+			select count(*) from follows f join stacks s on s.id = f.stack_id where s.owner_id = u.id
+		), 0)
+		from users u where u.handle = $1
+	`, handle).Scan(&userID, &profile.Handle, &profile.TotalStackFollows)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UserProfile{}, nil, ErrNotFound
+	}
+	if err != nil {
+		return UserProfile{}, nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		select s.id, u.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
+			coalesce(s.forked_from, ''), coalesce(s.tags, array[]::text[]),
+			(select count(*) from follows f where f.stack_id = s.id), s.created_at,
+			v.version, coalesce(v.git_tag, ''), coalesce(v.trust_tier, 'unreviewed'), v.published_at
+		from stacks s
+		join users u on u.id = s.owner_id
+		join lateral (
+			select version, git_tag, trust_tier, published_at
+			from stack_versions where stack_id = s.id order by version desc limit 1
+		) v on true
+		where s.owner_id = $1
+		order by v.published_at desc, s.name
+		limit nullif($2, 0) offset $3
+	`, userID, maxRows, offset)
+	if err != nil {
+		return UserProfile{}, nil, err
+	}
+	defer rows.Close()
+	stacks, err := scanStacksWithLatest(rows)
+	if err != nil {
+		return UserProfile{}, nil, err
+	}
+	return profile, stacks, nil
+}
+
+func getFollow(ctx context.Context, db queryRower, userID, stackID int64) (Follow, error) {
+	row := db.QueryRow(ctx, `
+		select s.id, owner.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
+			coalesce(s.tags, array[]::text[]), latest.version, coalesce(latest.git_tag, ''),
+			coalesce(latest.trust_tier, 'unreviewed'), latest.published_at,
+			coalesce(seen.version, 0), (select count(*) from follows fc where fc.stack_id = s.id),
+			f.created_at
+		from follows f
+		join stacks s on s.id = f.stack_id
+		join users owner on owner.id = s.owner_id
+		join lateral (
+			select version, git_tag, trust_tier, published_at
+			from stack_versions where stack_id = s.id order by version desc limit 1
+		) latest on true
+		left join stack_versions seen on seen.id = f.last_seen_version_id
+		where f.user_id = $1 and f.stack_id = $2
+	`, userID, stackID)
+	follow, err := scanFollow(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Follow{}, ErrNotFound
+	}
+	return follow, err
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanFollow(row rowScanner) (Follow, error) {
+	var follow Follow
+	err := row.Scan(
+		&follow.StackID, &follow.Owner, &follow.Name, &follow.Summary, &follow.Harness,
+		&follow.Tags, &follow.LatestVersion, &follow.LatestGitTag, &follow.LatestTrustTier,
+		&follow.LatestPublishedAt, &follow.LastSeenVersion, &follow.FollowerCount, &follow.CreatedAt,
+	)
+	return follow, err
+}
+
 func pgInterval(ttl time.Duration) string {
 	return fmt.Sprintf("%f seconds", ttl.Seconds())
 }
@@ -328,7 +599,8 @@ func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string, maxR
 	rows, err := s.pool.Query(ctx, `
 		select
 			s.id, u.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
-			coalesce(s.forked_from, ''), coalesce(s.tags, array[]::text[]), s.created_at,
+			coalesce(s.forked_from, ''), coalesce(s.tags, array[]::text[]),
+			(select count(*) from follows f where f.stack_id = s.id), s.created_at,
 			v.version, coalesce(v.git_tag, ''), coalesce(v.trust_tier, 'unreviewed'), v.published_at
 		from stacks s
 		join users u on u.id = s.owner_id
@@ -363,6 +635,7 @@ func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string, maxR
 			&match.Harness,
 			&match.ForkedFrom,
 			&match.Tags,
+			&match.FollowerCount,
 			&match.CreatedAt,
 			&match.Version,
 			&match.GitTag,
@@ -376,11 +649,38 @@ func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string, maxR
 	return matches, rows.Err()
 }
 
+func scanStacksWithLatest(rows pgx.Rows) ([]StackWithLatest, error) {
+	var stacks []StackWithLatest
+	for rows.Next() {
+		var match StackWithLatest
+		if err := rows.Scan(
+			&match.ID,
+			&match.Owner,
+			&match.Name,
+			&match.Summary,
+			&match.Harness,
+			&match.ForkedFrom,
+			&match.Tags,
+			&match.FollowerCount,
+			&match.CreatedAt,
+			&match.Version,
+			&match.GitTag,
+			&match.TrustTier,
+			&match.PublishedAt,
+		); err != nil {
+			return nil, err
+		}
+		stacks = append(stacks, match)
+	}
+	return stacks, rows.Err()
+}
+
 func (s *PostgresStore) GetStack(ctx context.Context, owner, name string, maxVersions, offset int) (Stack, []Version, error) {
 	var stack Stack
 	err := s.pool.QueryRow(ctx, `
 		select s.id, u.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
-			coalesce(s.forked_from, ''), coalesce(s.tags, array[]::text[]), s.created_at
+			coalesce(s.forked_from, ''), coalesce(s.tags, array[]::text[]),
+			(select count(*) from follows f where f.stack_id = s.id), s.created_at
 		from stacks s
 		join users u on u.id = s.owner_id
 		where u.handle = $1 and s.name = $2
@@ -392,6 +692,7 @@ func (s *PostgresStore) GetStack(ctx context.Context, owner, name string, maxVer
 		&stack.Harness,
 		&stack.ForkedFrom,
 		&stack.Tags,
+		&stack.FollowerCount,
 		&stack.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

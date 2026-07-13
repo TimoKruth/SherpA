@@ -8,14 +8,15 @@ import (
 )
 
 type Stack struct {
-	ID         int64
-	Owner      string
-	Name       string
-	Summary    string
-	Harness    string
-	ForkedFrom string
-	Tags       []string
-	CreatedAt  time.Time
+	ID            int64
+	Owner         string
+	Name          string
+	Summary       string
+	Harness       string
+	ForkedFrom    string
+	Tags          []string
+	FollowerCount int
+	CreatedAt     time.Time
 }
 
 type Version struct {
@@ -64,6 +65,62 @@ type SessionIdentity struct {
 	Purpose   SessionPurpose
 }
 
+type Follow struct {
+	StackID           int64
+	Owner             string
+	Name              string
+	Summary           string
+	Harness           string
+	Tags              []string
+	LatestVersion     int
+	LatestGitTag      string
+	LatestTrustTier   string
+	LatestPublishedAt time.Time
+	LastSeenVersion   int
+	FollowerCount     int
+	CreatedAt         time.Time
+}
+
+type FollowPage struct {
+	Limit      int
+	AfterOwner string
+	AfterName  string
+}
+
+type Update struct {
+	EventID     int64
+	Owner       string
+	Name        string
+	Version     int
+	GitTag      string
+	Changelog   string
+	TrustTier   string
+	PublishedAt time.Time
+	SeenVersion int
+}
+
+type UpdatePage struct {
+	Limit         int
+	BeforeEventID int64
+}
+
+type Verdict string
+
+const (
+	VerdictKeep          Verdict = "keep"
+	VerdictKeepWithNotes Verdict = "keep_with_notes"
+	VerdictRevert        Verdict = "revert"
+)
+
+func (v Verdict) Valid() bool {
+	return v == VerdictKeep || v == VerdictKeepWithNotes || v == VerdictRevert
+}
+
+type UserProfile struct {
+	Handle            string
+	TotalStackFollows int
+}
+
 type Store interface {
 	UpsertUser(ctx context.Context, handle string) (userID int64, err error)
 	UpsertUserGitHub(ctx context.Context, login string, githubID int64) (userID int64, err error)
@@ -72,6 +129,13 @@ type Store interface {
 	RevokeSession(ctx context.Context, sessionID int64) error
 	CreateWebGrant(ctx context.Context, userID int64, grantHash, handoffChallenge string, ttl time.Duration) error
 	ExchangeWebGrant(ctx context.Context, grantHash, handoffChallenge, sessionHash string, ttl time.Duration) (SessionIdentity, error)
+	FollowStack(ctx context.Context, userID int64, owner, name string) (Follow, error)
+	UnfollowStack(ctx context.Context, userID int64, owner, name string) error
+	ListFollows(ctx context.Context, userID int64, page FollowPage) ([]Follow, error)
+	ListUpdates(ctx context.Context, userID int64, page UpdatePage) ([]Update, error)
+	MarkSeen(ctx context.Context, userID int64, owner, name string, version int) (Follow, error)
+	PutTrialFeedback(ctx context.Context, userID int64, owner, name string, version int, verdict Verdict) error
+	GetUser(ctx context.Context, handle string, maxRows, offset int) (UserProfile, []StackWithLatest, error)
 	UpsertStack(ctx context.Context, s Stack) (stackID int64, err error)
 	InsertVersion(ctx context.Context, v Version) error
 	Search(ctx context.Context, q, harness, tag string, maxRows, offset int) ([]StackWithLatest, error)
@@ -84,6 +148,7 @@ type Store interface {
 var ErrVersionExists = errors.New("version already exists")
 var ErrNotFound = errors.New("not found")
 var ErrInvalidSessionPurpose = errors.New("invalid session purpose")
+var ErrInvalidVerdict = errors.New("invalid verdict")
 var ErrSessionTokenConflict = errors.New("session token conflict")
 var ErrWebGrantConflict = errors.New("web grant conflict")
 var ErrWebGrantUnavailable = errors.New("web grant unavailable")

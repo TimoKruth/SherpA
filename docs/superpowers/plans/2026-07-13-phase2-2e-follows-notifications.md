@@ -9,7 +9,9 @@
 **Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
 session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
 inserts, and fail-closed web-session publish rejection. Focused race tests, the uncached whole
-suite, vet, command builds, and whitespace checks are green.
+suite, vet, command builds, and whitespace checks are green. Task 2 adds idempotent follows,
+derived keyset-paged update feeds, monotonic seen state, verdict-only feedback, scoped personal
+APIs, public follower counts, and bounded expert data with the same verification gates green.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -137,25 +139,25 @@ GetUser(ctx context.Context, handle string, maxRows, offset int) (UserProfile, [
 Extend `StackWithLatest` and stack detail projections with `FollowerCount int`. Pagination structs
 own opaque cursor encode/decode; API handlers never accept raw SQL keys.
 
-- [ ] **Step 1: Write Postgres behavior tests.** Cover first follow baselining current latest,
+- [x] **Step 1: Write Postgres behavior tests.** Cover first follow baselining current latest,
   no historical backlog, a later version becoming pending, duplicate/concurrent follow,
   unfollow idempotence, follow/publish race outcomes, independent users, deterministic keyset
   pages, maximum 50, mark-seen monotonicity, wrong-stack version rejection, and feedback upsert.
-- [ ] **Step 2: Prove query/resource bounds.** Seed more than one page, traverse without
+- [x] **Step 2: Prove query/resource bounds.** Seed more than one page, traverse without
   duplicates/gaps on a stable dataset, reject malformed/oversized cursors before querying, and
   use `EXPLAIN` assertions or explicit index inspection for the feed/follower hot paths.
-- [ ] **Step 3: Write the personal API auth matrix.** Missing/bad/expired/revoked sessions are
+- [x] **Step 3: Write the personal API auth matrix.** Missing/bad/expired/revoked sessions are
   `401`; CLI and web are allowed; admin bearer is `401`; unknown stack/version is `404`; malformed
   refs/body/cursor are `400`; over-limit body is `413`; all personal responses are `no-store`.
-- [ ] **Step 4: Implement strict handlers.** Register exact methods/routes from spec §6.2. Use
+- [x] **Step 4: Implement strict handlers.** Register exact methods/routes from spec §6.2. Use
   `http.MaxBytesReader`, `DisallowUnknownFields`, one JSON value only, explicit content type, and
   the shared session middleware/helper. Keep error strings static and non-enumerating where auth
   has not succeeded.
-- [ ] **Step 5: Add public follower counts and expert endpoint.** Counts appear on search/stack
+- [x] **Step 5: Add public follower counts and expert endpoint.** Counts appear on search/stack
   JSON without changing order. `/v1/users/{handle}` exposes only canonical public fields and a
   bounded stack page. Add XSS-shaped values to response tests even though JSON escaping is not
   the website's final boundary.
-- [ ] **Step 6: Verify and commit.** Run:
+- [x] **Step 6: Verify and commit.** Run:
   `go test -race ./internal/registry/store ./internal/registry/api`
   `git commit -m "feat(registry): add follows and bounded update feeds"`
 

@@ -505,6 +505,32 @@ func (p *publishSpyStore) ExchangeWebGrant(context.Context, string, string, stri
 	return store.SessionIdentity{}, store.ErrWebGrantUnavailable
 }
 
+func (p *publishSpyStore) FollowStack(context.Context, int64, string, string) (store.Follow, error) {
+	return store.Follow{}, store.ErrNotFound
+}
+
+func (p *publishSpyStore) UnfollowStack(context.Context, int64, string, string) error { return nil }
+
+func (p *publishSpyStore) ListFollows(context.Context, int64, store.FollowPage) ([]store.Follow, error) {
+	return nil, nil
+}
+
+func (p *publishSpyStore) ListUpdates(context.Context, int64, store.UpdatePage) ([]store.Update, error) {
+	return nil, nil
+}
+
+func (p *publishSpyStore) MarkSeen(context.Context, int64, string, string, int) (store.Follow, error) {
+	return store.Follow{}, store.ErrNotFound
+}
+
+func (p *publishSpyStore) PutTrialFeedback(context.Context, int64, string, string, int, store.Verdict) error {
+	return store.ErrNotFound
+}
+
+func (p *publishSpyStore) GetUser(context.Context, string, int, int) (store.UserProfile, []store.StackWithLatest, error) {
+	return store.UserProfile{}, nil, store.ErrNotFound
+}
+
 func (p *publishSpyStore) AllVersionRefs(context.Context) ([]store.VersionRef, error) {
 	var refs []store.VersionRef
 	for key, versions := range p.versions {

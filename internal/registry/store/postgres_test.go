@@ -295,6 +295,249 @@ func TestInsertVersionAndPublishEventAreAtomic(t *testing.T) {
 	}
 }
 
+func TestPostgresSocialContract(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenPostgres(ctx, StartPostgres(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	stackID, err := st.UpsertStack(ctx, Stack{Owner: "alice", Name: "reviewer", Summary: "Review code", Harness: "codex", Tags: []string{"review"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertVersion(ctx, Version{StackID: stackID, Version: 1, GitTag: "v1", Changelog: "initial", TrustTier: "linked"}); err != nil {
+		t.Fatal(err)
+	}
+	secondStackID, err := st.UpsertStack(ctx, Stack{Owner: "alice", Name: "builder"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertVersion(ctx, Version{StackID: secondStackID, Version: 1, GitTag: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	bobID, _ := st.UpsertUser(ctx, "bob")
+	carolID, _ := st.UpsertUser(ctx, "carol")
+	eveID, _ := st.UpsertUser(ctx, "eve")
+
+	bobFollow, err := st.FollowStack(ctx, bobID, "alice", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bobFollow.LatestVersion != 1 || bobFollow.LastSeenVersion != 1 || bobFollow.FollowerCount != 1 {
+		t.Fatalf("initial follow = %#v", bobFollow)
+	}
+	duplicate, err := st.FollowStack(ctx, bobID, "alice", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.CreatedAt != bobFollow.CreatedAt || duplicate.FollowerCount != 1 {
+		t.Fatalf("duplicate follow = %#v, first = %#v", duplicate, bobFollow)
+	}
+	if _, err := st.FollowStack(ctx, bobID, "alice", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing follow error = %v", err)
+	}
+	if _, err := st.FollowStack(ctx, carolID, "alice", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.FollowStack(ctx, eveID, "alice", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.FollowStack(ctx, bobID, "alice", "builder"); err != nil {
+		t.Fatal(err)
+	}
+
+	updates, err := st.ListUpdates(ctx, bobID, UpdatePage{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 0 {
+		t.Fatalf("new follow has historical updates: %#v", updates)
+	}
+	follows, err := st.ListFollows(ctx, bobID, FollowPage{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(follows) != 1 || follows[0].Name != "builder" {
+		t.Fatalf("first follow page = %#v", follows)
+	}
+	follows, err = st.ListFollows(ctx, bobID, FollowPage{Limit: 2, AfterOwner: follows[0].Owner, AfterName: follows[0].Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(follows) != 1 || follows[0].Name != "reviewer" || follows[0].FollowerCount != 3 {
+		t.Fatalf("second follow page = %#v", follows)
+	}
+
+	for version := 2; version <= 3; version++ {
+		if err := st.InsertVersion(ctx, Version{
+			StackID: stackID, Version: version, GitTag: "v" + strconv.Itoa(version),
+			Changelog: "release " + strconv.Itoa(version), TrustTier: "linked",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	updates, err = st.ListUpdates(ctx, bobID, UpdatePage{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 2 || updates[0].Version != 3 || updates[1].Version != 2 || updates[0].SeenVersion != 1 {
+		t.Fatalf("pending updates = %#v", updates)
+	}
+	page, err := st.ListUpdates(ctx, bobID, UpdatePage{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].Version != 3 {
+		t.Fatalf("first update page = %#v", page)
+	}
+	next, err := st.ListUpdates(ctx, bobID, UpdatePage{Limit: 1, BeforeEventID: page[0].EventID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next) != 1 || next[0].Version != 2 {
+		t.Fatalf("second update page = %#v", next)
+	}
+
+	seen, err := st.MarkSeen(ctx, bobID, "alice", "reviewer", 2)
+	if err != nil || seen.LastSeenVersion != 2 {
+		t.Fatalf("mark v2 seen = %#v, %v", seen, err)
+	}
+	seen, err = st.MarkSeen(ctx, bobID, "alice", "reviewer", 1)
+	if err != nil || seen.LastSeenVersion != 2 {
+		t.Fatalf("backward seen = %#v, %v", seen, err)
+	}
+	if _, err := st.MarkSeen(ctx, bobID, "alice", "reviewer", 99); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing version seen error = %v", err)
+	}
+	if _, err := st.MarkSeen(ctx, carolID, "alice", "builder", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unfollowed stack seen error = %v", err)
+	}
+
+	start := make(chan struct{})
+	seenResults := make(chan Follow, 2)
+	errResults := make(chan error, 2)
+	for _, version := range []int{2, 3} {
+		go func(v int) {
+			<-start
+			follow, err := st.MarkSeen(ctx, eveID, "alice", "reviewer", v)
+			seenResults <- follow
+			errResults <- err
+		}(version)
+	}
+	close(start)
+	for range 2 {
+		if err := <-errResults; err != nil {
+			t.Fatalf("concurrent seen: %v", err)
+		}
+		<-seenResults
+	}
+	eveFollows, err := st.ListFollows(ctx, eveID, FollowPage{Limit: 10})
+	if err != nil || len(eveFollows) != 1 || eveFollows[0].LastSeenVersion != 3 {
+		t.Fatalf("concurrent seen result = %#v, %v", eveFollows, err)
+	}
+
+	if err := st.PutTrialFeedback(ctx, bobID, "alice", "reviewer", 3, Verdict("invalid")); !errors.Is(err, ErrInvalidVerdict) {
+		t.Fatalf("invalid verdict error = %v", err)
+	}
+	if err := st.PutTrialFeedback(ctx, bobID, "alice", "reviewer", 99, VerdictKeep); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing feedback version error = %v", err)
+	}
+	if err := st.PutTrialFeedback(ctx, bobID, "alice", "reviewer", 3, VerdictKeep); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutTrialFeedback(ctx, bobID, "alice", "reviewer", 3, VerdictRevert); err != nil {
+		t.Fatal(err)
+	}
+	var verdict Verdict
+	if err := st.pool.QueryRow(ctx, `select verdict from trial_feedback where user_id = $1`, bobID).Scan(&verdict); err != nil {
+		t.Fatal(err)
+	}
+	if verdict != VerdictRevert {
+		t.Fatalf("stored verdict = %q", verdict)
+	}
+
+	profile, stacks, err := st.GetUser(ctx, "alice", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Handle != "alice" || profile.TotalStackFollows != 4 || len(stacks) != 2 {
+		t.Fatalf("profile = %#v, stacks = %#v", profile, stacks)
+	}
+	matches, err := st.Search(ctx, "reviewer", "", "", 10, 0)
+	if err != nil || len(matches) != 1 || matches[0].FollowerCount != 3 {
+		t.Fatalf("search follower count = %#v, %v", matches, err)
+	}
+	stack, _, err := st.GetStack(ctx, "alice", "reviewer", 1, 0)
+	if err != nil || stack.FollowerCount != 3 {
+		t.Fatalf("stack follower count = %#v, %v", stack, err)
+	}
+
+	if err := st.UnfollowStack(ctx, carolID, "alice", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UnfollowStack(ctx, carolID, "alice", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UnfollowStack(ctx, carolID, "alice", "missing"); err != nil {
+		t.Fatal(err)
+	}
+	stack, _, err = st.GetStack(ctx, "alice", "reviewer", 1, 0)
+	if err != nil || stack.FollowerCount != 2 {
+		t.Fatalf("count after unfollow = %#v, %v", stack, err)
+	}
+
+	raceStackID, err := st.UpsertStack(ctx, Stack{Owner: "alice", Name: "race"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertVersion(ctx, Version{StackID: raceStackID, Version: 1, GitTag: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	frankID, err := st.UpsertUser(ctx, "frank")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raceStart := make(chan struct{})
+	raceErrors := make(chan error, 2)
+	go func() {
+		<-raceStart
+		_, err := st.FollowStack(ctx, frankID, "alice", "race")
+		raceErrors <- err
+	}()
+	go func() {
+		<-raceStart
+		raceErrors <- st.InsertVersion(ctx, Version{StackID: raceStackID, Version: 2, GitTag: "v2"})
+	}()
+	close(raceStart)
+	for range 2 {
+		if err := <-raceErrors; err != nil {
+			t.Fatalf("follow/publish race: %v", err)
+		}
+	}
+	frankFollows, err := st.ListFollows(ctx, frankID, FollowPage{Limit: 10})
+	if err != nil || len(frankFollows) != 1 {
+		t.Fatalf("race follow = %#v, %v", frankFollows, err)
+	}
+	frankUpdates, err := st.ListUpdates(ctx, frankID, UpdatePage{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch frankFollows[0].LastSeenVersion {
+	case 1:
+		if len(frankUpdates) != 1 || frankUpdates[0].Version != 2 {
+			t.Fatalf("v1 race baseline updates = %#v", frankUpdates)
+		}
+	case 2:
+		if len(frankUpdates) != 0 {
+			t.Fatalf("v2 race baseline updates = %#v", frankUpdates)
+		}
+	default:
+		t.Fatalf("race baseline = %d", frankFollows[0].LastSeenVersion)
+	}
+}
+
 func TestPostgresStoreContract(t *testing.T) {
 	dsn := StartPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
