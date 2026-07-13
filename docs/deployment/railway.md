@@ -284,3 +284,118 @@ production. A cross-registry publish fails with a message naming the session iss
 the operator to log in to the target registry. Legacy issuer-less sessions fail closed and
 require login again. `SHERPA_REGISTRY_TOKEN`, when deliberately set, retains precedence for
 admin/CI operation.
+
+## Discovery Website Service
+
+Add the discovery website only after the registry staging gate above has passed. The website
+is a second Railway service from the **same repository and branch** as the registry, but it has
+an independent deployment, pinned deployment commit, and public domain.
+
+Configure the website service as follows:
+
+1. Create a second service from this repository and select the same branch as the registry.
+2. Set the service's config-file path to absolute `/deploy/web/railway.json`. Confirm Railway
+   resolves its Dockerfile to `deploy/web/Dockerfile`, not the root registry `Dockerfile`.
+3. Do not set a service root-directory override. The web build requires the root `go.mod`,
+   `go.sum`, `cmd/web`, and `internal/**` from the shared Go module.
+4. Give the website its own public HTTPS domain. Set `SHERPA_WEB_PUBLIC_BASE_URL` to that exact
+   canonical origin, without userinfo, query, or fragment.
+5. Set an explicit registry-service `PORT=8080`. Both registry and website listeners bind on
+   `[::]`, which is required for reliable Railway private networking.
+6. Configure the web service's private upstream reference as:
+
+   ```text
+   SHERPA_REGISTRY_API_URL=http://${{registry.RAILWAY_PRIVATE_DOMAIN}}:${{registry.PORT}}
+   ```
+
+   Replace `registry` only if the Railway registry service has a different exact service name.
+   Private service traffic is HTTP; public browser traffic remains HTTPS at Railway's edge.
+7. Keep the one-replica setting, `/healthz` deploy gate, restart policy, and pinned non-root
+   distroless image from `deploy/web/railway.json`. Do not override the image entrypoint or user.
+8. Attach no volume and add no database reference to the website service.
+
+### Website Runtime Variables
+
+| Variable | Requirement |
+| --- | --- |
+| `SHERPA_REGISTRY_API_URL` | Required; fixed Railway private HTTP origin shown above |
+| `SHERPA_WEB_PUBLIC_BASE_URL` | Required; website's canonical public HTTPS origin |
+| `SHERPA_WEB_UPSTREAM_TIMEOUT` | Optional; defaults to `5s`, allowed range `100ms` through `30s` |
+| `PORT` | Injected by Railway; the web process derives `[::]:PORT` |
+| `SHERPA_WEB_ADDR` | Optional explicit listener override; normally omit on Railway |
+
+The website service accepts no secret. Railway private DNS and the public origins are
+configuration, not credentials.
+
+### Website and Registry Separation
+
+The website must have **none** of the following settings or resources:
+
+- a volume or `SHERPA_CONTENT_DIR`;
+- `DATABASE_URL` or any Postgres reference;
+- `SHERPA_GITHUB_CLIENT_ID`, GitHub tokens, or OAuth configuration;
+- `SHERPA_REGISTRY_TOKEN`, registry session data, or a cookie/session secret;
+- `SHERPA_EXPORT_URL`, `SHERPA_EXPORT_TOKEN`, or export storage access;
+- private keys or other application credentials.
+
+The registry remains on the root `Dockerfile` and root `railway.json`. It retains its Postgres
+reference, Git volume, auth and export configuration, public registry domain, and pinned
+`SHERPA_PUBLIC_BASE_URL`; that registry URL, not the website domain or request host, remains the
+source of Git clone/try commands.
+
+Scope variables to their individual Railway services. A website deploy must not restart,
+reconfigure, or remount the registry. A website failure cannot affect registry API, login,
+publish, clone, or CLI use. During a registry outage the website process and `/healthz` remain
+available, while dynamic pages explicitly return `503` until the registry recovers.
+
+### Website Deploy and Rollback
+
+Before deploying a website image, run the automated Go checks and
+`bash deploy/web/smoke_build.sh` for the exact commit. Deploy only through
+`deploy/web/railway.json` and let the website's local `/healthz` gate activation. Verify that the
+selected source commit matches the registry commit when API-contract changes are being promoted.
+
+The website is stateless. To roll it back, redeploy a previously accepted, pinned website image
+or commit and let `/healthz` gate the replacement. Do not restore or roll back Postgres, the Git
+volume, or the registry image as part of a website rollback. If a new website is incompatible
+with the current registry contract, roll back only the website first; registry reads, login,
+publish, clone, and CLI operation must remain available throughout.
+
+Deploy registry changes independently using the registry procedure above. During a registry
+redeploy, confirm the website returns its bounded degraded response and then recovers without a
+website redeploy. Treat changes to either public domain or pinned public-base variable as a
+separate configuration rollout and repeat the host-spoofing and command checks in the website
+gate.
+
+## Website Staging Acceptance Gate
+
+Run this gate only after the registry's 2c-iii staging gate has passed. Record the website and
+registry commits, environment, domains, timestamps, and operator for each step. Do not record
+request bodies, query values, commands containing private data, or credentials.
+
+1. Deploy the website service from `deploy/web/railway.json`; confirm the image/config source is
+   the web path, not the root registry config.
+2. Confirm `/healthz` is `200` and PID 1 is non-root; confirm the service environment has no DB,
+   OAuth, registry-session, admin, or export secret.
+3. Load home/search/stack/version through the public domain and compare displayed metadata and
+   `repo_url` commands with direct registry API responses.
+4. Run both copied commands on a clean CLI home and confirm clone/try reaches the registry host,
+   not the website or any request-supplied host.
+5. Send spoofed `Host`, `X-Forwarded-Host`, and `Forwarded` headers; canonical URLs and commands
+   remain pinned. Check CSP/security headers at the real edge.
+6. Exercise next/previous search and version pages; filters persist, duplicates/gaps do not appear
+   for a stable dataset, and absurd paging/query inputs are bounded.
+7. Stop or block the registry: dynamic pages return branded `503` with `Retry-After`, `/healthz`
+   stays `200`, and the website process/restart count remains stable. Restore registry and confirm
+   the next request recovers without redeploying web.
+8. Redeploy only the website and confirm registry API, git clone, login, and publish continue
+   uninterrupted. Redeploy only the registry and confirm web degrades/recovers as above.
+9. Inspect desktop/mobile screenshots and keyboard navigation for overflow, overlap, readable
+   focus, form labels, command copying, and long malicious-looking publisher text.
+10. Inspect Railway logs: no query text, command content, upstream body, scan excerpt, headers,
+    credentials, or full internal/public URL with query is present.
+11. Configure external continuous uptime checks for both the public home page and `/healthz`;
+    Railway's deploy healthcheck alone is not continuous monitoring.
+
+Production website domain exposure requires all eleven website steps, in addition to the
+registry gate, to pass for the exact commit being promoted.
