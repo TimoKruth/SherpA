@@ -33,6 +33,7 @@ docker run --detach --name "$web_container" --network "$network" \
   --env PORT=8080 \
   --env "SHERPA_REGISTRY_API_URL=http://${fixture_container}:8081" \
   --env SHERPA_WEB_PUBLIC_BASE_URL=https://sherpa.example \
+  --env SHERPA_REGISTRY_PUBLIC_URL=https://registry.example \
   "$web_image" >/dev/null
 
 host_port="$(docker port "$web_container" 8080/tcp | sed -n '1s/.*://p')"

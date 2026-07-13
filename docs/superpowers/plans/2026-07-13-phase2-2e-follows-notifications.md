@@ -4,7 +4,7 @@
 > implementation workers when available, with a separate adversarial/Fable-class review for the
 > session, OAuth/grant, feed-concurrency, and CSRF boundaries.
 
-**Status:** In progress; Tasks 1-8 implemented and verified
+**Status:** In progress; Tasks 1-9 implemented and verified
 
 **Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
 session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
@@ -38,6 +38,12 @@ constant-time exact-follow read so stack rendering does not scale with account s
 race tests, the uncached repository suite (with the Docker store harness rerun in isolation after
 one concurrent port-inspection flake), vet, command builds, browser checks at 1280 and 375 pixels,
 and whitespace checks are green.
+Task 9 adds one Postgres-backed lifecycle spanning device login, CLI follow/update commands,
+registry publish events, the private web dashboard, explicit seen, unfollow suppression, real web
+grant exchange/replay, purpose-scoped publish denial, admin personal-API denial, and revocation.
+The adversarial/full-regression corpus, uncached suite, focused race suite, vet, command builds,
+registry Docker smoke, corrected auth-enabled website Docker smoke, and whitespace checks are
+green; the review found no remaining Important or Critical auth/privacy/publish boundary issue.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -466,20 +472,20 @@ construct either.
 - Update: `docs/superpowers/specs/2026-07-13-phase2-2e-follows-notifications-design.md` only for
   verified contract corrections
 
-- [ ] **Step 1: Add an end-to-end lifecycle.** Device login Alice, publish v1, Bob follows with
+- [x] **Step 1: Add an end-to-end lifecycle.** Device login Alice, publish v1, Bob follows with
   CLI, confirm no backlog, Alice publishes v2, Bob sees v2 in API/CLI/web, feed GET leaves pending,
   successful update/explicit seen clears it, unfollow prevents later v3 from appearing.
-- [ ] **Step 2: Add web-session separation.** Fake GitHub web login/exchange, follow through BFF,
+- [x] **Step 2: Add web-session separation.** Fake GitHub web login/exchange, follow through BFF,
   reject same token on publish, accept CLI same-owner publish, reject admin on `/v1/me`, revoke/
   logout, and reject grant replay.
-- [ ] **Step 3: Run adversarial corpus.** Host/forwarded-host injection, redirect tricks, duplicate
+- [x] **Step 3: Run adversarial corpus.** Host/forwarded-host injection, redirect tricks, duplicate
   headers/query/cookies, multi-line proxy headers, malformed cursors/JSON, CSRF/login-CSRF, XSS,
   terminal controls, slow/large upstream bodies, concurrent follows/seen/grants/publishes, and
   planted credentials/notes in log assertions.
-- [ ] **Step 4: Confirm old invariants.** Explicitly rerun publish cap/fail-closed/authz, clone
+- [x] **Step 4: Confirm old invariants.** Explicitly rerun publish cap/fail-closed/authz, clone
   atomicity, `mine`/offline status, update abort, session issuer collision, website CSP/canonical,
   registry audit/export, and 2d anonymous browser presentation tests.
-- [ ] **Step 5: Run full automated gates.** From a clean environment:
+- [x] **Step 5: Run full automated gates.** From a clean environment:
 
   ```sh
   go test -count=1 ./...
@@ -491,7 +497,7 @@ construct either.
   git diff --check
   ```
 
-- [ ] **Step 6: Review and commit fixes.** A separate Fable-class pass must report no Important or
+- [x] **Step 6: Review and commit fixes.** A separate Fable-class pass must report no Important or
   Critical finding in auth, publish, social query, browser session, or privacy boundaries.
   `git commit -m "test: cover social lifecycle and auth boundaries"`
 
