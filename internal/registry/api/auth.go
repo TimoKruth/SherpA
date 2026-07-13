@@ -9,6 +9,7 @@ import (
 	"time"
 
 	registryauth "sherpa/internal/registry/auth"
+	"sherpa/internal/registry/store"
 )
 
 func (s *server) handleDeviceStart(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +108,7 @@ func (s *server) handleDevicePoll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	if err := s.store.CreateSession(r.Context(), userID, hash, registryauth.SessionTTL); err != nil {
+	if err := s.store.CreateSession(r.Context(), userID, hash, store.SessionCLI, registryauth.SessionTTL); err != nil {
 		s.logger.Printf("auth create session failed error_type=%T", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return

@@ -73,7 +73,7 @@ func TestPublishAuthorizationMatrixBeforeStaging(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := newPublishSpyStore()
-			st.sessionUsers[registryauth.HashToken(valid)] = "alice"
+			st.sessionIdentities[registryauth.HashToken(valid)] = store.SessionIdentity{Login: "alice", Purpose: store.SessionCLI}
 			cs := newPublishSpyContent(t)
 			h := New(st, cs, "admin", &registryauth.FakeGitHubClient{})
 			rr := postBundle(t, h, tc.owner, "n", []byte("not staged"), tc.token)
@@ -85,6 +85,24 @@ func TestPublishAuthorizationMatrixBeforeStaging(t *testing.T) {
 				t.Fatalf("StageBundle calls = %d", cs.stageCalls)
 			}
 		})
+	}
+}
+
+func TestPublishRejectsWebSessionBeforeStaging(t *testing.T) {
+	st := newPublishSpyStore()
+	st.sessionIdentities[registryauth.HashToken("web-session")] = store.SessionIdentity{
+		UserID: 7, Login: "alice", Purpose: store.SessionWeb,
+	}
+	cs := newPublishSpyContent(t)
+	h := New(st, cs, "admin", &registryauth.FakeGitHubClient{})
+
+	rr := postBundle(t, h, "alice", "reviewer", []byte("must not be staged"), "web-session")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body %s", rr.Code, rr.Body.String())
+	}
+	assertNoPublishWrites(t, st, cs)
+	if cs.stageCalls != 0 {
+		t.Fatalf("StageBundle calls = %d, want 0", cs.stageCalls)
 	}
 }
 
@@ -100,7 +118,7 @@ func TestPublishTrustTierByCredential(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := newPublishSpyStore()
-			st.sessionUsers[registryauth.HashToken("session-token")] = "alice"
+			st.sessionIdentities[registryauth.HashToken("session-token")] = store.SessionIdentity{Login: "alice", Purpose: store.SessionCLI}
 			h := New(st, newPublishSpyContent(t), "admin", &registryauth.FakeGitHubClient{})
 			bundle := buildPublishBundle(t, map[string]string{
 				"stack.yaml": "name: n\nowner: " + tc.owner + "\nversion: 1\nharness: codex\n",
@@ -437,18 +455,19 @@ type publishSpyStore struct {
 	githubLogin        string
 	createdSessionHash string
 	createdSessionTTL  time.Duration
-	sessionUsers       map[string]string
+	createdPurpose     store.SessionPurpose
+	sessionIdentities  map[string]store.SessionIdentity
 }
 
 func newPublishSpyStore() *publishSpyStore {
 	return &publishSpyStore{
-		nextUserID:   1,
-		nextStackID:  100,
-		stackIDs:     map[string]int64{},
-		stacks:       map[string]store.Stack{},
-		versions:     map[string][]store.Version{},
-		versionByKey: map[string]store.Version{},
-		sessionUsers: map[string]string{},
+		nextUserID:        1,
+		nextStackID:       100,
+		stackIDs:          map[string]int64{},
+		stacks:            map[string]store.Stack{},
+		versions:          map[string][]store.Version{},
+		versionByKey:      map[string]store.Version{},
+		sessionIdentities: map[string]store.SessionIdentity{},
 	}
 }
 
@@ -463,17 +482,27 @@ func (p *publishSpyStore) UpsertUserGitHub(_ context.Context, login string, gith
 	return 7, nil
 }
 
-func (p *publishSpyStore) CreateSession(_ context.Context, _ int64, hash string, ttl time.Duration) error {
-	p.createdSessionHash, p.createdSessionTTL = hash, ttl
+func (p *publishSpyStore) CreateSession(_ context.Context, _ int64, hash string, purpose store.SessionPurpose, ttl time.Duration) error {
+	p.createdSessionHash, p.createdPurpose, p.createdSessionTTL = hash, purpose, ttl
 	return nil
 }
 
-func (p *publishSpyStore) SessionUser(_ context.Context, hash string) (string, error) {
-	login, ok := p.sessionUsers[hash]
+func (p *publishSpyStore) SessionIdentity(_ context.Context, hash string) (store.SessionIdentity, error) {
+	identity, ok := p.sessionIdentities[hash]
 	if !ok {
-		return "", store.ErrNotFound
+		return store.SessionIdentity{}, store.ErrNotFound
 	}
-	return login, nil
+	return identity, nil
+}
+
+func (p *publishSpyStore) RevokeSession(context.Context, int64) error { return nil }
+
+func (p *publishSpyStore) CreateWebGrant(context.Context, int64, string, string, time.Duration) error {
+	return nil
+}
+
+func (p *publishSpyStore) ExchangeWebGrant(context.Context, string, string, string, time.Duration) (store.SessionIdentity, error) {
+	return store.SessionIdentity{}, store.ErrWebGrantUnavailable
 }
 
 func (p *publishSpyStore) AllVersionRefs(context.Context) ([]store.VersionRef, error) {

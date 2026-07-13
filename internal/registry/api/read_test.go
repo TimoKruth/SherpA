@@ -476,12 +476,22 @@ func (f *fakeStore) UpsertUserGitHub(context.Context, string, int64) (int64, err
 	return 0, store.ErrNotFound
 }
 
-func (f *fakeStore) CreateSession(context.Context, int64, string, time.Duration) error {
+func (f *fakeStore) CreateSession(context.Context, int64, string, store.SessionPurpose, time.Duration) error {
 	return store.ErrNotFound
 }
 
-func (f *fakeStore) SessionUser(context.Context, string) (string, error) {
-	return "", store.ErrNotFound
+func (f *fakeStore) SessionIdentity(context.Context, string) (store.SessionIdentity, error) {
+	return store.SessionIdentity{}, store.ErrNotFound
+}
+
+func (f *fakeStore) RevokeSession(context.Context, int64) error { return nil }
+
+func (f *fakeStore) CreateWebGrant(context.Context, int64, string, string, time.Duration) error {
+	return store.ErrNotFound
+}
+
+func (f *fakeStore) ExchangeWebGrant(context.Context, string, string, string, time.Duration) (store.SessionIdentity, error) {
+	return store.SessionIdentity{}, store.ErrWebGrantUnavailable
 }
 
 func (f *fakeStore) UpsertStack(context.Context, store.Stack) (int64, error) {

@@ -4,7 +4,12 @@
 > implementation workers when available, with a separate adversarial/Fable-class review for the
 > session, OAuth/grant, feed-concurrency, and CSRF boundaries.
 
-**Status:** Ready for implementation; no 2e code has been started
+**Status:** In progress; Task 1 implemented and verified
+
+**Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
+session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
+inserts, and fail-closed web-session publish rejection. Focused race tests, the uncached whole
+suite, vet, command builds, and whitespace checks are green.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -84,22 +89,22 @@ ExchangeWebGrant(context.Context, grantHash, handoffChallenge, sessionHash strin
 `web` session hash, and return identity. Generate the raw session token in the API layer before
 calling it. No method returns or stores a raw token.
 
-- [ ] **Step 1: Write migration tests.** Assert fresh and repeated migrations; existing session
+- [x] **Step 1: Write migration tests.** Assert fresh and repeated migrations; existing session
   rows become `cli`; named purpose check is created once; tables/foreign keys/checks/indexes match
   the design; additive migrations preserve old data.
-- [ ] **Step 2: Write session/grant tests.** Cover CLI/web identity, last-used update, expiry,
+- [x] **Step 2: Write session/grant tests.** Cover CLI/web identity, last-used update, expiry,
   idempotent revoke, expired grant, wrong hash, wrong handoff challenge, one-use exchange, and
   concurrent exchange with exactly one success/session. Assert errors never contain hashes.
-- [ ] **Step 3: Write publish transaction tests.** `InsertVersion` inserts exactly one
+- [x] **Step 3: Write publish transaction tests.** `InsertVersion` inserts exactly one
   `stack_published` event. Duplicate versions remain `ErrVersionExists`; forced event failure
   leaves no version; normal search/detail results are unchanged.
-- [ ] **Step 4: Implement migrations and store methods.** Use guarded idempotent constraints and
+- [x] **Step 4: Implement migrations and store methods.** Use guarded idempotent constraints and
   existing pgx transactions. Delete expired grants opportunistically in a bounded statement, not
   as a correctness dependency.
-- [ ] **Step 5: Harden publish auth.** Refactor it to typed identity. Admin and same-owner CLI
+- [x] **Step 5: Harden publish auth.** Refactor it to typed identity. Admin and same-owner CLI
   behavior remain exact; web is `403`; expired/revoked/unknown bearer is `401`; cross-owner CLI
   remains `403`.
-- [ ] **Step 6: Verify and commit.** Run:
+- [x] **Step 6: Verify and commit.** Run:
   `go test -race ./internal/registry/store ./internal/registry/api`
   `git commit -m "feat(registry): add scoped sessions and publish events"`
 

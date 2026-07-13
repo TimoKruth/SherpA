@@ -46,11 +46,32 @@ type VersionRef struct {
 	GitTag  string
 }
 
+type SessionPurpose string
+
+const (
+	SessionCLI SessionPurpose = "cli"
+	SessionWeb SessionPurpose = "web"
+)
+
+func (p SessionPurpose) Valid() bool {
+	return p == SessionCLI || p == SessionWeb
+}
+
+type SessionIdentity struct {
+	SessionID int64
+	UserID    int64
+	Login     string
+	Purpose   SessionPurpose
+}
+
 type Store interface {
 	UpsertUser(ctx context.Context, handle string) (userID int64, err error)
 	UpsertUserGitHub(ctx context.Context, login string, githubID int64) (userID int64, err error)
-	CreateSession(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error
-	SessionUser(ctx context.Context, tokenHash string) (login string, err error)
+	CreateSession(ctx context.Context, userID int64, tokenHash string, purpose SessionPurpose, ttl time.Duration) error
+	SessionIdentity(ctx context.Context, tokenHash string) (SessionIdentity, error)
+	RevokeSession(ctx context.Context, sessionID int64) error
+	CreateWebGrant(ctx context.Context, userID int64, grantHash, handoffChallenge string, ttl time.Duration) error
+	ExchangeWebGrant(ctx context.Context, grantHash, handoffChallenge, sessionHash string, ttl time.Duration) (SessionIdentity, error)
 	UpsertStack(ctx context.Context, s Stack) (stackID int64, err error)
 	InsertVersion(ctx context.Context, v Version) error
 	Search(ctx context.Context, q, harness, tag string, maxRows, offset int) ([]StackWithLatest, error)
@@ -62,5 +83,9 @@ type Store interface {
 
 var ErrVersionExists = errors.New("version already exists")
 var ErrNotFound = errors.New("not found")
+var ErrInvalidSessionPurpose = errors.New("invalid session purpose")
+var ErrSessionTokenConflict = errors.New("session token conflict")
+var ErrWebGrantConflict = errors.New("web grant conflict")
+var ErrWebGrantUnavailable = errors.New("web grant unavailable")
 var ErrGitHubIdentityConflict = errors.New("github login is already bound to another identity")
 var ErrGitHubRenameBlocked = errors.New("github login rename is blocked while the user owns stacks")

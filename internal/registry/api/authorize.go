@@ -13,6 +13,7 @@ import (
 
 var errUnauthorized = errors.New("unauthorized")
 var errWrongOwner = errors.New("you can only publish under your GitHub login")
+var errWebSessionPublish = errors.New("web sessions cannot publish")
 
 func (s *server) authorizePublish(r *http.Request, owner string) (string, string, int, error) {
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -25,15 +26,18 @@ func (s *server) authorizePublish(r *http.Request, owner string) (string, string
 			return owner, "unreviewed", 0, nil
 		}
 	}
-	login, err := s.store.SessionUser(r.Context(), registryauth.HashToken(token))
+	identity, err := s.store.SessionIdentity(r.Context(), registryauth.HashToken(token))
 	if errors.Is(err, store.ErrNotFound) {
 		return "", "", http.StatusUnauthorized, errUnauthorized
 	}
 	if err != nil {
 		return "", "", http.StatusInternalServerError, err
 	}
-	if owner != login {
-		return login, "", http.StatusForbidden, errWrongOwner
+	if identity.Purpose != store.SessionCLI {
+		return identity.Login, "", http.StatusForbidden, errWebSessionPublish
 	}
-	return login, "linked", 0, nil
+	if owner != identity.Login {
+		return identity.Login, "", http.StatusForbidden, errWrongOwner
+	}
+	return identity.Login, "linked", 0, nil
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -135,26 +136,114 @@ func (s *PostgresStore) UpsertUserGitHub(ctx context.Context, login string, gith
 	return id, nil
 }
 
-func (s *PostgresStore) CreateSession(ctx context.Context, userID int64, tokenHash string, ttl time.Duration) error {
+func (s *PostgresStore) CreateSession(ctx context.Context, userID int64, tokenHash string, purpose SessionPurpose, ttl time.Duration) error {
+	if !purpose.Valid() {
+		return ErrInvalidSessionPurpose
+	}
 	_, err := s.pool.Exec(ctx, `
-		insert into sessions(user_id, token_hash, expires_at)
-		values ($1, $2, now() + $3::interval)
-	`, userID, tokenHash, pgInterval(ttl))
+		insert into sessions(user_id, token_hash, purpose, expires_at)
+		values ($1, $2, $3, now() + $4::interval)
+	`, userID, tokenHash, purpose, pgInterval(ttl))
+	if isUniqueViolation(err) {
+		return ErrSessionTokenConflict
+	}
 	return err
 }
 
-func (s *PostgresStore) SessionUser(ctx context.Context, tokenHash string) (string, error) {
-	var login string
+func (s *PostgresStore) SessionIdentity(ctx context.Context, tokenHash string) (SessionIdentity, error) {
+	var identity SessionIdentity
 	err := s.pool.QueryRow(ctx, `
 		update sessions se set last_used_at = now()
 		from users u
 		where se.user_id = u.id and se.token_hash = $1 and se.expires_at > now()
-		returning u.handle
-	`, tokenHash).Scan(&login)
+		returning se.id, u.id, u.handle, se.purpose
+	`, tokenHash).Scan(&identity.SessionID, &identity.UserID, &identity.Login, &identity.Purpose)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrNotFound
+		return SessionIdentity{}, ErrNotFound
 	}
-	return login, err
+	return identity, err
+}
+
+func (s *PostgresStore) RevokeSession(ctx context.Context, sessionID int64) error {
+	_, err := s.pool.Exec(ctx, `delete from sessions where id = $1`, sessionID)
+	return err
+}
+
+func (s *PostgresStore) CreateWebGrant(ctx context.Context, userID int64, grantHash, handoffChallenge string, ttl time.Duration) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		delete from web_grants
+		where ctid in (
+			select ctid from web_grants
+			where expires_at <= now()
+			order by expires_at
+			limit 100
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into web_grants(token_hash, user_id, handoff_challenge, expires_at)
+		values ($1, $2, $3, now() + $4::interval)
+	`, grantHash, userID, handoffChallenge, pgInterval(ttl)); err != nil {
+		if isUniqueViolation(err) {
+			return ErrWebGrantConflict
+		}
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) ExchangeWebGrant(ctx context.Context, grantHash, handoffChallenge, sessionHash string, ttl time.Duration) (SessionIdentity, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return SessionIdentity{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var identity SessionIdentity
+	var storedChallenge string
+	err = tx.QueryRow(ctx, `
+		select wg.user_id, u.handle, wg.handoff_challenge
+		from web_grants wg
+		join users u on u.id = wg.user_id
+		where wg.token_hash = $1 and wg.expires_at > now()
+		for update
+	`, grantHash).Scan(&identity.UserID, &identity.Login, &storedChallenge)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SessionIdentity{}, ErrWebGrantUnavailable
+	}
+	if err != nil {
+		return SessionIdentity{}, err
+	}
+	if subtle.ConstantTimeCompare([]byte(storedChallenge), []byte(handoffChallenge)) != 1 {
+		return SessionIdentity{}, ErrWebGrantUnavailable
+	}
+
+	if _, err := tx.Exec(ctx, `delete from web_grants where token_hash = $1`, grantHash); err != nil {
+		return SessionIdentity{}, err
+	}
+	identity.Purpose = SessionWeb
+	err = tx.QueryRow(ctx, `
+		insert into sessions(user_id, token_hash, purpose, expires_at)
+		values ($1, $2, $3, now() + $4::interval)
+		returning id
+	`, identity.UserID, sessionHash, identity.Purpose, pgInterval(ttl)).Scan(&identity.SessionID)
+	if isUniqueViolation(err) {
+		return SessionIdentity{}, ErrSessionTokenConflict
+	}
+	if err != nil {
+		return SessionIdentity{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SessionIdentity{}, err
+	}
+	return identity, nil
 }
 
 func pgInterval(ttl time.Duration) string {
@@ -209,14 +298,30 @@ func (s *PostgresStore) UpsertStack(ctx context.Context, stack Stack) (int64, er
 }
 
 func (s *PostgresStore) InsertVersion(ctx context.Context, version Version) error {
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var versionID int64
+	err = tx.QueryRow(ctx, `
 		insert into stack_versions(stack_id, version, git_tag, manifest, scan_report, changelog, trust_tier)
 		values ($1, $2, $3, $4, $5, $6, $7)
-	`, version.StackID, version.Version, version.GitTag, jsonOrNil(version.Manifest), jsonOrNil(version.ScanReport), version.Changelog, version.TrustTier)
+		returning id
+	`, version.StackID, version.Version, version.GitTag, jsonOrNil(version.Manifest), jsonOrNil(version.ScanReport), version.Changelog, version.TrustTier).Scan(&versionID)
 	if isUniqueViolation(err) {
 		return ErrVersionExists
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into events(type, stack_version_id) values ('stack_published', $1)
+	`, versionID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string, maxRows, offset int) ([]StackWithLatest, error) {

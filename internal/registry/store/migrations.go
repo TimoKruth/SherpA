@@ -49,6 +49,51 @@ var migrations = []string{
 		expires_at timestamptz not null
 	)`,
 	`alter table stack_versions add column if not exists trust_tier text not null default 'unreviewed'`,
+	`alter table sessions add column if not exists purpose text not null default 'cli'`,
+	`do $$
+	begin
+		if not exists (
+			select 1 from pg_constraint
+			where conname = 'sessions_purpose_check' and conrelid = 'sessions'::regclass
+		) then
+			alter table sessions add constraint sessions_purpose_check
+				check (purpose in ('cli', 'web'));
+		end if;
+	end
+	$$`,
+	`create table if not exists follows (
+		user_id bigint not null references users(id) on delete cascade,
+		stack_id bigint not null references stacks(id) on delete cascade,
+		last_seen_version_id bigint references stack_versions(id),
+		created_at timestamptz not null default now(),
+		primary key (user_id, stack_id)
+	)`,
+	`create index if not exists follows_stack_id_idx on follows(stack_id)`,
+	`create table if not exists events (
+		id bigserial primary key,
+		type text not null constraint events_type_check check (type = 'stack_published'),
+		stack_version_id bigint not null references stack_versions(id),
+		created_at timestamptz not null default now(),
+		unique(type, stack_version_id)
+	)`,
+	`create index if not exists events_stack_version_id_idx on events(stack_version_id)`,
+	`create table if not exists web_grants (
+		token_hash text primary key,
+		user_id bigint not null references users(id) on delete cascade,
+		handoff_challenge text not null,
+		expires_at timestamptz not null,
+		created_at timestamptz not null default now()
+	)`,
+	`create index if not exists web_grants_expires_at_idx on web_grants(expires_at)`,
+	`create table if not exists trial_feedback (
+		user_id bigint not null references users(id) on delete cascade,
+		stack_version_id bigint not null references stack_versions(id) on delete cascade,
+		verdict text not null constraint trial_feedback_verdict_check
+			check (verdict in ('keep', 'keep_with_notes', 'revert')),
+		created_at timestamptz not null default now(),
+		updated_at timestamptz not null default now(),
+		primary key (user_id, stack_version_id)
+	)`,
 }
 
 func Migrate(ctx context.Context, db migrationDB) error {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	registryauth "sherpa/internal/registry/auth"
+	"sherpa/internal/registry/store"
 )
 
 type authTestClock struct {
@@ -65,6 +66,9 @@ func TestDeviceFlowMintsHashedSherpaSession(t *testing.T) {
 	}
 	if st.createdSessionTTL != registryauth.SessionTTL {
 		t.Fatalf("TTL = %v", st.createdSessionTTL)
+	}
+	if st.createdPurpose != store.SessionCLI {
+		t.Fatalf("session purpose = %q, want %q", st.createdPurpose, store.SessionCLI)
 	}
 }
 
