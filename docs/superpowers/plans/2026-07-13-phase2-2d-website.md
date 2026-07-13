@@ -3,14 +3,15 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`
 > (recommended) or `superpowers:executing-plans` task-by-task. Keep the checkbox state current.
 
-**Status:** Implemented; automated gates green. Browser screenshot QA and the live Railway
-website acceptance gate remain operator/session gates.
+**Status:** Implemented; automated and browser QA gates green. The live Railway website
+acceptance gate remains operator-owned.
 
 **Implementation record (2026-07-13):** Tasks 1-9 were implemented on `main`. The generated
 bitmap mark was inspected at 96px and 32px; focused race tests, the uncached whole suite, vet,
-command builds, JSON/shell validation, and the real Docker fault-isolation smoke passed. The
-configured browser surface was unavailable in the implementation session, so Task 6 Step 5 is
-deliberately still open rather than claiming unperformed screenshot/keyboard verification.
+command builds, JSON/shell validation, and the real Docker fault-isolation smoke passed. Browser
+QA completed at 1280px desktop and 375px mobile with keyboard focus, copy controls, responsive
+stacking, horizontal overflow, and strict CSP checked. The accepted Alpine styling follow-up adds
+surface hierarchy and trust/harness badges without weakening CSP or publisher-data escaping.
 
 **Goal:** Ship an independently deployed, server-rendered SherpA discovery website that consumes
 the public registry read API, remains stateless and secret-free, renders publisher data safely,
@@ -306,7 +307,7 @@ spacing.
 - [x] **Step 4: Implement metadata/crawler rules.** Pinned canonical and OG text tags for stack/
   version success pages, `noindex,follow` search, `noindex` errors, static `/robots.txt`, unique
   titles/descriptions, and no request-host fallback.
-- [ ] **Step 5: Run browser visual QA.** Capture home, populated/empty search, stack, version, 404,
+- [x] **Step 5: Run browser visual QA.** Capture home, populated/empty search, stack, version, 404,
   and 503 at 1440×900 and 360×800. Exercise keyboard navigation and copy. Inspect screenshots for
   overflow, overlap, unstable controls, clipped longest words, and incorrect brand/image render.
   Record only actionable fixes; do not add a browser framework dependency to the repository.
@@ -448,8 +449,7 @@ blocked until all eleven website steps pass.
 - [x] Exact current-stack commands; no invented historical-version behavior.
 - [x] Scan excerpt structurally absent from page models/output/logs.
 - [x] Strict CSP/security headers, pinned canonical URLs, SEO/crawler behavior, safe logs.
-- [ ] Responsive accessible UI, progressive copy, verified bitmap brand asset. Implementation and
-  native-size asset inspection are complete; desktop/mobile browser QA remains open.
+- [x] Responsive accessible UI, progressive copy, verified bitmap brand asset.
 - [x] `[::]` listener, independent health, hardened timeouts, graceful shutdown.
 - [x] Distroless non-root image, service-specific Railway config, real Docker fault-isolation smoke.
 - [x] Railway runbook extension and eleven-step live website staging gate.

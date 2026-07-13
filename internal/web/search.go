@@ -37,6 +37,7 @@ type searchRowView struct {
 	Tags           []string
 	Version        int
 	TrustTier      string
+	TrustClass     string
 	ForkedFromText string
 	ForkedFromURL  string
 }
@@ -121,6 +122,7 @@ func searchRows(stacks []registryclient.SearchStack) []searchRowView {
 			Tags:           append([]string(nil), stack.Tags...),
 			Version:        stack.Version,
 			TrustTier:      stack.TrustTier,
+			TrustClass:     trustTierClass(stack.TrustTier),
 			ForkedFromText: stack.ForkedFrom,
 		}
 		if validSegment(stack.Owner) && validSegment(stack.Name) {
@@ -132,6 +134,17 @@ func searchRows(stacks []registryclient.SearchStack) []searchRowView {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func trustTierClass(tier string) string {
+	switch tier {
+	case "linked":
+		return "trust-tier--linked"
+	case "unreviewed":
+		return "trust-tier--unreviewed"
+	default:
+		return ""
+	}
 }
 
 func parseProvenance(value string) (owner, name string, ok bool) {

@@ -1,6 +1,6 @@
 :root {
   color-scheme: light;
-  --canvas: #f7f8f6;
+  --canvas: #f1f4f8;
   --surface: #ffffff;
   --ink: #20262d;
   --muted: #5b6670;
@@ -15,6 +15,10 @@
   --amber-soft: #fff3d8;
   --danger: #a32929;
   --focus: #0b66df;
+  --header-ink: #101823;
+  --code-surface: #f4f7fb;
+  --shadow: 0 1px 2px rgba(16, 24, 35, 0.06);
+  --shadow-hover: 0 4px 16px rgba(7, 95, 206, 0.12);
   --radius: 6px;
   --content: 70rem;
   font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
@@ -74,8 +78,8 @@ a:hover {
 header,
 .site-header {
   min-height: 3.75rem;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  border-bottom: 1px solid #1e2a3a;
+  background: var(--header-ink);
 }
 
 header > a,
@@ -86,7 +90,7 @@ header > a,
   margin-inline: auto;
   align-items: center;
   gap: 0.65rem;
-  color: var(--ink);
+  color: #ffffff;
   font-size: 1.05rem;
   font-weight: 750;
   text-decoration: none;
@@ -97,6 +101,26 @@ header > a,
   width: 2rem;
   height: 2rem;
   flex: 0 0 2rem;
+  filter: brightness(1.15);
+}
+
+.skip-link {
+  position: fixed;
+  z-index: 20;
+  top: 0.5rem;
+  left: 0.5rem;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--blue);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 700;
+  transform: translateY(-150%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
 }
 
 main {
@@ -158,8 +182,8 @@ main > section:first-child > p,
 }
 
 .catalog-intro {
-  padding-bottom: 0.25rem;
-  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .detail-header {
@@ -185,9 +209,14 @@ form[role="search"],
   grid-template-columns: minmax(12rem, 2fr) minmax(9rem, 1fr) minmax(10rem, 1fr) auto;
   grid-template-rows: auto auto;
   gap: 0.35rem 0.75rem;
-  max-width: 60rem;
-  margin-block: 1.4rem 2.25rem;
+  max-width: none;
+  margin-block: 1.25rem 2rem;
+  padding: 1rem 1.15rem 1.15rem;
   align-items: end;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
 form[role="search"] label,
@@ -276,8 +305,10 @@ button:disabled {
 section[aria-label="Stacks"],
 .stack-list,
 .version-list {
+  display: grid;
+  gap: 0.85rem;
   margin-block: 1.5rem 2rem;
-  border-top: 1px solid var(--border);
+  border-top: 0;
 }
 
 .version-list,
@@ -293,8 +324,30 @@ section[aria-label="Stacks"] article,
   grid-template-columns: minmax(12rem, 1.4fr) minmax(15rem, 2fr) minmax(12rem, 1fr);
   gap: 0.5rem 1.5rem;
   min-width: 0;
-  padding-block: 1.2rem;
-  border-bottom: 1px solid var(--border);
+  padding: 1.05rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+section[aria-label="Stacks"] article:hover,
+.stack-row:hover,
+.version-row:hover {
+  border-color: rgba(7, 95, 206, 0.45);
+  box-shadow: var(--shadow-hover);
+}
+
+section[aria-label="Stacks"] article h2 a,
+.stack-row__title a,
+.version-row__title a {
+  text-decoration: none;
+}
+
+section[aria-label="Stacks"] article h2 a:hover,
+.stack-row__title a:hover,
+.version-row__title a:hover {
+  text-decoration: underline;
 }
 
 section[aria-label="Stacks"] article > *,
@@ -361,12 +414,25 @@ ul[aria-label="Tags"],
 ul[aria-label="Tags"] li,
 .tag {
   max-width: 100%;
-  padding: 0.15rem 0.45rem;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid var(--border);
+  border-color: #c4d7f2;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: #114a94;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.harness-chip {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0.08rem 0.45rem;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--surface);
-  color: #46525c;
-  font-size: 0.78rem;
+  background: var(--code-surface);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.8rem;
   overflow-wrap: anywhere;
 }
 
@@ -405,10 +471,11 @@ ul[aria-label="Tags"] li,
 .command-surface {
   max-width: 52rem;
   margin-block: 1.5rem;
-  padding: 1rem;
-  border: 1px solid var(--border-strong);
+  padding: 0.85rem;
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
 .command-row,
@@ -438,6 +505,14 @@ ul[aria-label="Tags"] li,
   font-size: 0.86rem;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.command-row code,
+[data-copy-text] {
+  padding: 0.65rem 0.8rem;
+  border: 1px solid #e3eaf3;
+  border-radius: var(--radius);
+  background: var(--code-surface);
 }
 
 .copy-button,
@@ -473,11 +548,15 @@ ul[aria-label="Tags"] li,
 }
 
 [data-copy-status] {
-	grid-column: 1 / -1;
-  min-height: 1.35rem;
+  grid-column: 1 / -1;
+  min-height: 0;
   margin: 0.45rem 0 0;
   color: var(--muted);
   font-size: 0.82rem;
+}
+
+[data-copy-status]:empty {
+  display: none;
 }
 
 .structured-list {
@@ -512,7 +591,10 @@ ul[aria-label="Tags"] li,
   display: grid;
   grid-template-columns: minmax(8rem, 0.35fr) minmax(0, 1fr);
   gap: 0;
-  border-top: 1px solid var(--border);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
 }
 
 .manifest-grid dt,
@@ -522,7 +604,25 @@ ul[aria-label="Tags"] li,
 }
 
 .manifest-grid dd {
+  padding-right: 1rem;
   padding-left: 1rem;
+}
+
+.manifest-grid dt {
+  padding-left: 1rem;
+}
+
+.manifest-grid dt:last-of-type,
+.manifest-grid dd:last-of-type {
+  border-bottom: 0;
+}
+
+.detail-header .meta-grid {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
 }
 
 .notice,
@@ -695,7 +795,17 @@ nav[aria-label$="pages"] a {
   button,
   input,
   select {
-    transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
+  }
+
+  .stack-row,
+  .version-row,
+  section[aria-label="Stacks"] article {
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+
+  .skip-link {
+  transition: transform 120ms ease;
   }
 }
 

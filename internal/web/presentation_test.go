@@ -51,6 +51,16 @@ func TestEmbeddedStaticRoutes(t *testing.T) {
 	}
 }
 
+func TestPageShellProvidesKeyboardSkipLink(t *testing.T) {
+	handler := newTestHandler(t, &fakeRegistry{})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := recorder.Body.String()
+	if !strings.Contains(body, `<a class="skip-link" href="#main-content">Skip to content</a>`) || !strings.Contains(body, `<main id="main-content" tabindex="-1">`) {
+		t.Fatalf("keyboard skip target missing: %s", body)
+	}
+}
+
 func TestDetailMetadataUsesOnlyPinnedPublicBase(t *testing.T) {
 	publicBase := &url.URL{Scheme: "https", Host: "discover.example", Path: "/catalog/"}
 	registry := &fakeRegistry{versionResult: registryclient.Version{

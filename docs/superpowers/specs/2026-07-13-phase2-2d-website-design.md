@@ -1,6 +1,6 @@
 # SherpA Phase 2 · Sub-project 2d — Discovery Website
 
-**Status:** Implemented; automated gates green, live Railway acceptance pending
+**Status:** Implemented; automated and browser QA green, live Railway acceptance pending
 **Date:** 2026-07-13
 **Parent specs:** `2026-07-08-follow-the-expert-design.md` (§4.2 registry, website); builds on 2c-i
 (registry API core), 2c-ii (auth + trust tier), and 2c-iii (Railway deployment).

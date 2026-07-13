@@ -7,7 +7,7 @@
       <li class="version-row">
         <h3 class="version-row__title">{{if .URL}}<a href="{{.URL}}">Version {{.Version}}</a>{{else}}Version {{.Version}}{{end}}</h3>
         <div class="version-row__summary">{{if .PublishedISO}}<time datetime="{{.PublishedISO}}">{{.PublishedText}}</time>{{end}}{{if .Changelog}}<p>{{.Changelog}}</p>{{end}}</div>
-        <dl class="version-row__meta"><dt>Scan</dt><dd>{{.ScanSummary}}</dd><dt>Trust</dt><dd>{{.TrustTier}}</dd></dl>
+        <dl class="version-row__meta"><dt>Scan</dt><dd>{{.ScanSummary}}</dd><dt>Trust</dt><dd>{{if .TrustTier}}<span class="trust-tier{{if .TrustClass}} {{.TrustClass}}{{end}}">{{.TrustTier}}</span>{{end}}</dd></dl>
       </li>
     {{end}}
     </ol>

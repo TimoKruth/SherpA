@@ -42,9 +42,26 @@ func TestHomeRendersRecentCatalog(t *testing.T) {
 		`href="/stacks/alice/reviewer"`, "@alice/reviewer", "Strict code review",
 		"codex", "review", "security", "v3", "linked",
 		`href="/stacks/origin/base"`, "@origin/base@v2",
+		`class="harness-chip"`, `class="trust-tier trust-tier--linked"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("home omitted %q: %s", want, body)
+		}
+	}
+}
+
+func TestTrustTierClassUsesFixedAllowlist(t *testing.T) {
+	for _, test := range []struct {
+		tier string
+		want string
+	}{
+		{tier: "linked", want: "trust-tier--linked"},
+		{tier: "unreviewed", want: "trust-tier--unreviewed"},
+		{tier: "unknown"},
+		{tier: `linked" onclick="alert(1)`},
+	} {
+		if got := trustTierClass(test.tier); got != test.want {
+			t.Fatalf("trustTierClass(%q) = %q, want %q", test.tier, got, test.want)
 		}
 	}
 }

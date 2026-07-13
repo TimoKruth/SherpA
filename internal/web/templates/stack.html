@@ -5,8 +5,8 @@
     {{if .Summary}}<p>{{.Summary}}</p>{{end}}
   </div>
   <dl class="meta-grid">
-    <dt>Harness</dt><dd>{{.Harness}}</dd>
-    {{if .LatestTrust}}<dt>Latest trust</dt><dd>{{.LatestTrust}}</dd>{{end}}
+    <dt>Harness</dt><dd>{{if .Harness}}<span class="harness-chip">{{.Harness}}</span>{{end}}</dd>
+    {{if .LatestTrust}}<dt>Latest trust</dt><dd><span class="trust-tier{{if .LatestTrustClass}} {{.LatestTrustClass}}{{end}}">{{.LatestTrust}}</span></dd>{{end}}
   </dl>
   {{if .Tags}}<ul class="tag-list" aria-label="Tags">{{range .Tags}}<li class="tag">{{.}}</li>{{end}}</ul>{{end}}
   {{if .ForkedFromText}}<p>Forked from {{if .ForkedFromURL}}<a href="{{.ForkedFromURL}}">{{.ForkedFromText}}</a>{{else}}{{.ForkedFromText}}{{end}}</p>{{end}}

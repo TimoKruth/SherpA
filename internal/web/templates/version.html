@@ -4,7 +4,7 @@
   <dl class="meta-grid">
     <dt>Git tag</dt><dd>{{.GitTag}}</dd>
     {{if .PublishedISO}}<dt>Published</dt><dd><time datetime="{{.PublishedISO}}">{{.PublishedText}}</time></dd>{{end}}
-    <dt>Trust</dt><dd>{{.TrustTier}}</dd>
+    <dt>Trust</dt><dd>{{if .TrustTier}}<span class="trust-tier{{if .TrustClass}} {{.TrustClass}}{{end}}">{{.TrustTier}}</span>{{end}}</dd>
     {{if .Changelog}}<dt>Changelog</dt><dd>{{.Changelog}}</dd>{{end}}
   </dl>
 </article>
@@ -15,7 +15,7 @@
     {{if .Manifest.Name}}<dt>Name</dt><dd>{{.Manifest.Name}}</dd>{{end}}
     {{if .Manifest.Owner}}<dt>Owner</dt><dd>{{.Manifest.Owner}}</dd>{{end}}
     {{if .Manifest.Version}}<dt>Version</dt><dd>{{.Manifest.Version}}</dd>{{end}}
-    {{if .Manifest.Harness}}<dt>Harness</dt><dd>{{.Manifest.Harness}}</dd>{{end}}
+    {{if .Manifest.Harness}}<dt>Harness</dt><dd><span class="harness-chip">{{.Manifest.Harness}}</span></dd>{{end}}
     {{if .Manifest.Summary}}<dt>Summary</dt><dd>{{.Manifest.Summary}}</dd>{{end}}
     {{if .Manifest.ForkedFrom}}<dt>Forked from</dt><dd>{{.Manifest.ForkedFrom}}</dd>{{end}}
   </dl>

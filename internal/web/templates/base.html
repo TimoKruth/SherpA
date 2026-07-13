@@ -16,8 +16,9 @@
   <title>{{if eq .Title "SherpA"}}SherpA{{else}}{{.Title}} · SherpA{{end}}</title>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="site-header"><a class="site-brand" href="/"><img class="brand-mark" src="/static/sherpa-mark.png" width="32" height="32" alt=""><span>SherpA</span></a></header>
-  <main>
+  <main id="main-content" tabindex="-1">
     {{if .ErrorTitle}}{{template "error-content" .}}{{else if .SearchPage}}{{if .SearchPage.Home}}{{template "home-content" .SearchPage}}{{else}}{{template "search-content" .SearchPage}}{{end}}{{else if .StackPage}}{{template "stack-content" .StackPage}}{{else if .VersionPage}}{{template "version-content" .VersionPage}}{{else}}{{template "placeholder-content" .}}{{end}}
   </main>
 </body>

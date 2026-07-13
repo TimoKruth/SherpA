@@ -16,18 +16,19 @@ type CommandView struct {
 }
 
 type stackPageView struct {
-	LatestLabel    bool
-	Ref            string
-	Summary        string
-	Harness        string
-	Tags           []string
-	LatestTrust    string
-	ForkedFromText string
-	ForkedFromURL  string
-	Commands       CommandView
-	Versions       []versionRowView
-	PreviousURL    string
-	NextURL        string
+	LatestLabel      bool
+	Ref              string
+	Summary          string
+	Harness          string
+	Tags             []string
+	LatestTrust      string
+	LatestTrustClass string
+	ForkedFromText   string
+	ForkedFromURL    string
+	Commands         CommandView
+	Versions         []versionRowView
+	PreviousURL      string
+	NextURL          string
 }
 
 type versionRowView struct {
@@ -38,6 +39,7 @@ type versionRowView struct {
 	Changelog     string
 	ScanSummary   string
 	TrustTier     string
+	TrustClass    string
 }
 
 type ScanFindingView struct {
@@ -55,6 +57,7 @@ type versionPageView struct {
 	PublishedText string
 	Changelog     string
 	TrustTier     string
+	TrustClass    string
 	Commands      CommandView
 	Manifest      manifestView
 	Findings      []ScanFindingView
@@ -101,6 +104,7 @@ func (s *server) handleStack(w http.ResponseWriter, r *http.Request, owner, name
 	}
 	if len(stack.Versions) > 0 {
 		view.LatestTrust = stack.Versions[0].TrustTier
+		view.LatestTrustClass = trustTierClass(stack.Versions[0].TrustTier)
 	}
 	if forkOwner, forkName, valid := parseProvenance(stack.ForkedFrom); valid {
 		view.ForkedFromURL = stackPath(forkOwner, forkName)
@@ -153,6 +157,7 @@ func (s *server) handleVersion(w http.ResponseWriter, r *http.Request, owner, na
 		PublishedText: publishedText,
 		Changelog:     version.Changelog,
 		TrustTier:     version.TrustTier,
+		TrustClass:    trustTierClass(version.TrustTier),
 		Commands:      commands,
 		Manifest:      manifest,
 		Findings:      scanFindingViews(version.ScanReport),
@@ -228,6 +233,7 @@ func versionRows(owner, name string, versions []registryclient.VersionSummary) (
 			Changelog:     version.Changelog,
 			ScanSummary:   version.ScanSummary,
 			TrustTier:     version.TrustTier,
+			TrustClass:    trustTierClass(version.TrustTier),
 		}
 		row.URL = versionPath(owner, name, version.Version)
 		rows = append(rows, row)
