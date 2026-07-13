@@ -1,0 +1,17 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{if .NoIndex}}<meta name="robots" content="noindex">{{end}}
+  <title>{{.Title}} · SherpA</title>
+</head>
+<body>
+  <header><a href="/">SherpA</a></header>
+  <main>
+    {{if .ErrorTitle}}{{template "error-content" .}}{{else}}{{template "placeholder-content" .}}{{end}}
+  </main>
+</body>
+</html>{{end}}
+
+{{define "placeholder-content"}}<h1>{{.Title}}</h1>{{end}}
