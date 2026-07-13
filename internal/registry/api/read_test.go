@@ -49,6 +49,9 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 	if st.searchQ != "sec" || st.searchHarness != "claude-code" || st.searchTag != "review" {
 		t.Fatalf("search args = (%q,%q,%q)", st.searchQ, st.searchHarness, st.searchTag)
 	}
+	if st.searchMaxRows != 0 || st.searchOffset != 0 {
+		t.Fatalf("search pagination = (%d,%d), want unbounded compatibility", st.searchMaxRows, st.searchOffset)
+	}
 
 	var body struct {
 		Stacks []struct {
@@ -65,6 +68,9 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 		} `json:"stacks"`
 	}
 	decodeJSON(t, rr, &body)
+	if strings.Contains(rr.Body.String(), "next_offset") {
+		t.Fatalf("unbounded response unexpectedly contains next_offset: %s", rr.Body.String())
+	}
 	if len(body.Stacks) != 1 {
 		t.Fatalf("stacks len = %d, want 1: %#v", len(body.Stacks), body.Stacks)
 	}
@@ -83,6 +89,67 @@ func TestSearchReturnsMatchingStacks(t *testing.T) {
 	}
 	if got.RepoURL != "http://registry.test/v1/stacks/alice/reviewer.git" {
 		t.Fatalf("repo_url = %q", got.RepoURL)
+	}
+}
+
+func TestSearchPaginationUsesSentinelAndNextOffset(t *testing.T) {
+	st := newFakeStore()
+	for _, name := range []string{"one", "two", "three"} {
+		st.searchResults = append(st.searchResults, store.StackWithLatest{Stack: store.Stack{Owner: "alice", Name: name}})
+	}
+	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://registry.test/v1/search?limit=2&offset=1", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Stacks     []searchStackResponse `json:"stacks"`
+		NextOffset *int                  `json:"next_offset"`
+	}
+	decodeJSON(t, rr, &body)
+	if len(body.Stacks) != 2 || body.NextOffset == nil || *body.NextOffset != 3 {
+		t.Fatalf("page = %#v, next = %v", body.Stacks, body.NextOffset)
+	}
+	if st.searchMaxRows != 3 || st.searchOffset != 1 {
+		t.Fatalf("store pagination = (%d,%d), want (3,1)", st.searchMaxRows, st.searchOffset)
+	}
+}
+
+func TestSearchPaginationAcceptsMaximumLimit(t *testing.T) {
+	st := newFakeStore()
+	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://registry.test/v1/search?limit=50", nil))
+	if rr.Code != http.StatusOK || st.searchMaxRows != 51 {
+		t.Fatalf("status = %d, store max rows = %d; want 200, 51", rr.Code, st.searchMaxRows)
+	}
+}
+
+func TestReadPaginationRejectsInvalidParameters(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"search zero limit", "/v1/search?limit=0"},
+		{"search negative limit", "/v1/search?limit=-1"},
+		{"search over max", "/v1/search?limit=51"},
+		{"search non integer", "/v1/search?limit=two"},
+		{"search negative offset", "/v1/search?limit=2&offset=-1"},
+		{"search offset without limit", "/v1/search?offset=1"},
+		{"versions zero limit", "/v1/stacks/alice/reviewer?versions_limit=0"},
+		{"versions over max", "/v1/stacks/alice/reviewer?versions_limit=51"},
+		{"versions non integer", "/v1/stacks/alice/reviewer?versions_limit=two"},
+		{"versions negative offset", "/v1/stacks/alice/reviewer?versions_limit=2&versions_offset=-1"},
+		{"versions offset without limit", "/v1/stacks/alice/reviewer?versions_offset=1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := New(newFakeStore(), content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://registry.test"+tc.path, nil))
+			assertJSONError(t, rr, http.StatusBadRequest)
+		})
 	}
 }
 
@@ -206,6 +273,9 @@ func TestStackDetailReturnsVersions(t *testing.T) {
 		} `json:"versions"`
 	}
 	decodeJSON(t, rr, &body)
+	if strings.Contains(rr.Body.String(), "next_versions_offset") {
+		t.Fatalf("unbounded response unexpectedly contains next_versions_offset: %s", rr.Body.String())
+	}
 	if body.Owner != "alice" || body.Name != "reviewer" || body.Summary != "Review code" || body.Harness != "codex" {
 		t.Fatalf("stack detail = %#v", body)
 	}
@@ -215,11 +285,62 @@ func TestStackDetailReturnsVersions(t *testing.T) {
 	if len(body.Versions) != 2 {
 		t.Fatalf("versions len = %d, want 2: %#v", len(body.Versions), body.Versions)
 	}
+	if st.stackMaxVersions != 0 || st.stackOffset != 0 {
+		t.Fatalf("stack pagination = (%d,%d), want unbounded compatibility", st.stackMaxVersions, st.stackOffset)
+	}
 	if body.Versions[0].Version != 2 || body.Versions[0].ScanSummary != "2 findings" || body.Versions[0].TrustTier != "linked" {
 		t.Fatalf("version 2 summary = %#v", body.Versions[0])
 	}
 	if body.Versions[1].Version != 1 || body.Versions[1].ScanSummary != "clean" {
 		t.Fatalf("version 1 summary = %#v", body.Versions[1])
+	}
+}
+
+func TestStackVersionPaginationUsesSentinelAndNextOffset(t *testing.T) {
+	st := newFakeStore()
+	st.stacks["alice/reviewer"] = store.Stack{Owner: "alice", Name: "reviewer"}
+	st.versions["alice/reviewer"] = []store.Version{{Version: 4}, {Version: 3}, {Version: 2}}
+	handler := New(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://registry.test/v1/stacks/alice/reviewer?versions_limit=2&versions_offset=1", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Versions           []versionSummary `json:"versions"`
+		NextVersionsOffset *int             `json:"next_versions_offset"`
+	}
+	decodeJSON(t, rr, &body)
+	if len(body.Versions) != 2 || body.NextVersionsOffset == nil || *body.NextVersionsOffset != 3 {
+		t.Fatalf("versions = %#v, next = %v", body.Versions, body.NextVersionsOffset)
+	}
+	if st.stackMaxVersions != 3 || st.stackOffset != 1 {
+		t.Fatalf("store pagination = (%d,%d), want (3,1)", st.stackMaxVersions, st.stackOffset)
+	}
+}
+
+func TestDetailRepoURLsUsePinnedPublicBase(t *testing.T) {
+	st := newFakeStore()
+	st.stacks["alice/reviewer"] = store.Stack{Owner: "alice", Name: "reviewer"}
+	st.versionByKey["alice/reviewer/2"] = store.Version{Version: 2}
+	handler := NewWithOptions(st, content.NewBareGit(t.TempDir()), "", &registryauth.FakeGitHubClient{}, Options{PublicBaseURL: "https://registry.example/prefix", TrustProxy: true})
+	for _, path := range []string{"/v1/stacks/alice/reviewer", "/v1/stacks/alice/reviewer/versions/2"} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "http://evil.example"+path, nil)
+		req.Host = "evil.example"
+		req.Header.Set("X-Forwarded-Host", "attacker.example")
+		req.Header.Set("X-Forwarded-Proto", "http")
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body %s", path, rr.Code, rr.Body.String())
+		}
+		var body struct {
+			RepoURL string `json:"repo_url"`
+		}
+		decodeJSON(t, rr, &body)
+		if body.RepoURL != "https://registry.example/prefix/v1/stacks/alice/reviewer.git" {
+			t.Fatalf("%s repo_url = %q", path, body.RepoURL)
+		}
 	}
 }
 
@@ -325,14 +446,18 @@ func TestGitRouteMissingRepoReturns404(t *testing.T) {
 }
 
 type fakeStore struct {
-	searchQ       string
-	searchHarness string
-	searchTag     string
-	searchResults []store.StackWithLatest
-	searchErr     error
-	stacks        map[string]store.Stack
-	versions      map[string][]store.Version
-	versionByKey  map[string]store.Version
+	searchQ          string
+	searchHarness    string
+	searchTag        string
+	searchResults    []store.StackWithLatest
+	searchErr        error
+	searchMaxRows    int
+	searchOffset     int
+	stackMaxVersions int
+	stackOffset      int
+	stacks           map[string]store.Stack
+	versions         map[string][]store.Version
+	versionByKey     map[string]store.Version
 }
 
 func newFakeStore() *fakeStore {
@@ -367,14 +492,18 @@ func (f *fakeStore) InsertVersion(context.Context, store.Version) error {
 	return errors.New("not implemented")
 }
 
-func (f *fakeStore) Search(_ context.Context, q, harness, tag string) ([]store.StackWithLatest, error) {
+func (f *fakeStore) Search(_ context.Context, q, harness, tag string, maxRows, offset int) ([]store.StackWithLatest, error) {
 	f.searchQ = q
 	f.searchHarness = harness
 	f.searchTag = tag
+	f.searchMaxRows = maxRows
+	f.searchOffset = offset
 	return f.searchResults, f.searchErr
 }
 
-func (f *fakeStore) GetStack(_ context.Context, owner, name string) (store.Stack, []store.Version, error) {
+func (f *fakeStore) GetStack(_ context.Context, owner, name string, maxVersions, offset int) (store.Stack, []store.Version, error) {
+	f.stackMaxVersions = maxVersions
+	f.stackOffset = offset
 	key := owner + "/" + name
 	stack, ok := f.stacks[key]
 	if !ok {

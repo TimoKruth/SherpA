@@ -196,6 +196,7 @@ func (s *server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		ScanReport: rawOrEmptyObject(version.ScanReport),
 		Changelog:  version.Changelog,
 		TrustTier:  version.TrustTier,
+		RepoURL:    s.repoURL(r, owner, name),
 	})
 }
 

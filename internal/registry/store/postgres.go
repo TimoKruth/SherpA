@@ -219,7 +219,7 @@ func (s *PostgresStore) InsertVersion(ctx context.Context, version Version) erro
 	return err
 }
 
-func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string) ([]StackWithLatest, error) {
+func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string, maxRows, offset int) ([]StackWithLatest, error) {
 	rows, err := s.pool.Query(ctx, `
 		select
 			s.id, u.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
@@ -239,8 +239,9 @@ func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string) ([]S
 				or exists (select 1 from unnest(coalesce(s.tags, array[]::text[])) t where t ilike '%' || $1 || '%'))
 			and ($2 = '' or lower(s.harness) = lower($2))
 			and ($3 = '' or exists (select 1 from unnest(coalesce(s.tags, array[]::text[])) t where lower(t) = lower($3)))
-		order by v.published_at desc, s.name
-	`, q, harness, tag)
+		order by v.published_at desc, u.handle, s.name
+		limit nullif($4, 0) offset $5
+	`, q, harness, tag, maxRows, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +271,7 @@ func (s *PostgresStore) Search(ctx context.Context, q, harness, tag string) ([]S
 	return matches, rows.Err()
 }
 
-func (s *PostgresStore) GetStack(ctx context.Context, owner, name string) (Stack, []Version, error) {
+func (s *PostgresStore) GetStack(ctx context.Context, owner, name string, maxVersions, offset int) (Stack, []Version, error) {
 	var stack Stack
 	err := s.pool.QueryRow(ctx, `
 		select s.id, u.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
@@ -295,7 +296,7 @@ func (s *PostgresStore) GetStack(ctx context.Context, owner, name string) (Stack
 		return Stack{}, nil, err
 	}
 
-	versions, err := s.versionsForStack(ctx, stack.ID)
+	versions, err := s.versionsForStack(ctx, stack.ID, maxVersions, offset)
 	if err != nil {
 		return Stack{}, nil, err
 	}
@@ -360,14 +361,15 @@ func (s *PostgresStore) Close() error {
 	return nil
 }
 
-func (s *PostgresStore) versionsForStack(ctx context.Context, stackID int64) ([]Version, error) {
+func (s *PostgresStore) versionsForStack(ctx context.Context, stackID int64, maxVersions, offset int) ([]Version, error) {
 	rows, err := s.pool.Query(ctx, `
 		select id, stack_id, version, coalesce(git_tag, ''), manifest, scan_report,
 			coalesce(changelog, ''), coalesce(trust_tier, 'unreviewed'), published_at
 		from stack_versions
 		where stack_id = $1
 		order by version desc
-	`, stackID)
+		limit nullif($2, 0) offset $3
+	`, stackID, maxVersions, offset)
 	if err != nil {
 		return nil, err
 	}

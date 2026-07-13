@@ -53,8 +53,8 @@ type Store interface {
 	SessionUser(ctx context.Context, tokenHash string) (login string, err error)
 	UpsertStack(ctx context.Context, s Stack) (stackID int64, err error)
 	InsertVersion(ctx context.Context, v Version) error
-	Search(ctx context.Context, q, harness, tag string) ([]StackWithLatest, error)
-	GetStack(ctx context.Context, owner, name string) (Stack, []Version, error)
+	Search(ctx context.Context, q, harness, tag string, maxRows, offset int) ([]StackWithLatest, error)
+	GetStack(ctx context.Context, owner, name string, maxVersions, offset int) (Stack, []Version, error)
 	GetVersion(ctx context.Context, owner, name string, v int) (Version, error)
 	AllVersionRefs(ctx context.Context) ([]VersionRef, error)
 	Close() error

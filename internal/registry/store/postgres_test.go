@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -86,7 +87,7 @@ func TestPostgresStoreContract(t *testing.T) {
 		t.Fatalf("duplicate insert error = %v, want %v", err, ErrVersionExists)
 	}
 
-	matches, err := store.Search(ctx, "SECUR", "CLAUDE-CODE", "")
+	matches, err := store.Search(ctx, "SECUR", "CLAUDE-CODE", "", 0, 0)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestPostgresStoreContract(t *testing.T) {
 		t.Fatalf("search match = %#v, want alice/reviewer latest v2", matches[0])
 	}
 
-	tagMatches, err := store.Search(ctx, "", "", "review")
+	tagMatches, err := store.Search(ctx, "", "", "review", 0, 0)
 	if err != nil {
 		t.Fatalf("tag search: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestPostgresStoreContract(t *testing.T) {
 		t.Fatalf("tag search = %#v, want one latest v2 match", tagMatches)
 	}
 
-	noMatches, err := store.Search(ctx, "security", "codex", "")
+	noMatches, err := store.Search(ctx, "security", "codex", "", 0, 0)
 	if err != nil {
 		t.Fatalf("filtered search: %v", err)
 	}
@@ -113,7 +114,7 @@ func TestPostgresStoreContract(t *testing.T) {
 		t.Fatalf("filtered search returned %#v, want none", noMatches)
 	}
 
-	stack, versions, err := store.GetStack(ctx, "alice", "reviewer")
+	stack, versions, err := store.GetStack(ctx, "alice", "reviewer", 0, 0)
 	if err != nil {
 		t.Fatalf("get stack: %v", err)
 	}
@@ -140,9 +141,97 @@ func TestPostgresStoreContract(t *testing.T) {
 		t.Fatalf("AllVersionRefs = %#v, want alice/reviewer v1,v2", refs)
 	}
 
-	if _, _, err := store.GetStack(ctx, "alice", "missing"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := store.GetStack(ctx, "alice", "missing", 0, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing stack error = %v, want %v", err, ErrNotFound)
 	}
+}
+
+func TestPostgresReadPaginationAndStableOrdering(t *testing.T) {
+	ctx := context.Background()
+	st, err := OpenPostgres(ctx, StartPostgres(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	for _, item := range []struct {
+		owner string
+		name  string
+	}{
+		{owner: "bob", name: "alpha"},
+		{owner: "alice", name: "zeta"},
+		{owner: "alice", name: "alpha"},
+	} {
+		stackID, err := st.UpsertStack(ctx, Stack{Owner: item.owner, Name: item.name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.InsertVersion(ctx, Version{StackID: stackID, Version: 1, GitTag: "v1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.pool.Exec(ctx, `update stack_versions set published_at = '2026-07-13T12:00:00Z'`); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := st.Search(ctx, "", "", "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stackKeys(all); !equalStrings(got, []string{"alice/alpha", "alice/zeta", "bob/alpha"}) {
+		t.Fatalf("stable order = %v", got)
+	}
+	page, err := st.Search(ctx, "", "", "", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stackKeys(page); !equalStrings(got, []string{"alice/zeta", "bob/alpha"}) {
+		t.Fatalf("bounded search = %v", got)
+	}
+
+	stackID, err := st.UpsertStack(ctx, Stack{Owner: "carol", Name: "versions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 4; version++ {
+		if err := st.InsertVersion(ctx, Version{StackID: stackID, Version: version, GitTag: "v" + strconv.Itoa(version)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, versions, err := st.GetStack(ctx, "carol", "versions", 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 2 || versions[0].Version != 3 || versions[1].Version != 2 {
+		t.Fatalf("bounded versions = %#v, want v3,v2", versions)
+	}
+	_, allVersions, err := st.GetStack(ctx, "carol", "versions", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allVersions) != 4 || allVersions[0].Version != 4 || allVersions[3].Version != 1 {
+		t.Fatalf("unbounded versions = %#v, want v4..v1", allVersions)
+	}
+}
+
+func stackKeys(stacks []StackWithLatest) []string {
+	keys := make([]string, len(stacks))
+	for i, stack := range stacks {
+		keys[i] = stack.Owner + "/" + stack.Name
+	}
+	return keys
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestPostgresGitHubSessionsAndTrustTier(t *testing.T) {
@@ -188,7 +277,7 @@ func TestPostgresGitHubSessionsAndTrustTier(t *testing.T) {
 	if err != nil || v.TrustTier != "linked" {
 		t.Fatalf("version = %#v, %v", v, err)
 	}
-	matches, err := st.Search(ctx, "trusted", "", "")
+	matches, err := st.Search(ctx, "trusted", "", "", 0, 0)
 	if err != nil || len(matches) != 1 || matches[0].TrustTier != "linked" {
 		t.Fatalf("search = %#v, %v", matches, err)
 	}
@@ -248,10 +337,10 @@ func TestPostgresGitHubRenameWithOwnedStackIsRejected(t *testing.T) {
 	if got, err := st.SessionUser(ctx, "alice-session"); err != nil || got != "alice" {
 		t.Fatalf("SessionUser after blocked rename = %q, %v", got, err)
 	}
-	if _, _, err := st.GetStack(ctx, "alice", "published"); err != nil {
+	if _, _, err := st.GetStack(ctx, "alice", "published", 0, 0); err != nil {
 		t.Fatalf("original stack after blocked rename: %v", err)
 	}
-	if _, _, err := st.GetStack(ctx, "alice-renamed", "published"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := st.GetStack(ctx, "alice-renamed", "published", 0, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("renamed stack lookup error = %v", err)
 	}
 }

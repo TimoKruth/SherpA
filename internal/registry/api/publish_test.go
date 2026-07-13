@@ -23,6 +23,12 @@ import (
 	"sherpa/internal/registry/store"
 )
 
+func TestPublishBundleLimitRemains50MiB(t *testing.T) {
+	if maxPublishBundleBytes != 50<<20 {
+		t.Fatalf("maxPublishBundleBytes = %d, want %d", maxPublishBundleBytes, 50<<20)
+	}
+}
+
 func TestPublishRequiresBearerTokenBeforeWrites(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -329,6 +335,37 @@ func TestPublishCleanBundleCommitsMetadataAndAppearsInDetail(t *testing.T) {
 	}
 }
 
+func TestPublishResponseRepoURLUsesPinnedPublicBase(t *testing.T) {
+	st := newPublishSpyStore()
+	handler := NewWithOptions(st, newPublishSpyContent(t), "admin", &registryauth.FakeGitHubClient{}, Options{
+		PublicBaseURL: "https://registry.example/prefix",
+		TrustProxy:    true,
+	})
+	bundle := buildPublishBundle(t, map[string]string{
+		"stack.yaml": "name: n\nowner: o\nversion: 1\nharness: codex\n",
+		"README.md":  "clean\n",
+	})
+	body, contentType := multipartBundle(t, bundle)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://evil.example/v1/stacks/o/n/versions", body)
+	req.Host = "evil.example"
+	req.Header.Set("X-Forwarded-Host", "attacker.example")
+	req.Header.Set("X-Forwarded-Proto", "http")
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer admin")
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body %s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		RepoURL string `json:"repo_url"`
+	}
+	decodeJSON(t, rr, &response)
+	if response.RepoURL != "https://registry.example/prefix/v1/stacks/o/n.git" {
+		t.Fatalf("repo_url = %q", response.RepoURL)
+	}
+}
+
 type publishSpyContent struct {
 	inner       *content.BareGit
 	stageCalls  int
@@ -491,11 +528,11 @@ func (p *publishSpyStore) InsertVersion(_ context.Context, v store.Version) erro
 	return nil
 }
 
-func (p *publishSpyStore) Search(context.Context, string, string, string) ([]store.StackWithLatest, error) {
+func (p *publishSpyStore) Search(context.Context, string, string, string, int, int) ([]store.StackWithLatest, error) {
 	return nil, nil
 }
 
-func (p *publishSpyStore) GetStack(_ context.Context, owner, name string) (store.Stack, []store.Version, error) {
+func (p *publishSpyStore) GetStack(_ context.Context, owner, name string, _, _ int) (store.Stack, []store.Version, error) {
 	key := owner + "/" + name
 	stack, ok := p.stacks[key]
 	if !ok {

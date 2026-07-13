@@ -13,7 +13,8 @@ import (
 )
 
 type searchResponse struct {
-	Stacks []searchStackResponse `json:"stacks"`
+	Stacks     []searchStackResponse `json:"stacks"`
+	NextOffset *int                  `json:"next_offset,omitempty"`
 }
 
 type searchStackResponse struct {
@@ -30,13 +31,15 @@ type searchStackResponse struct {
 }
 
 type stackResponse struct {
-	Name       string           `json:"name"`
-	Owner      string           `json:"owner"`
-	Summary    string           `json:"summary"`
-	Tags       []string         `json:"tags"`
-	Harness    string           `json:"harness"`
-	ForkedFrom string           `json:"forked_from"`
-	Versions   []versionSummary `json:"versions"`
+	Name               string           `json:"name"`
+	Owner              string           `json:"owner"`
+	Summary            string           `json:"summary"`
+	Tags               []string         `json:"tags"`
+	Harness            string           `json:"harness"`
+	ForkedFrom         string           `json:"forked_from"`
+	RepoURL            string           `json:"repo_url"`
+	Versions           []versionSummary `json:"versions"`
+	NextVersionsOffset *int             `json:"next_versions_offset,omitempty"`
 }
 
 type versionSummary struct {
@@ -55,17 +58,35 @@ type versionResponse struct {
 	Changelog   string          `json:"changelog"`
 	PublishedAt string          `json:"published_at"`
 	TrustTier   string          `json:"trust_tier"`
+	RepoURL     string          `json:"repo_url"`
 }
+
+const maxReadPageSize = 50
 
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	matches, err := s.store.Search(r.Context(), q.Get("q"), q.Get("harness"), q.Get("tag"))
+	limit, offset, err := parsePage(r, "limit", "offset")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid pagination")
+		return
+	}
+	maxRows := 0
+	if limit > 0 {
+		maxRows = limit + 1
+	}
+	matches, err := s.store.Search(r.Context(), q.Get("q"), q.Get("harness"), q.Get("tag"), maxRows, offset)
 	if err != nil {
 		internalServerError(w, "search stacks", err)
 		return
 	}
 
-	resp := searchResponse{Stacks: make([]searchStackResponse, 0, len(matches))}
+	var nextOffset *int
+	if limit > 0 && len(matches) > limit {
+		matches = matches[:limit]
+		next := offset + limit
+		nextOffset = &next
+	}
+	resp := searchResponse{Stacks: make([]searchStackResponse, 0, len(matches)), NextOffset: nextOffset}
 	for _, match := range matches {
 		resp.Stacks = append(resp.Stacks, searchStackResponse{
 			Ref:        "@" + match.Owner + "/" + match.Name,
@@ -87,7 +108,16 @@ func (s *server) handleStack(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")
 	name := r.PathValue("name")
 
-	stack, versions, err := s.store.GetStack(r.Context(), owner, name)
+	limit, offset, err := parsePage(r, "versions_limit", "versions_offset")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid pagination")
+		return
+	}
+	maxVersions := 0
+	if limit > 0 {
+		maxVersions = limit + 1
+	}
+	stack, versions, err := s.store.GetStack(r.Context(), owner, name, maxVersions, offset)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "stack not found")
 		return
@@ -97,14 +127,22 @@ func (s *server) handleStack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var nextOffset *int
+	if limit > 0 && len(versions) > limit {
+		versions = versions[:limit]
+		next := offset + limit
+		nextOffset = &next
+	}
 	resp := stackResponse{
-		Name:       stack.Name,
-		Owner:      stack.Owner,
-		Summary:    stack.Summary,
-		Tags:       tagsOrEmpty(stack.Tags),
-		Harness:    stack.Harness,
-		ForkedFrom: stack.ForkedFrom,
-		Versions:   make([]versionSummary, 0, len(versions)),
+		Name:               stack.Name,
+		Owner:              stack.Owner,
+		Summary:            stack.Summary,
+		Tags:               tagsOrEmpty(stack.Tags),
+		Harness:            stack.Harness,
+		ForkedFrom:         stack.ForkedFrom,
+		RepoURL:            s.repoURL(r, stack.Owner, stack.Name),
+		Versions:           make([]versionSummary, 0, len(versions)),
+		NextVersionsOffset: nextOffset,
 	}
 	for _, version := range versions {
 		resp.Versions = append(resp.Versions, versionSummary{
@@ -145,7 +183,39 @@ func (s *server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		Changelog:   version.Changelog,
 		PublishedAt: formatTime(version.PublishedAt),
 		TrustTier:   version.TrustTier,
+		RepoURL:     s.repoURL(r, owner, name),
 	})
+}
+
+func parsePage(r *http.Request, limitKey, offsetKey string) (int, int, error) {
+	query := r.URL.Query()
+	limitRaw, hasLimit := query[limitKey]
+	_, hasOffset := query[offsetKey]
+	if !hasLimit {
+		if hasOffset {
+			return 0, 0, errors.New("offset requires limit")
+		}
+		return 0, 0, nil
+	}
+	if len(limitRaw) != 1 {
+		return 0, 0, errors.New("limit must occur once")
+	}
+	limit, err := strconv.Atoi(limitRaw[0])
+	if err != nil || limit <= 0 || limit > maxReadPageSize {
+		return 0, 0, errors.New("invalid limit")
+	}
+	offsetRaw := query[offsetKey]
+	if len(offsetRaw) > 1 {
+		return 0, 0, errors.New("offset must occur at most once")
+	}
+	offset := 0
+	if len(offsetRaw) == 1 {
+		offset, err = strconv.Atoi(offsetRaw[0])
+		if err != nil || offset < 0 {
+			return 0, 0, errors.New("invalid offset")
+		}
+	}
+	return limit, offset, nil
 }
 
 func (s *server) repoURL(r *http.Request, owner, name string) string {
