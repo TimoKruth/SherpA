@@ -4,7 +4,7 @@
 > implementation workers when available, with a separate adversarial/Fable-class review for the
 > session, OAuth/grant, feed-concurrency, and CSRF boundaries.
 
-**Status:** In progress; Tasks 1-4 implemented and verified
+**Status:** In progress; Tasks 1-5 implemented and verified
 
 **Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
 session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
@@ -20,6 +20,10 @@ Task 4 adds strict follow/unfollow/update commands, bounded terminal-safe update
 safe status caching, registry identity on registry-ref clones, recoverable auto-follow, and
 best-effort monotonic seen synchronization after successful local updates. Real Git-over-HTTP
 clone tests, focused race tests, and the repository-wide verification gates are green.
+Task 5 adds a private `0600` trial journal with immutable registry snapshots, random 128-bit IDs,
+strict verdict and 4 KiB UTF-8 note bounds, deterministic terminal-safe listing, and explicit
+verdict-only sharing. Non-disclosure, failed-share, repeat-share, focused race, and repository-
+wide verification tests are green.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -270,16 +274,16 @@ second URL equivalence rule.
 unless a later explicit `--local-only` design is approved. Entry IDs are random 128-bit base64url
 values. Verdict is normalized to the API enum. Notes are UTF-8, at most 4 KiB, local only.
 
-- [ ] **Step 1: Write journal tests.** Cover all verdicts, immutable owner/stack/version snapshot,
+- [x] **Step 1: Write journal tests.** Cover all verdicts, immutable owner/stack/version snapshot,
   random unique IDs, notes bound, old state, missing/non-registry profile, `mine` rejection,
   filtering, deterministic newest-first list, and terminal-safe rendering.
-- [ ] **Step 2: Prove non-disclosure.** Plant secret-looking notes and assert `share` sends only
+- [x] **Step 2: Prove non-disclosure.** Plant secret-looking notes and assert `share` sends only
   verdict and route version; client errors/log/output do not echo notes; failed sharing does not
   set `SharedAt`; repeat sharing is idempotent and explicit.
-- [ ] **Step 3: Implement subcommands.** Do not add session-end prompts or modify harness launch.
+- [x] **Step 3: Implement subcommands.** Do not add session-end prompts or modify harness launch.
   `SharedAt` is recorded only after registry success. Re-recording creates a new local observation;
   the registry's one-row-per-user/version value becomes the latest explicitly shared verdict.
-- [ ] **Step 4: Verify and commit.** Run:
+- [x] **Step 4: Verify and commit.** Run:
   `go test -race ./internal/state ./internal/cli`
   `git commit -m "feat(cli): add private trial journal"`
 
