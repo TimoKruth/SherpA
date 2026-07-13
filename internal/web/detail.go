@@ -29,6 +29,14 @@ type stackPageView struct {
 	Versions         []versionRowView
 	PreviousURL      string
 	NextURL          string
+	FollowerCount    int
+	ShowFollow       bool
+	Following        bool
+	FollowAction     string
+	CSRFToken        string
+	ShowSignIn       bool
+	Owner            string
+	OwnerURL         string
 }
 
 type versionRowView struct {
@@ -101,6 +109,23 @@ func (s *server) handleStack(w http.ResponseWriter, r *http.Request, owner, name
 		ForkedFromText: stack.ForkedFrom,
 		Commands:       commands,
 		Versions:       versions,
+		FollowerCount:  stack.FollowerCount,
+		Owner:          "@" + owner,
+		OwnerURL:       "/users/" + owner,
+	}
+	auth := s.authViewFor(w, r)
+	view.ShowSignIn = auth.Enabled && !auth.SignedIn
+	if auth.SignedIn {
+		view.ShowFollow = true
+		view.CSRFToken = auth.CSRFToken
+		view.FollowAction = stackPath(owner, name) + "/follow"
+		if token, ok := strictCookie(r, sessionCookieName, 256); ok {
+			following, e := s.authRegistry.IsFollowing(r.Context(), token, owner, name)
+			if e == nil && following {
+				view.Following = true
+				view.FollowAction = stackPath(owner, name) + "/unfollow"
+			}
+		}
 	}
 	if len(stack.Versions) > 0 {
 		view.LatestTrust = stack.Versions[0].TrustTier
@@ -115,7 +140,7 @@ func (s *server) handleStack(w http.ResponseWriter, r *http.Request, owner, name
 	if stack.NextVersionsOffset != nil {
 		view.NextURL = stackPageURL(owner, name, pageNumber+1)
 	}
-	s.renderDetailPage(w, "@"+owner+"/"+name, pageData{StackPage: view})
+	s.renderDetailPage(w, "@"+owner+"/"+name, pageData{StackPage: view, Auth: auth})
 }
 
 func (s *server) handleVersion(w http.ResponseWriter, r *http.Request, owner, name, rawVersion string) {
@@ -162,7 +187,7 @@ func (s *server) handleVersion(w http.ResponseWriter, r *http.Request, owner, na
 		Manifest:      manifest,
 		Findings:      scanFindingViews(version.ScanReport),
 	}
-	s.renderDetailPage(w, "@"+owner+"/"+name+" version "+strconv.Itoa(versionNumber), pageData{VersionPage: view})
+	s.renderDetailPage(w, "@"+owner+"/"+name+" version "+strconv.Itoa(versionNumber), pageData{VersionPage: view, Auth: s.authViewFor(w, r)})
 }
 
 func (s *server) renderDetailPage(w http.ResponseWriter, title string, data pageData) {

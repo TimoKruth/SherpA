@@ -57,6 +57,11 @@ func (f *socialFakeStore) FollowStack(_ context.Context, userID int64, owner, na
 	return f.follow, f.followErr
 }
 
+func (f *socialFakeStore) GetFollow(_ context.Context, userID int64, owner, name string) (store.Follow, error) {
+	f.lastUserID, f.lastOwner, f.lastName = userID, owner, name
+	return f.follow, f.followErr
+}
+
 func (f *socialFakeStore) UnfollowStack(_ context.Context, userID int64, owner, name string) error {
 	f.unfollowCalls++
 	f.lastUserID, f.lastOwner, f.lastName = userID, owner, name
@@ -173,6 +178,18 @@ func TestFollowAndListPagination(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), `"ref":"@alice/reviewer"`) || !strings.Contains(rr.Body.String(), `"follower_count":3`) {
 		t.Fatalf("follow body = %s", rr.Body.String())
 	}
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, socialRequest(http.MethodGet, "/v1/me/follows/alice/reviewer", "token", ""))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"ref":"@alice/reviewer"`) {
+		t.Fatalf("get follow = %d %s", rr.Code, rr.Body.String())
+	}
+	st.followErr = store.ErrNotFound
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, socialRequest(http.MethodGet, "/v1/me/follows/alice/missing", "token", ""))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing follow = %d %s", rr.Code, rr.Body.String())
+	}
+	st.followErr = nil
 
 	st.follows = []store.Follow{
 		{Owner: "alice", Name: "one"}, {Owner: "alice", Name: "two"}, {Owner: "bob", Name: "three"},

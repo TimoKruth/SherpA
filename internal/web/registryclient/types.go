@@ -23,16 +23,17 @@ type SearchResult struct {
 }
 
 type SearchStack struct {
-	Ref        string   `json:"ref"`
-	Name       string   `json:"name"`
-	Owner      string   `json:"owner"`
-	Summary    string   `json:"summary"`
-	Tags       []string `json:"tags"`
-	Harness    string   `json:"harness"`
-	Version    int      `json:"version"`
-	TrustTier  string   `json:"trust_tier"`
-	ForkedFrom string   `json:"forked_from"`
-	RepoURL    string   `json:"repo_url"`
+	Ref           string   `json:"ref"`
+	Name          string   `json:"name"`
+	Owner         string   `json:"owner"`
+	Summary       string   `json:"summary"`
+	Tags          []string `json:"tags"`
+	Harness       string   `json:"harness"`
+	Version       int      `json:"version"`
+	TrustTier     string   `json:"trust_tier"`
+	ForkedFrom    string   `json:"forked_from"`
+	RepoURL       string   `json:"repo_url"`
+	FollowerCount int      `json:"follower_count"`
 }
 
 type Stack struct {
@@ -45,6 +46,7 @@ type Stack struct {
 	RepoURL            string           `json:"repo_url"`
 	Versions           []VersionSummary `json:"versions"`
 	NextVersionsOffset *int             `json:"next_versions_offset,omitempty"`
+	FollowerCount      int              `json:"follower_count"`
 }
 
 type VersionSummary struct {

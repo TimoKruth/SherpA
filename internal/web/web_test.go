@@ -21,6 +21,7 @@ type fakeRegistry struct {
 	searchResult  registryclient.SearchResult
 	stackResult   registryclient.Stack
 	versionResult registryclient.Version
+	userResult    registryclient.UserProfile
 	err           error
 	searchCalls   []registryclient.SearchQuery
 	stackCalls    []struct {
@@ -33,6 +34,18 @@ type fakeRegistry struct {
 		name    string
 		version int
 	}
+	userCalls []struct {
+		handle string
+		page   registryclient.Page
+	}
+}
+
+func (f *fakeRegistry) GetUser(_ context.Context, handle string, page registryclient.Page) (registryclient.UserProfile, error) {
+	f.userCalls = append(f.userCalls, struct {
+		handle string
+		page   registryclient.Page
+	}{handle: handle, page: page})
+	return f.userResult, f.err
 }
 
 func (f *fakeRegistry) Search(_ context.Context, query registryclient.SearchQuery) (registryclient.SearchResult, error) {
@@ -59,7 +72,7 @@ func (f *fakeRegistry) GetVersion(_ context.Context, owner, name string, version
 }
 
 func (f *fakeRegistry) calls() int {
-	return len(f.searchCalls) + len(f.stackCalls) + len(f.versionCalls)
+	return len(f.searchCalls) + len(f.stackCalls) + len(f.versionCalls) + len(f.userCalls)
 }
 
 func newTestHandler(t *testing.T, registry Registry, options ...Options) http.Handler {

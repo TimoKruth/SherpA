@@ -19,6 +19,7 @@ type Registry interface {
 	Search(context.Context, registryclient.SearchQuery) (registryclient.SearchResult, error)
 	GetStack(context.Context, string, string, registryclient.Page) (registryclient.Stack, error)
 	GetVersion(context.Context, string, string, int) (registryclient.Version, error)
+	GetUser(context.Context, string, registryclient.Page) (registryclient.UserProfile, error)
 }
 
 func (s *server) canonicalURL(routePath string) string {

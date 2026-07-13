@@ -23,6 +23,17 @@ type pageData struct {
 	SearchPage     *searchPageView
 	StackPage      *stackPageView
 	VersionPage    *versionPageView
+	Auth           authView
+	DashboardPage  *dashboardPageView
+	ProfilePage    *profilePageView
+	AuthError      bool
+}
+
+type authView struct {
+	Enabled   bool
+	SignedIn  bool
+	Login     string
+	CSRFToken string
 }
 
 type renderer struct {

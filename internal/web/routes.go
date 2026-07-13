@@ -35,14 +35,40 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthCallback(w, r)
 		return
 	case "/auth/error":
-		if r.Method != http.MethodGet { s.renderError(w,http.StatusMethodNotAllowed);return }
-		s.renderError(w,http.StatusUnauthorized);return
+		if r.Method != http.MethodGet {
+			s.renderError(w, http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.renderer.render(w, http.StatusUnauthorized, pageData{Title: "Sign-in failed", Robots: "noindex", Auth: authView{Enabled: s.authRegistry != nil}, AuthError: true}); err != nil {
+			writeFallbackError(w)
+		}
+		return
 	case "/logout":
 		if r.Method != http.MethodPost {
 			s.renderError(w, http.StatusMethodNotAllowed)
 			return
 		}
 		s.handleLogout(w, r)
+		return
+	case "/dashboard":
+		if r.Method != http.MethodGet {
+			s.renderError(w, http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleDashboard(w, r)
+		return
+	}
+	if r.Method == http.MethodPost {
+		segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		switch {
+		case len(segments) == 4 && segments[0] == "stacks" && (segments[3] == "follow" || segments[3] == "unfollow"):
+			s.handleFollowMutation(w, r, segments[1], segments[2], segments[3] == "unfollow")
+		case len(segments) == 4 && segments[0] == "dashboard" && segments[1] == "seen":
+			s.handleSeenMutation(w, r, segments[2], segments[3])
+		default:
+			w.Header().Set("Allow", http.MethodGet)
+			s.renderError(w, http.StatusMethodNotAllowed)
+		}
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -85,6 +111,8 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 
 	segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	switch {
+	case len(segments) == 2 && segments[0] == "users":
+		s.handleProfile(w, r, segments[1])
 	case len(segments) == 3 && segments[0] == "stacks":
 		s.handleStack(w, r, segments[1], segments[2])
 	case len(segments) == 5 && segments[0] == "stacks" && segments[3] == "v":

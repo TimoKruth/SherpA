@@ -17,9 +17,9 @@
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
-  <header class="site-header"><a class="site-brand" href="/"><img class="brand-mark" src="/static/sherpa-mark.png" width="32" height="32" alt=""><span>SherpA</span></a></header>
+  <header class="site-header"><a class="site-brand" href="/"><img class="brand-mark" src="/static/sherpa-mark.png" width="32" height="32" alt=""><span>SherpA</span></a>{{if .Auth.Enabled}}<nav class="account-nav" aria-label="Account">{{if .Auth.SignedIn}}<a href="/dashboard">{{.Auth.Login}}</a><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{.Auth.CSRFToken}}"><button type="submit" class="button-secondary">Sign out</button></form>{{else}}<a href="/login">Sign in</a>{{end}}</nav>{{end}}</header>
   <main id="main-content" tabindex="-1">
-    {{if .ErrorTitle}}{{template "error-content" .}}{{else if .SearchPage}}{{if .SearchPage.Home}}{{template "home-content" .SearchPage}}{{else}}{{template "search-content" .SearchPage}}{{end}}{{else if .StackPage}}{{template "stack-content" .StackPage}}{{else if .VersionPage}}{{template "version-content" .VersionPage}}{{else}}{{template "placeholder-content" .}}{{end}}
+    {{if .AuthError}}{{template "auth-error-content" .}}{{else if .ErrorTitle}}{{template "error-content" .}}{{else if .DashboardPage}}{{template "dashboard-content" .DashboardPage}}{{else if .ProfilePage}}{{template "profile-content" .ProfilePage}}{{else if .SearchPage}}{{if .SearchPage.Home}}{{template "home-content" .SearchPage}}{{else}}{{template "search-content" .SearchPage}}{{end}}{{else if .StackPage}}{{template "stack-content" .StackPage}}{{else if .VersionPage}}{{template "version-content" .VersionPage}}{{else}}{{template "placeholder-content" .}}{{end}}
   </main>
 </body>
 </html>{{end}}

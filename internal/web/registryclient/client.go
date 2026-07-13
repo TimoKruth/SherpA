@@ -62,7 +62,7 @@ func validSessionToken(value string) bool {
 func (c *Client) Me(ctx context.Context, token string) (Me, error) {
 	var result Me
 	err := c.authRequest(ctx, http.MethodGet, "/v1/me", nil, nil, token, &result, http.StatusOK)
-	if err == nil && (result.Login == "" || (result.Purpose != "cli" && result.Purpose != "web")) {
+	if err == nil && (!validSegment(result.Login) || (result.Purpose != "cli" && result.Purpose != "web")) {
 		err = ErrBadGateway
 	}
 	return result, err
@@ -77,8 +77,30 @@ func (c *Client) Follow(ctx context.Context, token, owner, name string) (Follow,
 		return out, ErrBadGateway
 	}
 	err := c.authRequest(ctx, http.MethodPut, "/v1/me/follows/"+url.PathEscape(owner)+"/"+url.PathEscape(name), nil, nil, token, &out, http.StatusOK)
+	if err == nil && !validFollow(out, owner, name) {
+		err = ErrBadGateway
+	}
 	return out, err
 }
+
+func (c *Client) IsFollowing(ctx context.Context, token, owner, name string) (bool, error) {
+	var out Follow
+	if !validSegment(owner) || !validSegment(name) {
+		return false, ErrBadGateway
+	}
+	err := c.authRequest(ctx, http.MethodGet, "/v1/me/follows/"+url.PathEscape(owner)+"/"+url.PathEscape(name), nil, nil, token, &out, http.StatusOK)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !validFollow(out, owner, name) {
+		return false, ErrBadGateway
+	}
+	return true, nil
+}
+
 func (c *Client) Unfollow(ctx context.Context, token, owner, name string) error {
 	if !validSegment(owner) || !validSegment(name) {
 		return ErrBadGateway
@@ -95,8 +117,16 @@ func (c *Client) Follows(ctx context.Context, token string, limit int, cursor st
 		q.Set("cursor", cursor)
 	}
 	err := c.authRequest(ctx, http.MethodGet, "/v1/me/follows", q, nil, token, &out, http.StatusOK)
-	if err == nil && len(out.Follows) > limit {
-		err = ErrBadGateway
+	if err == nil {
+		if len(out.Follows) > limit || len(out.NextCursor) > 512 {
+			err = ErrBadGateway
+		}
+		for _, follow := range out.Follows {
+			if !validFollow(follow, follow.Owner, follow.Name) {
+				err = ErrBadGateway
+				break
+			}
+		}
 	}
 	return out, err
 }
@@ -110,8 +140,16 @@ func (c *Client) Updates(ctx context.Context, token string, limit int, cursor st
 		q.Set("cursor", cursor)
 	}
 	err := c.authRequest(ctx, http.MethodGet, "/v1/me/updates", q, nil, token, &out, http.StatusOK)
-	if err == nil && len(out.Updates) > limit {
-		err = ErrBadGateway
+	if err == nil {
+		if len(out.Updates) > limit || len(out.NextCursor) > 512 {
+			err = ErrBadGateway
+		}
+		for _, update := range out.Updates {
+			if !validUpdate(update) {
+				err = ErrBadGateway
+				break
+			}
+		}
 	}
 	return out, err
 }
@@ -121,6 +159,9 @@ func (c *Client) MarkSeen(ctx context.Context, token, owner, name string, versio
 		return out, ErrBadGateway
 	}
 	err := c.authRequest(ctx, http.MethodPut, "/v1/me/follows/"+url.PathEscape(owner)+"/"+url.PathEscape(name)+"/seen", nil, map[string]int{"version": version}, token, &out, http.StatusOK)
+	if err == nil && !validFollow(out, owner, name) {
+		err = ErrBadGateway
+	}
 	return out, err
 }
 func (c *Client) PutTrial(ctx context.Context, token, owner, name string, version int, verdict string) error {
@@ -139,8 +180,13 @@ func (c *Client) GetUser(ctx context.Context, handle string, page Page) (UserPro
 	if err := c.get(ctx, "/v1/users/"+url.PathEscape(handle), q, &out); err != nil {
 		return out, err
 	}
-	if out.Handle != handle || out.TotalStackFollows < 0 || len(out.Stacks) > page.Limit {
+	if out.Handle != handle || out.TotalStackFollows < 0 || len(out.Stacks) > page.Limit || (out.NextOffset != nil && *out.NextOffset < 0) {
 		return UserProfile{}, ErrBadGateway
+	}
+	for _, stack := range out.Stacks {
+		if !validSearchStack(stack) {
+			return UserProfile{}, ErrBadGateway
+		}
 	}
 	return out, nil
 }
@@ -293,11 +339,11 @@ func (c *Client) Search(ctx context.Context, query SearchQuery) (SearchResult, e
 	if err := c.get(ctx, "/v1/search", values, &result); err != nil {
 		return SearchResult{}, err
 	}
-	if result.NextOffset != nil && *result.NextOffset < 0 {
+	if len(result.Stacks) > query.Page.Limit || (result.NextOffset != nil && *result.NextOffset < 0) {
 		return SearchResult{}, ErrBadGateway
 	}
 	for _, stack := range result.Stacks {
-		if !validRepoURL(stack.RepoURL) {
+		if !validSearchStack(stack) {
 			return SearchResult{}, ErrBadGateway
 		}
 	}
@@ -316,7 +362,7 @@ func (c *Client) GetStack(ctx context.Context, owner, name string, page Page) (S
 	if err := c.get(ctx, path, values, &stack); err != nil {
 		return Stack{}, err
 	}
-	if stack.Owner != owner || stack.Name != name || !validRepoURL(stack.RepoURL) || (stack.NextVersionsOffset != nil && *stack.NextVersionsOffset < 0) {
+	if stack.Owner != owner || stack.Name != name || stack.FollowerCount < 0 || len(stack.Versions) > page.Limit || !validRepoURL(stack.RepoURL) || (stack.NextVersionsOffset != nil && *stack.NextVersionsOffset < 0) {
 		return Stack{}, ErrBadGateway
 	}
 	return stack, nil
@@ -417,4 +463,23 @@ func validRepoURL(raw string) bool {
 		return false
 	}
 	return parsed.Opaque == "" && parsed.User == nil && parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == ""
+}
+
+func validSearchStack(stack SearchStack) bool {
+	return validSegment(stack.Owner) && validSegment(stack.Name) &&
+		stack.Ref == "@"+stack.Owner+"/"+stack.Name && stack.Version > 0 &&
+		stack.FollowerCount >= 0 && validRepoURL(stack.RepoURL)
+}
+
+func validFollow(follow Follow, owner, name string) bool {
+	return validSegment(owner) && validSegment(name) && follow.Owner == owner && follow.Name == name &&
+		follow.Ref == "@"+owner+"/"+name && follow.LatestVersion > 0 &&
+		follow.LastSeenVersion >= 0 && follow.LastSeenVersion <= follow.LatestVersion &&
+		follow.FollowerCount >= 0
+}
+
+func validUpdate(update Update) bool {
+	return validSegment(update.Owner) && validSegment(update.Name) &&
+		update.Ref == "@"+update.Owner+"/"+update.Name && update.Version > 0 &&
+		update.SeenVersion >= 0 && update.SeenVersion < update.Version
 }

@@ -17,6 +17,7 @@ type AuthRegistry interface {
 	Me(context.Context, string) (registryclient.Me, error)
 	Revoke(context.Context, string) error
 	Follow(context.Context, string, string, string) (registryclient.Follow, error)
+	IsFollowing(context.Context, string, string, string) (bool, error)
 	Unfollow(context.Context, string, string, string) error
 	Follows(context.Context, string, int, string) (registryclient.FollowPage, error)
 	Updates(context.Context, string, int, string) (registryclient.UpdatePage, error)
@@ -131,26 +132,45 @@ func (s *server) validMutation(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *server) currentSession(w http.ResponseWriter, r *http.Request) (registryclient.Me, string, bool) {
+	identity, token, err := s.sessionIdentity(w, r)
+	return identity, token, err == nil
+}
+
+func (s *server) sessionIdentity(w http.ResponseWriter, r *http.Request) (registryclient.Me, string, error) {
 	if s.authRegistry == nil {
-		return registryclient.Me{}, "", false
+		return registryclient.Me{}, "", registryclient.ErrUnauthorized
 	}
 	token, ok := strictCookie(r, sessionCookieName, 256)
 	if !ok {
-		return registryclient.Me{}, "", false
+		return registryclient.Me{}, "", registryclient.ErrUnauthorized
 	}
 	identity, err := s.authRegistry.Me(r.Context(), token)
 	if errors.Is(err, registryclient.ErrUnauthorized) {
 		clearAuthCookies(w)
-		return registryclient.Me{}, "", false
+		return registryclient.Me{}, "", err
 	}
 	if err != nil {
-		return registryclient.Me{}, "", false
+		return registryclient.Me{}, "", err
 	}
 	if identity.Purpose != "web" {
 		clearAuthCookies(w)
-		return registryclient.Me{}, "", false
+		return registryclient.Me{}, "", registryclient.ErrUnauthorized
 	}
-	return identity, token, true
+	return identity, token, nil
+}
+
+func (s *server) authViewFor(w http.ResponseWriter, r *http.Request) authView {
+	view := authView{Enabled: s.authRegistry != nil}
+	if !view.Enabled {
+		return view
+	}
+	identity, _, ok := s.currentSession(w, r)
+	if ok {
+		view.SignedIn = true
+		view.Login = identity.Login
+		view.CSRFToken = csrfToken(r)
+	}
+	return view
 }
 
 func csrfToken(r *http.Request) string {

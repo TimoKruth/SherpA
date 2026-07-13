@@ -190,6 +190,7 @@ All responses are JSON, body-limited, unknown-field rejecting, and `Cache-Contro
 | `GET /v1/me` | Login and session purpose |
 | `DELETE /v1/me/session` | Revoke presented session; `204` |
 | `PUT /v1/me/follows/{owner}/{name}` | Idempotently follow; returns current follow state |
+| `GET /v1/me/follows/{owner}/{name}` | Constant-time current follow state; `404` when not followed |
 | `DELETE /v1/me/follows/{owner}/{name}` | Idempotently unfollow; `204` |
 | `GET /v1/me/follows?limit=&cursor=` | At most 50, owner/name ordered with opaque cursor |
 | `GET /v1/me/updates?limit=&cursor=` | Events after each follow's seen version, newest first |

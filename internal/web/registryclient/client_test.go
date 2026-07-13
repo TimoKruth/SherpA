@@ -116,6 +116,9 @@ func TestAuthenticatedClientMethodsScopeBearerAndUseFixedRoutes(t *testing.T) {
 	if _, err := client.Follow(ctx, "web-session", "alice", "reviewer"); err != nil {
 		t.Fatal(err)
 	}
+	if following, err := client.IsFollowing(ctx, "web-session", "alice", "reviewer"); err != nil || !following {
+		t.Fatalf("following=%v err=%v", following, err)
+	}
 	if err := client.Unfollow(ctx, "web-session", "alice", "reviewer"); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +137,7 @@ func TestAuthenticatedClientMethodsScopeBearerAndUseFixedRoutes(t *testing.T) {
 	if err := client.Revoke(ctx, "web-session"); err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) != 9 {
+	if len(paths) != 10 {
 		t.Fatalf("paths = %v", paths)
 	}
 	if _, err := client.Me(ctx, ""); !errors.Is(err, ErrUnauthorized) {
@@ -163,6 +166,91 @@ func TestAuthenticatedClientMapsErrorsAndRejectsRedirects(t *testing.T) {
 	client := mustClient(t, redirect.URL, time.Second)
 	if _, err := client.Me(context.Background(), "token"); !errors.Is(err, ErrBadGateway) || targetCalls != 0 {
 		t.Fatalf("redirect error=%v target=%d", err, targetCalls)
+	}
+}
+
+func TestSocialAndProfileResponsesFailClosed(t *testing.T) {
+	validStack := `{"ref":"@alice/reviewer","name":"reviewer","owner":"alice","version":2,"repo_url":"https://registry.example/v1/stacks/alice/reviewer.git"}`
+	for _, tc := range []struct {
+		name string
+		body string
+		call func(*Client) error
+	}{
+		{
+			name: "profile negative count",
+			body: `{"handle":"alice","total_stack_follows":-1,"stacks":[]}`,
+			call: func(c *Client) error { _, err := c.GetUser(context.Background(), "alice", Page{Limit: 24}); return err },
+		},
+		{
+			name: "profile malformed stack",
+			body: `{"handle":"alice","total_stack_follows":1,"stacks":[` + strings.Replace(validStack, `"version":2`, `"version":0`, 1) + `]}`,
+			call: func(c *Client) error { _, err := c.GetUser(context.Background(), "alice", Page{Limit: 24}); return err },
+		},
+		{
+			name: "follow mismatched ref",
+			body: `{"ref":"@mallory/reviewer","owner":"alice","name":"reviewer","latest_version":2}`,
+			call: func(c *Client) error {
+				_, err := c.Follow(context.Background(), "token", "alice", "reviewer")
+				return err
+			},
+		},
+		{
+			name: "follow impossible seen version",
+			body: `{"follows":[{"ref":"@alice/reviewer","owner":"alice","name":"reviewer","latest_version":2,"last_seen_version":3}]}`,
+			call: func(c *Client) error { _, err := c.Follows(context.Background(), "token", 25, ""); return err },
+		},
+		{
+			name: "oversized next cursor",
+			body: `{"follows":[],"next_cursor":"` + strings.Repeat("x", 513) + `"}`,
+			call: func(c *Client) error { _, err := c.Follows(context.Background(), "token", 25, ""); return err },
+		},
+		{
+			name: "non-pending update",
+			body: `{"updates":[{"ref":"@alice/reviewer","owner":"alice","name":"reviewer","version":2,"seen_version":2}]}`,
+			call: func(c *Client) error { _, err := c.Updates(context.Background(), "token", 25, ""); return err },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(t, w, tc.body)
+			}))
+			defer server.Close()
+			if err := tc.call(mustClient(t, server.URL, time.Second)); !errors.Is(err, ErrBadGateway) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestGetUserUsesBoundedPublicRoute(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/root/v1/users/alice" || r.URL.Query().Get("limit") != "24" || r.URL.Query().Get("offset") != "24" || r.Header.Get("Authorization") != "" {
+			t.Errorf("request=%s %s?%s auth=%q", r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("Authorization"))
+		}
+		writeJSON(t, w, `{"handle":"alice","total_stack_follows":4,"stacks":[{"ref":"@alice/reviewer","name":"reviewer","owner":"alice","version":2,"repo_url":"https://registry.example/v1/stacks/alice/reviewer.git"}],"next_offset":48}`)
+	}))
+	defer server.Close()
+	profile, err := mustClient(t, server.URL+"/root", time.Second).GetUser(context.Background(), "alice", Page{Limit: 24, Offset: 24})
+	if err != nil || profile.Handle != "alice" || len(profile.Stacks) != 1 || profile.NextOffset == nil || *profile.NextOffset != 48 {
+		t.Fatalf("profile=%#v err=%v", profile, err)
+	}
+}
+
+func TestIsFollowingTreatsOnlyNotFoundAsFalse(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   error
+	}{
+		{status: http.StatusNotFound},
+		{status: http.StatusUnauthorized, want: ErrUnauthorized},
+		{status: http.StatusServiceUnavailable, want: ErrUnavailable},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.status) }))
+		following, err := mustClient(t, server.URL, time.Second).IsFollowing(context.Background(), "token", "alice", "reviewer")
+		server.Close()
+		if following || !errors.Is(err, tc.want) || (tc.want == nil && err != nil) {
+			t.Fatalf("status=%d following=%v err=%v", tc.status, following, err)
+		}
 	}
 }
 

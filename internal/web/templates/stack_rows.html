@@ -9,6 +9,7 @@
         <dt>Harness</dt><dd>{{if .Harness}}<span class="harness-chip">{{.Harness}}</span>{{end}}</dd>
         <dt>Latest version</dt><dd>v{{.Version}}</dd>
         <dt>Trust</dt><dd>{{if .TrustTier}}<span class="trust-tier{{if .TrustClass}} {{.TrustClass}}{{end}}">{{.TrustTier}}</span>{{end}}</dd>
+        <dt>Followers</dt><dd>{{.FollowerCount}}</dd>
       </dl>
       {{if .Tags}}<ul class="tag-list" aria-label="Tags">{{range .Tags}}<li class="tag">{{.}}</li>{{end}}</ul>{{end}}
       {{if .ForkedFromText}}<p>Forked from {{if .ForkedFromURL}}<a href="{{.ForkedFromURL}}">{{.ForkedFromText}}</a>{{else}}{{.ForkedFromText}}{{end}}</p>{{end}}

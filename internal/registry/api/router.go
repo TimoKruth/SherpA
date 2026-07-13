@@ -81,6 +81,7 @@ func NewWithOptions(st store.Store, cs content.ContentStore, adminToken string, 
 	mux.HandleFunc("GET /v1/me", s.handleMe)
 	mux.HandleFunc("DELETE /v1/me/session", s.handleRevokeSession)
 	mux.HandleFunc("PUT /v1/me/follows/{owner}/{name}", s.handleFollow)
+	mux.HandleFunc("GET /v1/me/follows/{owner}/{name}", s.handleGetFollow)
 	mux.HandleFunc("DELETE /v1/me/follows/{owner}/{name}", s.handleUnfollow)
 	mux.HandleFunc("GET /v1/me/follows", s.handleListFollows)
 	mux.HandleFunc("GET /v1/me/updates", s.handleListUpdates)

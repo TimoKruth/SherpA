@@ -130,6 +130,7 @@ type Store interface {
 	CreateWebGrant(ctx context.Context, userID int64, grantHash, handoffChallenge string, ttl time.Duration) error
 	ExchangeWebGrant(ctx context.Context, grantHash, handoffChallenge, sessionHash string, ttl time.Duration) (SessionIdentity, error)
 	FollowStack(ctx context.Context, userID int64, owner, name string) (Follow, error)
+	GetFollow(ctx context.Context, userID int64, owner, name string) (Follow, error)
 	UnfollowStack(ctx context.Context, userID int64, owner, name string) error
 	ListFollows(ctx context.Context, userID int64, page FollowPage) ([]Follow, error)
 	ListUpdates(ctx context.Context, userID int64, page UpdatePage) ([]Update, error)

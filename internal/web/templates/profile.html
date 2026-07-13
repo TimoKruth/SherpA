@@ -1,0 +1,5 @@
+{{define "profile-content"}}
+<section class="catalog-intro"><h1>@{{.Handle}}</h1><p>{{.TotalStackFollows}} stack follows</p></section>
+{{template "stack-rows" .Stacks}}
+{{if or .PreviousURL .NextURL}}<nav class="pagination" aria-label="Expert stack pages">{{if .PreviousURL}}<a href="{{.PreviousURL}}" rel="prev">Previous</a>{{end}}{{if .NextURL}}<a href="{{.NextURL}}" rel="next">Next</a>{{end}}</nav>{{end}}
+{{end}}

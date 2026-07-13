@@ -335,6 +335,13 @@ func TestPostgresSocialContract(t *testing.T) {
 	if duplicate.CreatedAt != bobFollow.CreatedAt || duplicate.FollowerCount != 1 {
 		t.Fatalf("duplicate follow = %#v, first = %#v", duplicate, bobFollow)
 	}
+	gotFollow, err := st.GetFollow(ctx, bobID, "alice", "reviewer")
+	if err != nil || gotFollow.Owner != "alice" || gotFollow.Name != "reviewer" {
+		t.Fatalf("get follow = %#v, %v", gotFollow, err)
+	}
+	if _, err := st.GetFollow(ctx, bobID, "alice", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing get follow error = %v", err)
+	}
 	if _, err := st.FollowStack(ctx, bobID, "alice", "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing follow error = %v", err)
 	}

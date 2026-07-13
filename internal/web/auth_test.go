@@ -14,26 +14,50 @@ import (
 )
 
 type fakeAuthRegistry struct {
-	exchangeGrant  string
-	exchangeNonce  string
-	exchangeResult registryclient.WebSession
-	exchangeErr    error
-	meResult       registryclient.Me
-	meErr          error
-	meToken        string
-	revokeToken    string
-	revokeErr      error
-	revokeCalls    int
+	exchangeGrant    string
+	exchangeNonce    string
+	exchangeResult   registryclient.WebSession
+	exchangeErr      error
+	meResult         registryclient.Me
+	meErr            error
+	meToken          string
+	revokeToken      string
+	revokeErr        error
+	revokeCalls      int
+	stackResult      registryclient.Stack
+	stackErr         error
+	followsResult    registryclient.FollowPage
+	followsByCursor  map[string]registryclient.FollowPage
+	followsErr       error
+	followsCursors   []string
+	isFollowing      bool
+	isFollowingErr   error
+	isFollowingCalls []socialCall
+	updatesResult    registryclient.UpdatePage
+	updatesErr       error
+	updatesCursors   []string
+	followCalls      []socialCall
+	unfollowCalls    []socialCall
+	seenCalls        []seenCall
+}
+
+type socialCall struct{ token, owner, name string }
+type seenCall struct {
+	socialCall
+	version int
 }
 
 func (*fakeAuthRegistry) Search(context.Context, registryclient.SearchQuery) (registryclient.SearchResult, error) {
 	return registryclient.SearchResult{}, nil
 }
-func (*fakeAuthRegistry) GetStack(context.Context, string, string, registryclient.Page) (registryclient.Stack, error) {
-	return registryclient.Stack{}, registryclient.ErrNotFound
+func (f *fakeAuthRegistry) GetStack(context.Context, string, string, registryclient.Page) (registryclient.Stack, error) {
+	return f.stackResult, f.stackErr
 }
 func (*fakeAuthRegistry) GetVersion(context.Context, string, string, int) (registryclient.Version, error) {
 	return registryclient.Version{}, registryclient.ErrNotFound
+}
+func (*fakeAuthRegistry) GetUser(context.Context, string, registryclient.Page) (registryclient.UserProfile, error) {
+	return registryclient.UserProfile{}, registryclient.ErrNotFound
 }
 func (f *fakeAuthRegistry) ExchangeWebGrant(_ context.Context, g, n string) (registryclient.WebSession, error) {
 	f.exchangeGrant, f.exchangeNonce = g, n
@@ -48,17 +72,31 @@ func (f *fakeAuthRegistry) Revoke(_ context.Context, t string) error {
 	f.revokeToken = t
 	return f.revokeErr
 }
-func (*fakeAuthRegistry) Follow(context.Context, string, string, string) (registryclient.Follow, error) {
+func (f *fakeAuthRegistry) Follow(_ context.Context, token, owner, name string) (registryclient.Follow, error) {
+	f.followCalls = append(f.followCalls, socialCall{token, owner, name})
 	return registryclient.Follow{}, nil
 }
-func (*fakeAuthRegistry) Unfollow(context.Context, string, string, string) error { return nil }
-func (*fakeAuthRegistry) Follows(context.Context, string, int, string) (registryclient.FollowPage, error) {
-	return registryclient.FollowPage{}, nil
+func (f *fakeAuthRegistry) IsFollowing(_ context.Context, token, owner, name string) (bool, error) {
+	f.isFollowingCalls = append(f.isFollowingCalls, socialCall{token, owner, name})
+	return f.isFollowing, f.isFollowingErr
 }
-func (*fakeAuthRegistry) Updates(context.Context, string, int, string) (registryclient.UpdatePage, error) {
-	return registryclient.UpdatePage{}, nil
+func (f *fakeAuthRegistry) Unfollow(_ context.Context, token, owner, name string) error {
+	f.unfollowCalls = append(f.unfollowCalls, socialCall{token, owner, name})
+	return nil
 }
-func (*fakeAuthRegistry) MarkSeen(context.Context, string, string, string, int) (registryclient.Follow, error) {
+func (f *fakeAuthRegistry) Follows(_ context.Context, _ string, _ int, cursor string) (registryclient.FollowPage, error) {
+	f.followsCursors = append(f.followsCursors, cursor)
+	if f.followsByCursor != nil {
+		return f.followsByCursor[cursor], f.followsErr
+	}
+	return f.followsResult, f.followsErr
+}
+func (f *fakeAuthRegistry) Updates(_ context.Context, _ string, _ int, cursor string) (registryclient.UpdatePage, error) {
+	f.updatesCursors = append(f.updatesCursors, cursor)
+	return f.updatesResult, f.updatesErr
+}
+func (f *fakeAuthRegistry) MarkSeen(_ context.Context, token, owner, name string, version int) (registryclient.Follow, error) {
+	f.seenCalls = append(f.seenCalls, seenCall{socialCall{token, owner, name}, version})
 	return registryclient.Follow{}, nil
 }
 func (*fakeAuthRegistry) PutTrial(context.Context, string, string, string, int, string) error {
@@ -149,6 +187,15 @@ func TestAuthCallbackRejectsMalformedOrDuplicateCookiesWithoutExchange(t *testin
 				t.Fatalf("exchange called with %q", fake.exchangeGrant)
 			}
 		})
+	}
+}
+
+func TestAuthErrorOffersBoundedRetryWithoutReflectingQuery(t *testing.T) {
+	handler := newAuthHandler(t, &fakeAuthRegistry{}, nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "https://web.example/auth/error?error=planted-secret", nil))
+	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "Try again") || strings.Contains(rr.Body.String(), "planted-secret") || rr.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("status=%d headers=%v body=%s", rr.Code, rr.Header(), rr.Body.String())
 	}
 }
 

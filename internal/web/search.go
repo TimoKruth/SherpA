@@ -40,6 +40,7 @@ type searchRowView struct {
 	TrustClass     string
 	ForkedFromText string
 	ForkedFromURL  string
+	FollowerCount  int
 }
 
 func (s *server) handleHome(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +57,7 @@ func (s *server) handleHome(w http.ResponseWriter, r *http.Request) {
 		Form:        newSearchFormView(registryclient.SearchQuery{}),
 		Rows:        searchRows(result.Stacks),
 	}
-	s.renderSearchPage(w, "SherpA", false, page)
+	s.renderSearchPage(w, r, "SherpA", false, page)
 }
 
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -82,10 +83,10 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if result.NextOffset != nil {
 		page.NextURL = searchURL(query, pageNumber+1)
 	}
-	s.renderSearchPage(w, "Search", true, page)
+	s.renderSearchPage(w, r, "Search", true, page)
 }
 
-func (s *server) renderSearchPage(w http.ResponseWriter, title string, noIndex bool, page *searchPageView) {
+func (s *server) renderSearchPage(w http.ResponseWriter, r *http.Request, title string, noIndex bool, page *searchPageView) {
 	robots := "index,follow"
 	if noIndex {
 		robots = "noindex,follow"
@@ -94,7 +95,7 @@ func (s *server) renderSearchPage(w http.ResponseWriter, title string, noIndex b
 	if description == "" {
 		description = "Search versioned SherpA agent setups by harness and tag."
 	}
-	if err := s.renderer.render(w, http.StatusOK, pageData{Title: title, Description: description, Robots: robots, SearchPage: page}); err != nil {
+	if err := s.renderer.render(w, http.StatusOK, pageData{Title: title, Description: description, Robots: robots, SearchPage: page, Auth: s.authViewFor(w, r)}); err != nil {
 		s.logger.Printf("render search page failed error_type=%T", err)
 		writeFallbackError(w)
 	}
@@ -124,6 +125,7 @@ func searchRows(stacks []registryclient.SearchStack) []searchRowView {
 			TrustTier:      stack.TrustTier,
 			TrustClass:     trustTierClass(stack.TrustTier),
 			ForkedFromText: stack.ForkedFrom,
+			FollowerCount:  stack.FollowerCount,
 		}
 		if validSegment(stack.Owner) && validSegment(stack.Name) {
 			row.StackURL = stackPath(stack.Owner, stack.Name)

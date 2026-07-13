@@ -572,6 +572,10 @@ func (f *fakeStore) FollowStack(context.Context, int64, string, string) (store.F
 	return store.Follow{}, store.ErrNotFound
 }
 
+func (f *fakeStore) GetFollow(context.Context, int64, string, string) (store.Follow, error) {
+	return store.Follow{}, store.ErrNotFound
+}
+
 func (f *fakeStore) UnfollowStack(context.Context, int64, string, string) error { return nil }
 
 func (f *fakeStore) ListFollows(context.Context, int64, store.FollowPage) ([]store.Follow, error) {

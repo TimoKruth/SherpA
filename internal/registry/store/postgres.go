@@ -286,6 +286,30 @@ func (s *PostgresStore) FollowStack(ctx context.Context, userID int64, owner, na
 	return follow, nil
 }
 
+func (s *PostgresStore) GetFollow(ctx context.Context, userID int64, owner, name string) (Follow, error) {
+	row := s.pool.QueryRow(ctx, `
+		select s.id, owner.handle, s.name, coalesce(s.summary, ''), coalesce(s.harness, ''),
+			coalesce(s.tags, array[]::text[]), latest.version, coalesce(latest.git_tag, ''),
+			coalesce(latest.trust_tier, 'unreviewed'), latest.published_at,
+			coalesce(seen.version, 0), (select count(*) from follows fc where fc.stack_id = s.id),
+			f.created_at
+		from follows f
+		join stacks s on s.id = f.stack_id
+		join users owner on owner.id = s.owner_id
+		join lateral (
+			select version, git_tag, trust_tier, published_at
+			from stack_versions where stack_id = s.id order by version desc limit 1
+		) latest on true
+		left join stack_versions seen on seen.id = f.last_seen_version_id
+		where f.user_id = $1 and owner.handle = $2 and s.name = $3
+	`, userID, owner, name)
+	follow, err := scanFollow(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Follow{}, ErrNotFound
+	}
+	return follow, err
+}
+
 func (s *PostgresStore) UnfollowStack(ctx context.Context, userID int64, owner, name string) error {
 	_, err := s.pool.Exec(ctx, `
 		delete from follows f

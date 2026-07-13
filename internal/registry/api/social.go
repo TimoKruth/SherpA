@@ -132,6 +132,28 @@ func (s *server) handleFollow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, followView(follow))
 }
 
+func (s *server) handleGetFollow(w http.ResponseWriter, r *http.Request) {
+	identity, ok := s.personalIdentity(w, r)
+	if !ok {
+		return
+	}
+	owner, name, ok := socialRef(w, r)
+	if !ok {
+		return
+	}
+	follow, err := s.store.GetFollow(r.Context(), identity.UserID, owner, name)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "follow not found")
+		return
+	}
+	if err != nil {
+		s.logger.Printf("get follow failed error_type=%T", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusOK, followView(follow))
+}
+
 func (s *server) handleUnfollow(w http.ResponseWriter, r *http.Request) {
 	identity, ok := s.personalIdentity(w, r)
 	if !ok {

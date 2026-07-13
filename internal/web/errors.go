@@ -18,7 +18,7 @@ var publicErrors = map[int]publicError{
 	http.StatusUnauthorized:        {Title: "Sign-in failed", Message: "The sign-in request could not be completed."},
 	http.StatusForbidden:           {Title: "Request rejected", Message: "The request could not be verified."},
 	http.StatusNotFound:            {Title: "Page not found", Message: "The requested page could not be found."},
-	http.StatusMethodNotAllowed:    {Title: "Method not allowed", Message: "This page only accepts GET requests."},
+	http.StatusMethodNotAllowed:    {Title: "Method not allowed", Message: "This page does not accept that request method."},
 	http.StatusBadGateway:          {Title: "Registry response error", Message: "The registry returned an invalid response."},
 	http.StatusServiceUnavailable:  {Title: "Registry unavailable", Message: "The registry is temporarily unavailable."},
 	http.StatusInternalServerError: {Title: "Page unavailable", Message: "The page could not be rendered."},
@@ -31,7 +31,9 @@ func (s *server) renderRegistryError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, registryclient.ErrBadGateway):
 		status = http.StatusBadGateway
-	case errors.Is(err, registryclient.ErrUnavailable), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, registryclient.ErrForbidden):
+		status = http.StatusForbidden
+	case errors.Is(err, registryclient.ErrUnavailable), errors.Is(err, registryclient.ErrRateLimited), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusServiceUnavailable
 	}
 	s.renderError(w, status)

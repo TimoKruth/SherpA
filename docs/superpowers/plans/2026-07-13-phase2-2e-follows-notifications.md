@@ -4,7 +4,7 @@
 > implementation workers when available, with a separate adversarial/Fable-class review for the
 > session, OAuth/grant, feed-concurrency, and CSRF boundaries.
 
-**Status:** In progress; Tasks 1-7 implemented and verified
+**Status:** In progress; Tasks 1-8 implemented and verified
 
 **Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
 session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
@@ -32,6 +32,12 @@ Task 7 adds distinct pinned public/private website registry configuration, beare
 personal client calls, secure login/session/CSRF cookies, exact Origin and double-submit CSRF
 checks, server-side grant exchange, web-purpose identity revalidation, and safe logout. Cookie,
 redirect, auth failure, focused race, and repository-wide verification are green.
+Task 8 adds public follower counts and expert pages, secure follow/unfollow/seen forms, a private
+noindex dashboard with bounded cursor navigation, explicit signed-out and degraded states, and a
+constant-time exact-follow read so stack rendering does not scale with account size. Registry/web
+race tests, the uncached repository suite (with the Docker store harness rerun in isolation after
+one concurrent port-inspection flake), vet, command builds, browser checks at 1280 and 375 pixels,
+and whitespace checks are green.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -404,6 +410,10 @@ construct either.
 ### Task 8: Build follow-aware pages, dashboard, and expert profile
 
 **Files:**
+- Modify: `internal/registry/store/store.go`
+- Modify: `internal/registry/store/postgres.go`
+- Modify: `internal/registry/api/router.go`
+- Modify: `internal/registry/api/social.go`
 - Modify: `internal/web/registryclient/types.go`
 - Modify: `internal/web/search.go`
 - Modify: `internal/web/search_test.go`
@@ -425,22 +435,23 @@ construct either.
 - Modify: `internal/web/static/app.js` only if progressive status text needs an existing-safe extension
 - Modify: `internal/web/presentation_test.go`
 
-- [ ] **Step 1: Write signed-out/signed-in rendering tests.** Header sign-in/account state,
+- [x] **Step 1: Write signed-out/signed-in rendering tests.** Header sign-in/account state,
   follower count, Follow/Following forms, CSRF field, local return path, expired-session fallback,
   and no token/cookie in HTML. Anonymous pages preserve 2d canonical/indexing behavior.
-- [ ] **Step 2: Write dashboard tests.** Empty/followed/pending/seen states; explicit mark reviewed;
+- [x] **Step 2: Write dashboard tests.** Empty/followed/pending/seen states; explicit mark reviewed;
   bounded navigation; no implicit seen call on GET; noindex/no-store; `401` clears session;
   `5xx` maps to safe degraded output without clearing a valid cookie.
-- [ ] **Step 3: Write expert-page tests.** Bounded public stack list, sum labeled "stack follows",
+- [x] **Step 3: Write expert-page tests.** Bounded public stack list, sum labeled "stack follows",
   exact canonical URL, unknown handle 404, pagination, and adversarial publisher values. Do not invent
   bio/avatar fields or make counts into ranking claims.
-- [ ] **Step 4: Implement SSR routes/forms.** Add `GET /users/{handle}`, `GET /dashboard`, and
+- [x] **Step 4: Implement SSR routes/forms.** Add a constant-time exact-follow read,
+  `GET /users/{handle}`, `GET /dashboard`, and
   POST-only follow/unfollow/seen routes. Validate return paths as exact local routes, not arbitrary
   URLs. Use `303` after successful mutations to prevent resubmission.
-- [ ] **Step 5: Extend Alpine styling accessibly.** Reuse established compact surfaces/badges;
+- [x] **Step 5: Extend Alpine styling accessibly.** Reuse established compact surfaces/badges;
   add clear signed-in navigation, follower text, update rows, and standard form buttons. No nested
   cards, inline script/style, external asset, layout shift, or color-only state.
-- [ ] **Step 6: Verify templates and commit.** Run:
+- [x] **Step 6: Verify templates and commit.** Run:
   `go test -race ./internal/web/... ./cmd/web`
   `git commit -m "feat(web): add follows dashboard and expert profiles"`
 

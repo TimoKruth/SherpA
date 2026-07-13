@@ -7,7 +7,11 @@
   <dl class="meta-grid">
     <dt>Harness</dt><dd>{{if .Harness}}<span class="harness-chip">{{.Harness}}</span>{{end}}</dd>
     {{if .LatestTrust}}<dt>Latest trust</dt><dd><span class="trust-tier{{if .LatestTrustClass}} {{.LatestTrustClass}}{{end}}">{{.LatestTrust}}</span></dd>{{end}}
+    <dt>Followers</dt><dd>{{.FollowerCount}}</dd>
+    <dt>Expert</dt><dd><a href="{{.OwnerURL}}">{{.Owner}}</a></dd>
   </dl>
+  {{if .ShowFollow}}<form class="inline-action" method="post" action="{{.FollowAction}}"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit">{{if .Following}}Following{{else}}Follow{{end}}</button></form>{{end}}
+  {{if .ShowSignIn}}<a class="button-link inline-action" href="/login">Sign in to follow</a>{{end}}
   {{if .Tags}}<ul class="tag-list" aria-label="Tags">{{range .Tags}}<li class="tag">{{.}}</li>{{end}}</ul>{{end}}
   {{if .ForkedFromText}}<p>Forked from {{if .ForkedFromURL}}<a href="{{.ForkedFromURL}}">{{.ForkedFromText}}</a>{{else}}{{.ForkedFromText}}{{end}}</p>{{end}}
 </article>
