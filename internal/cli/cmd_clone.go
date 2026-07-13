@@ -27,14 +27,23 @@ func cmdClone(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
+	var origin *state.RegistryOrigin
+	if owner, name, ok := parseRegistryStackRef(req.url); ok {
+		base, err := normalizeRegistryBase(os.Getenv("SHERPA_REGISTRY_URL"))
+		if err != nil {
+			return err
+		}
+		origin = &state.RegistryOrigin{RegistryURL: base, Owner: owner, Stack: name}
+	}
 	cloneURL, err := resolveRegistryRef(req.url)
 	if err != nil {
 		return err
 	}
-	installed, err := installStack(ctx, cloneURL, req.name)
+	installed, err := installStack(ctx, cloneURL, req.name, origin)
 	if err != nil {
 		return err
 	}
+	enqueueAndAttemptFollow(ctx, installed.registry)
 	fmt.Fprintf(ctx.Stdout, "cloned %q into %s (not activated)\n", installed.name, installed.dir)
 	approved, err := review.RunGate(installed.dir, installed.manifest, req.mode, ctx.Stdin, ctx.Stdout)
 	if err != nil {
@@ -57,9 +66,10 @@ type installResult struct {
 	name     string
 	dir      string
 	manifest *stack.Manifest
+	registry *state.RegistryOrigin
 }
 
-func installStack(ctx *Ctx, url, name string) (*installResult, error) {
+func installStack(ctx *Ctx, url, name string, registry *state.RegistryOrigin) (*installResult, error) {
 	// Fail fast on an explicit --name collision before touching the network.
 	if name != "" && profileExists(ctx.Home, name) {
 		return nil, fmt.Errorf("profile %q already exists", name)
@@ -139,7 +149,12 @@ func installStack(ctx *Ctx, url, name string) (*installResult, error) {
 	if err := os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
 		return nil, err
 	}
-	st.Profiles[name] = state.Profile{Name: name, Path: final, Origin: url, Harness: m.Harness}
+	if registry != nil {
+		copy := *registry
+		copy.Version = m.Version
+		registry = &copy
+	}
+	st.Profiles[name] = state.Profile{Name: name, Path: final, Origin: url, Harness: m.Harness, Registry: registry}
 
 	// Commit point: the atomic rename makes the profile appear fully-formed or not
 	// at all. If the subsequent Save fails, remove the just-installed tree so the
@@ -152,7 +167,7 @@ func installStack(ctx *Ctx, url, name string) (*installResult, error) {
 		return nil, err
 	}
 
-	return &installResult{name: name, dir: final, manifest: m}, nil
+	return &installResult{name: name, dir: final, manifest: m, registry: registry}, nil
 }
 
 // parseCloneArgs pulls the git URL, optional --name, and review mode out of the

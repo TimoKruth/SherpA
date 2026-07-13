@@ -110,12 +110,39 @@ func resolveRegistryRef(ref string) (string, error) {
 	if registryURL == "" {
 		return "", fmt.Errorf("SHERPA_REGISTRY_URL is required for registry ref %q", ref)
 	}
-	ownerName := strings.TrimPrefix(ref, "@")
-	owner, name, ok := strings.Cut(ownerName, "/")
-	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+	owner, name, ok := parseRegistryStackRef(ref)
+	if !ok {
 		return "", fmt.Errorf("registry ref must be @owner/name")
 	}
 	return registryEndpoint(registryURL, "v1", "stacks", owner, name+".git")
+}
+
+func parseRegistryStackRef(ref string) (string, string, bool) {
+	if len(ref) < 4 || len(ref) > 256 || !strings.HasPrefix(ref, "@") {
+		return "", "", false
+	}
+	owner, name, ok := strings.Cut(strings.TrimPrefix(ref, "@"), "/")
+	if !ok || len(owner) > 100 || len(name) > 100 || !validRegistrySegment(owner) || !validRegistrySegment(name) {
+		return "", "", false
+	}
+	return owner, name, true
+}
+
+func validRegistrySegment(value string) bool {
+	if value == "" || value == ".." || strings.HasPrefix(value, ".") {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func registryEndpoint(base string, elems ...string) (string, error) {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -58,6 +59,9 @@ func cmdUpdate(ctx *Ctx, args []string) error {
 	}
 	if _, err := gitutil.Run(profile.Path, "merge-base", "--is-ancestor", tag, "local"); err == nil {
 		fmt.Fprintf(ctx.Stdout, "%s is already up to date with %s\n", profile.Name, tag)
+		if version, ok := parseVersionTag(tag); ok {
+			recordAndMarkProfileVersion(ctx, profile, version)
+		}
 		return nil
 	}
 
@@ -78,6 +82,9 @@ func cmdUpdate(ctx *Ctx, args []string) error {
 		return err
 	}
 	if res.Merged {
+		if version, ok := parseVersionTag(tag); ok {
+			recordAndMarkProfileVersion(ctx, profile, version)
+		}
 		fmt.Fprintf(ctx.Stdout, "updated %s to %s (backup: %s)\n", profile.Name, tag, res.BackupRef)
 		return nil
 	}
@@ -87,6 +94,44 @@ func cmdUpdate(ctx *Ctx, args []string) error {
 	fmt.Fprintf(ctx.Stdout, "The merge was aborted automatically — your profile and local branch are untouched (nothing to --abort).\n")
 	fmt.Fprintf(ctx.Stdout, "To resolve by hand: git -C %s merge %s\n", profile.Path, tag)
 	return fmt.Errorf("update aborted: %d conflicting file(s)", len(res.Conflicts))
+}
+
+func recordAndMarkProfileVersion(ctx *Ctx, profile state.Profile, version int) {
+	if profile.Registry == nil || version < 1 {
+		return
+	}
+	st, err := state.Load(ctx.Home)
+	if err != nil {
+		fmt.Fprintln(ctx.Stderr, "warning: update succeeded but registry version could not be recorded")
+		return
+	}
+	current, ok := st.Profiles[profile.Name]
+	if !ok || current.Registry == nil {
+		return
+	}
+	if version > current.Registry.Version {
+		current.Registry.Version = version
+		st.Profiles[profile.Name] = current
+		if err := st.Save(ctx.Home); err != nil {
+			fmt.Fprintln(ctx.Stderr, "warning: update succeeded but registry version could not be recorded")
+			return
+		}
+	}
+	session, err := registryUserSession(ctx.Home, current.Registry.RegistryURL)
+	if err != nil {
+		fmt.Fprintln(ctx.Stderr, "warning: update succeeded but registry seen state was not synced")
+		return
+	}
+	client, err := newRegistrySocialClient(current.Registry.RegistryURL, session.AccessToken)
+	if err != nil {
+		fmt.Fprintln(ctx.Stderr, "warning: update succeeded but registry seen state was not synced")
+		return
+	}
+	if _, err := client.MarkSeen(context.Background(), current.Registry.Owner, current.Registry.Stack, version); err != nil {
+		fmt.Fprintln(ctx.Stderr, "warning: update succeeded but registry seen state was not synced")
+		return
+	}
+	markCachedSeen(ctx.Home, current.Registry.RegistryURL, current.Registry.Owner, current.Registry.Stack, version)
 }
 
 // updateTarget resolves the optional positional profile argument, defaulting

@@ -2,10 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"sherpa/internal/harness"
@@ -46,10 +50,114 @@ func TestCloneInstallsWithoutActivating(t *testing.T) {
 	if !ok || p.Origin != repo {
 		t.Fatalf("profile not recorded: %+v", st.Profiles)
 	}
+	if p.Registry != nil {
+		t.Fatalf("direct URL clone inferred registry identity: %#v", p.Registry)
+	}
 	b, _ := os.ReadFile(filepath.Join(p.Path, "settings.json"))
 	if strings.Contains(string(b), "mcpServers") && strings.Contains(string(b), "npx") {
 		t.Fatal("executables not quarantined on install")
 	}
+}
+
+func TestRegistryCloneRecordsIdentityAndAutoFollows(t *testing.T) {
+	repo := makeExpertRepo(t, true)
+	var followStatus atomic.Int32
+	followStatus.Store(http.StatusOK)
+	var followCalls atomic.Int32
+	srv := newCloneRegistryServer(t, repo, &followStatus, &followCalls)
+	defer srv.Close()
+	home := setupHome(t)
+	t.Setenv("SHERPA_REGISTRY_URL", srv.URL+"/")
+	if err := saveRegistrySession(home, srv.URL, "user-session", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"clone", "@jane/jane-stack", "--name", "registry-clone"}, &out, &errOut); code != 0 {
+		t.Fatalf("clone failed: %s", errOut.String())
+	}
+	st, _ := state.Load(home)
+	profile := st.Profiles["registry-clone"]
+	if profile.Registry == nil || profile.Registry.RegistryURL != srv.URL || profile.Registry.Owner != "jane" || profile.Registry.Stack != "jane-stack" || profile.Registry.Version != 1 {
+		t.Fatalf("registry identity = %#v", profile.Registry)
+	}
+	if pending := st.Registries[srv.URL].PendingFollows; len(pending) != 0 {
+		t.Fatalf("pending follows = %v", pending)
+	}
+	if followCalls.Load() != 1 {
+		t.Fatalf("follow calls = %d", followCalls.Load())
+	}
+}
+
+func TestRegistryCloneQueuesFailedFollowAndStatusRecovers(t *testing.T) {
+	repo := makeExpertRepo(t, true)
+	var followStatus atomic.Int32
+	followStatus.Store(http.StatusServiceUnavailable)
+	var followCalls atomic.Int32
+	srv := newCloneRegistryServer(t, repo, &followStatus, &followCalls)
+	defer srv.Close()
+	home := setupHome(t)
+	t.Setenv("SHERPA_REGISTRY_URL", srv.URL)
+	if err := saveRegistrySession(home, srv.URL, "user-session", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"clone", "@jane/jane-stack", "--name", "queued-clone"}, &out, &errOut); code != 0 {
+		t.Fatalf("clone failed: %s", errOut.String())
+	}
+	st, _ := state.Load(home)
+	if _, ok := st.Profiles["queued-clone"]; !ok {
+		t.Fatal("follow failure rolled back installed profile")
+	}
+	if got := st.Registries[srv.URL].PendingFollows; len(got) != 1 || got[0] != "@jane/jane-stack" {
+		t.Fatalf("pending follows = %v", got)
+	}
+	if !strings.Contains(errOut.String(), "remains queued") {
+		t.Fatalf("warning = %q", errOut.String())
+	}
+	followStatus.Store(http.StatusOK)
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"status"}, &out, &errOut); code != 0 {
+		t.Fatalf("status failed: %s", errOut.String())
+	}
+	st, _ = state.Load(home)
+	if got := st.Registries[srv.URL].PendingFollows; len(got) != 0 {
+		t.Fatalf("pending after recovery = %v", got)
+	}
+	if followCalls.Load() != 2 {
+		t.Fatalf("follow calls = %d", followCalls.Load())
+	}
+}
+
+func newCloneRegistryServer(t *testing.T, repo string, followStatus *atomic.Int32, followCalls *atomic.Int32) *httptest.Server {
+	t.Helper()
+	root := t.TempDir()
+	bare := filepath.Join(root, "jane", "jane-stack.git")
+	if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitOut(t, root, "init", "--bare", bare)
+	gitOut(t, repo, "push", bare, "main:main", "--tags")
+	gitOut(t, bare, "update-server-info")
+	files := http.StripPrefix("/v1/stacks", http.FileServer(http.Dir(root)))
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/me/follows/jane/jane-stack":
+			followCalls.Add(1)
+			status := int(followStatus.Load())
+			if status != http.StatusOK {
+				w.WriteHeader(status)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ref": "@jane/jane-stack", "owner": "jane", "name": "jane-stack", "latest_version": 1, "followed_at": "2026-07-13T12:00:00Z"})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/me/updates":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"updates":[]}`))
+		default:
+			files.ServeHTTP(w, r)
+		}
+	}))
 }
 
 func TestCloneApproveAllFlagApprovesQuarantinedCapabilities(t *testing.T) {

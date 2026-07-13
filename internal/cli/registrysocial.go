@@ -103,6 +103,9 @@ func newRegistrySocialClient(baseURL, token string) (*registrySocialClient, erro
 func (c *registrySocialClient) Follow(ctx context.Context, owner, name string) (registryFollow, error) {
 	var follow registryFollow
 	err := c.do(ctx, http.MethodPut, []string{"v1", "me", "follows", owner, name}, nil, nil, &follow, http.StatusOK)
+	if err == nil && (follow.Owner != owner || follow.Name != name || !validRegistryFollow(follow)) {
+		err = errRegistryResponse
+	}
 	return follow, err
 }
 
@@ -120,6 +123,18 @@ func (c *registrySocialClient) ListFollows(ctx context.Context, limit int, curso
 		query.Set("cursor", cursor)
 	}
 	err := c.do(ctx, http.MethodGet, []string{"v1", "me", "follows"}, query, nil, &page, http.StatusOK)
+	if err == nil {
+		if len(page.Follows) > limit {
+			err = errRegistryResponse
+		} else {
+			for _, follow := range page.Follows {
+				if !validRegistryFollow(follow) {
+					err = errRegistryResponse
+					break
+				}
+			}
+		}
+	}
 	return page, err
 }
 
@@ -133,6 +148,18 @@ func (c *registrySocialClient) ListUpdates(ctx context.Context, limit int, curso
 		query.Set("cursor", cursor)
 	}
 	err := c.do(ctx, http.MethodGet, []string{"v1", "me", "updates"}, query, nil, &page, http.StatusOK)
+	if err == nil {
+		if len(page.Updates) > limit {
+			err = errRegistryResponse
+		} else {
+			for _, update := range page.Updates {
+				if !validRegistryUpdate(update) {
+					err = errRegistryResponse
+					break
+				}
+			}
+		}
+	}
 	return page, err
 }
 
@@ -233,4 +260,17 @@ func classifyRegistryStatus(status int) error {
 		}
 		return errRegistryResponse
 	}
+}
+
+func validRegistryFollow(follow registryFollow) bool {
+	return len(follow.Owner) <= 100 && len(follow.Name) <= 100 &&
+		validRegistrySegment(follow.Owner) && validRegistrySegment(follow.Name) &&
+		follow.LatestVersion >= 0 && follow.LastSeenVersion >= 0 &&
+		follow.LastSeenVersion <= follow.LatestVersion && follow.FollowerCount >= 0
+}
+
+func validRegistryUpdate(update registryUpdate) bool {
+	return len(update.Owner) <= 100 && len(update.Name) <= 100 &&
+		validRegistrySegment(update.Owner) && validRegistrySegment(update.Name) &&
+		update.Version > 0 && update.SeenVersion >= 0 && update.SeenVersion < update.Version
 }

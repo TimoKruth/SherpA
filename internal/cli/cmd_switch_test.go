@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -101,5 +104,60 @@ func TestStatusListsProfiles(t *testing.T) {
 	s := out.String()
 	if !strings.Contains(s, "mine") || !strings.Contains(s, "jane") || !strings.Contains(s, "active") {
 		t.Fatalf("status output: %q", s)
+	}
+}
+
+func TestStatusPrintsLocalStateAndCachedUpdatesWhenRegistryFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	home := setupHome(t)
+	t.Setenv("SHERPA_REGISTRY_URL", srv.URL)
+	if err := saveRegistrySession(home, srv.URL, "user-session", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Load(home)
+	st.Registries[srv.URL] = state.RegistryState{CachedUpdates: []state.UpdateSummary{{Owner: "alice", Stack: "reviewer", Version: 3, SeenVersion: 1}}}
+	if err := st.Save(home); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"status"}, &out, &errOut); code != 0 {
+		t.Fatalf("status failed: %s", errOut.String())
+	}
+	if !strings.Contains(out.String(), "active: mine") || !strings.Contains(out.String(), "@alice/reviewer  v1 -> v3") {
+		t.Fatalf("stdout = %q", out.String())
+	}
+	if strings.Count(errOut.String(), "warning:") != 1 {
+		t.Fatalf("stderr = %q", errOut.String())
+	}
+}
+
+func TestStatusRefreshesPendingUpdatesWithoutMarkingSeen(t *testing.T) {
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"updates": []map[string]any{{
+			"ref": "@alice/reviewer", "owner": "alice", "name": "reviewer", "version": 2, "seen_version": 1,
+			"published_at": "2026-07-13T12:00:00Z",
+		}}})
+	}))
+	defer srv.Close()
+	home := setupHome(t)
+	t.Setenv("SHERPA_REGISTRY_URL", srv.URL)
+	if err := saveRegistrySession(home, srv.URL, "user-session", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"status"}, &out, &errOut); code != 0 {
+		t.Fatal(errOut.String())
+	}
+	if len(methods) != 1 || methods[0] != "GET /v1/me/updates" {
+		t.Fatalf("requests = %v", methods)
+	}
+	if !strings.Contains(out.String(), "@alice/reviewer  v1 -> v2") {
+		t.Fatalf("stdout = %q", out.String())
 	}
 }

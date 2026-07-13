@@ -224,3 +224,25 @@ func TestNewRegistrySocialClientRequiresUserToken(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestRegistrySocialClientRejectsSemanticallyUnboundedPages(t *testing.T) {
+	for _, body := range []string{
+		`{"updates":[{"owner":"alice","name":"reviewer","version":2,"seen_version":1},{"owner":"alice","name":"builder","version":2,"seen_version":1}]}`,
+		`{"updates":[{"owner":"alice","name":"bad/name","version":2,"seen_version":1}]}`,
+		`{"updates":[{"owner":"alice","name":"reviewer","version":2,"seen_version":2}]}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, body)
+		}))
+		client, err := newRegistrySocialClient(srv.URL, "session")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.ListUpdates(context.Background(), 1, "")
+		srv.Close()
+		if !errors.Is(err, errRegistryResponse) {
+			t.Fatalf("body %s: error = %v", body, err)
+		}
+	}
+}

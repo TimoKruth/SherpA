@@ -2,10 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"sherpa/internal/state"
 )
 
 // publishUpstreamV2 commits changes in the origin repo and tags them v2, the
@@ -168,5 +173,83 @@ func TestNewestVersionTagOrdersNumerically(t *testing.T) {
 	}
 	if got := newestVersionTag(nil); got != "" {
 		t.Fatalf("newestVersionTag(nil) = %q, want empty", got)
+	}
+}
+
+func TestSuccessfulRegistryUpdateRecordsVersionAndMarksSeen(t *testing.T) {
+	var seenVersion int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/v1/me/follows/jane/jane-stack/seen" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]int
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		seenVersion = body["version"]
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ref": "@jane/jane-stack", "owner": "jane", "name": "jane-stack", "last_seen_version": seenVersion, "followed_at": "2026-07-13T12:00:00Z"})
+	}))
+	defer srv.Close()
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	dir := cloneForUpdate(t, repo, "registry-update")
+	st, _ := state.Load(home)
+	profile := st.Profiles["registry-update"]
+	profile.Registry = &state.RegistryOrigin{RegistryURL: srv.URL, Owner: "jane", Stack: "jane-stack", Version: 1}
+	st.Profiles[profile.Name] = profile
+	if err := st.Save(home); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveRegistrySession(home, srv.URL, "user-session", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	publishUpstreamV2(t, repo, map[string]string{"NEW.md": "new\n"})
+	var out, errOut bytes.Buffer
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errOut, Stdin: strings.NewReader("yes\n")}
+	if err := cmdUpdate(ctx, []string{"registry-update"}); err != nil {
+		t.Fatalf("update: %v\n%s", err, errOut.String())
+	}
+	st, _ = state.Load(home)
+	if got := st.Profiles["registry-update"].Registry.Version; got != 2 {
+		t.Fatalf("registry version = %d", got)
+	}
+	if seenVersion != 2 {
+		t.Fatalf("seen version = %d", seenVersion)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "NEW.md")); err != nil {
+		t.Fatalf("merge did not land: %v", err)
+	}
+}
+
+func TestSeenSyncFailureNeverRollsBackSuccessfulUpdate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	home := setupHome(t)
+	repo := makeExpertRepo(t, true)
+	dir := cloneForUpdate(t, repo, "registry-update-offline")
+	st, _ := state.Load(home)
+	profile := st.Profiles["registry-update-offline"]
+	profile.Registry = &state.RegistryOrigin{RegistryURL: srv.URL, Owner: "jane", Stack: "jane-stack", Version: 1}
+	st.Profiles[profile.Name] = profile
+	_ = st.Save(home)
+	_ = saveRegistrySession(home, srv.URL, "user-session", "bob")
+	publishUpstreamV2(t, repo, map[string]string{"OFFLINE.md": "landed\n"})
+	var out, errOut bytes.Buffer
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errOut, Stdin: strings.NewReader("yes\n")}
+	if err := cmdUpdate(ctx, []string{"registry-update-offline"}); err != nil {
+		t.Fatalf("update failed because seen sync failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "OFFLINE.md")); err != nil {
+		t.Fatalf("successful merge rolled back: %v", err)
+	}
+	st, _ = state.Load(home)
+	if got := st.Profiles["registry-update-offline"].Registry.Version; got != 2 {
+		t.Fatalf("registry version = %d", got)
+	}
+	if !strings.Contains(errOut.String(), "update succeeded but registry seen state was not synced") {
+		t.Fatalf("warning = %q", errOut.String())
 	}
 }

@@ -58,7 +58,7 @@ func cmdTry(ctx *Ctx, args []string) error {
 		if err != nil {
 			return err
 		}
-		installed, err := installStack(ctx, cloneURL, req.name)
+		installed, err := installStack(ctx, cloneURL, req.name, nil)
 		if err != nil {
 			return err
 		}

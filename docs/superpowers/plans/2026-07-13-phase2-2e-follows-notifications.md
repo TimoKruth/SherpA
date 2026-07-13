@@ -4,7 +4,7 @@
 > implementation workers when available, with a separate adversarial/Fable-class review for the
 > session, OAuth/grant, feed-concurrency, and CSRF boundaries.
 
-**Status:** In progress; Tasks 1-3 implemented and verified
+**Status:** In progress; Tasks 1-4 implemented and verified
 
 **Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
 session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
@@ -16,6 +16,10 @@ Task 3 adds canonical registry issuers shared by session and non-secret state, b
 state migration, atomic `0600` saves, an issuer-scoped user-session lookup, and a typed bounded
 social client that rejects redirects and redacts all remote details from errors. Its focused race
 suite and the repository-wide verification gates are green.
+Task 4 adds strict follow/unfollow/update commands, bounded terminal-safe update output, offline-
+safe status caching, registry identity on registry-ref clones, recoverable auto-follow, and
+best-effort monotonic seen synchronization after successful local updates. Real Git-over-HTTP
+clone tests, focused race tests, and the repository-wide verification gates are green.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -231,24 +235,24 @@ second URL equivalence rule.
 - Modify: `internal/cli/cmd_update_test.go`
 - Modify: `internal/cli/cmd_run.go` only if command registration/help is centralized there
 
-- [ ] **Step 1: Write command parsing tests.** Strictly accept `@owner/name`, bounded `--limit`,
+- [x] **Step 1: Write command parsing tests.** Strictly accept `@owner/name`, bounded `--limit`,
   and `@owner/name@vN` only for `--seen`. Reject URL refs, extra args, zero/negative versions,
   unknown flags, missing issuer, issuer mismatch, and admin-only auth.
-- [ ] **Step 2: Write offline/failure semantics.** `status` prints local data and exits success
+- [x] **Step 2: Write offline/failure semantics.** `status` prints local data and exits success
   during timeout/401/5xx with one bounded warning. Feed/follow commands fail clearly without
   changing profiles. Listing updates never calls git, harness launch, mark-seen, or state save
   except to refresh the non-secret cache after a successful response.
-- [ ] **Step 3: Implement commands.** `follow`/`unfollow` are idempotent. `updates` presents ref,
+- [x] **Step 3: Implement commands.** `follow`/`unfollow` are idempotent. `updates` presents ref,
   seen→new version, changelog, time, and `sherpa update` guidance. `--seen` is an explicit network
   mutation. Output is terminal-safe: remove control characters and bound server text.
-- [ ] **Step 4: Implement recoverable clone auto-follow.** Parse registry identity before URL
+- [x] **Step 4: Implement recoverable clone auto-follow.** Parse registry identity before URL
   resolution; write it to the installed profile; only after atomic install succeeds enqueue and
   attempt follow. Direct URL clones do not infer identity. Login/network failure warns and leaves
   one deduplicated pending entry; later social/status calls retry it.
-- [ ] **Step 5: Integrate successful update.** Track/update the profile's immutable registry
+- [x] **Step 5: Integrate successful update.** Track/update the profile's immutable registry
   version after merge commit succeeds, then best-effort mark it seen. A seen failure warns and is
   retryable; it never rolls back the merge or changes active-profile safety.
-- [ ] **Step 6: Verify and commit.** Run:
+- [x] **Step 6: Verify and commit.** Run:
   `go test -race ./internal/cli ./internal/state ./internal/update`
   `git commit -m "feat(cli): add follows and pending update awareness"`
 
