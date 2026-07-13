@@ -9,7 +9,7 @@
 <body>
   <header><a href="/">SherpA</a></header>
   <main>
-    {{if .ErrorTitle}}{{template "error-content" .}}{{else}}{{template "placeholder-content" .}}{{end}}
+    {{if .ErrorTitle}}{{template "error-content" .}}{{else if .SearchPage}}{{if .SearchPage.Home}}{{template "home-content" .SearchPage}}{{else}}{{template "search-content" .SearchPage}}{{end}}{{else}}{{template "placeholder-content" .}}{{end}}
   </main>
 </body>
 </html>{{end}}

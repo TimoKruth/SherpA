@@ -16,6 +16,7 @@ type pageData struct {
 	ErrorTitle   string
 	ErrorMessage string
 	NoIndex      bool
+	SearchPage   *searchPageView
 }
 
 type renderer struct {

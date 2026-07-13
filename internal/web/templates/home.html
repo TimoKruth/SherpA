@@ -1,0 +1,8 @@
+{{define "home-content"}}
+<section aria-labelledby="home-heading">
+  <h1 id="home-heading">{{.Heading}}</h1>
+  <p>{{.Description}}</p>
+  {{template "search-form" .Form}}
+</section>
+{{template "stack-rows" .}}
+{{end}}

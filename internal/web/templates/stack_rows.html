@@ -1,0 +1,21 @@
+{{define "stack-rows"}}
+<section aria-label="Stacks">
+  {{if .Rows}}
+    {{range .Rows}}
+    <article>
+      <h2>{{if .StackURL}}<a href="{{.StackURL}}">{{.Ref}}</a>{{else}}{{.Ref}}{{end}}</h2>
+      {{if .Summary}}<p>{{.Summary}}</p>{{end}}
+      <dl>
+        <dt>Harness</dt><dd>{{.Harness}}</dd>
+        <dt>Latest version</dt><dd>v{{.Version}}</dd>
+        <dt>Trust</dt><dd>{{.TrustTier}}</dd>
+      </dl>
+      {{if .Tags}}<ul aria-label="Tags">{{range .Tags}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      {{if .ForkedFromText}}<p>Forked from {{if .ForkedFromURL}}<a href="{{.ForkedFromURL}}">{{.ForkedFromText}}</a>{{else}}{{.ForkedFromText}}{{end}}</p>{{end}}
+    </article>
+    {{end}}
+  {{else}}
+    <p>No stacks found.</p>
+  {{end}}
+</section>
+{{end}}

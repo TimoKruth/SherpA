@@ -55,31 +55,6 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) handleHome(w http.ResponseWriter, r *http.Request) {
-	_, err := s.registry.Search(r.Context(), registryclient.SearchQuery{
-		Page: registryclient.Page{Limit: searchPageSize},
-	})
-	if err != nil {
-		s.renderRegistryError(w, err)
-		return
-	}
-	s.renderSuccess(w, "SherpA")
-}
-
-func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	query, ok := parseSearchQuery(r.URL.Query())
-	if !ok {
-		s.renderError(w, http.StatusBadRequest)
-		return
-	}
-	_, err := s.registry.Search(r.Context(), query)
-	if err != nil {
-		s.renderRegistryError(w, err)
-		return
-	}
-	s.renderSuccess(w, "Search")
-}
-
 func (s *server) handleStack(w http.ResponseWriter, r *http.Request, owner, name string) {
 	if !validSegment(owner) || !validSegment(name) {
 		s.renderError(w, http.StatusNotFound)

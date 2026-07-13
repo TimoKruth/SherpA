@@ -1,0 +1,16 @@
+{{define "search-form"}}
+<form action="/search" method="get" role="search">
+  <label for="search-q">Search</label>
+  <input id="search-q" name="q" type="search" maxlength="200" value="{{.Q}}">
+  <label for="search-harness">Harness</label>
+  <select id="search-harness" name="harness">
+    <option value=""{{if .AnySelected}} selected{{end}}>Any</option>
+    <option value="claude-code"{{if .ClaudeCodeSelected}} selected{{end}}>Claude Code</option>
+    <option value="codex"{{if .CodexSelected}} selected{{end}}>Codex</option>
+    {{if .OtherHarness}}<option value="{{.Harness}}" selected>{{.Harness}}</option>{{end}}
+  </select>
+  <label for="search-tag">Tag</label>
+  <input id="search-tag" name="tag" maxlength="64" value="{{.Tag}}">
+  <button type="submit">Search</button>
+</form>
+{{end}}
