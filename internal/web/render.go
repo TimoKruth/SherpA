@@ -17,6 +17,8 @@ type pageData struct {
 	ErrorMessage string
 	NoIndex      bool
 	SearchPage   *searchPageView
+	StackPage    *stackPageView
+	VersionPage  *versionPageView
 }
 
 type renderer struct {

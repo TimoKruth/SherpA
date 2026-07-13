@@ -1,0 +1,37 @@
+{{define "version-content"}}
+<article>
+  <header><h1>{{.Ref}} version {{.Version}}</h1></header>
+  <dl>
+    <dt>Git tag</dt><dd>{{.GitTag}}</dd>
+    {{if .PublishedISO}}<dt>Published</dt><dd><time datetime="{{.PublishedISO}}">{{.PublishedText}}</time></dd>{{end}}
+    <dt>Trust</dt><dd>{{.TrustTier}}</dd>
+    {{if .Changelog}}<dt>Changelog</dt><dd>{{.Changelog}}</dd>{{end}}
+  </dl>
+</article>
+{{template "commands" .}}
+<section aria-labelledby="manifest-heading">
+  <h2 id="manifest-heading">Manifest</h2>
+  <dl>
+    {{if .Manifest.Name}}<dt>Name</dt><dd>{{.Manifest.Name}}</dd>{{end}}
+    {{if .Manifest.Owner}}<dt>Owner</dt><dd>{{.Manifest.Owner}}</dd>{{end}}
+    {{if .Manifest.Version}}<dt>Version</dt><dd>{{.Manifest.Version}}</dd>{{end}}
+    {{if .Manifest.Harness}}<dt>Harness</dt><dd>{{.Manifest.Harness}}</dd>{{end}}
+    {{if .Manifest.Summary}}<dt>Summary</dt><dd>{{.Manifest.Summary}}</dd>{{end}}
+    {{if .Manifest.ForkedFrom}}<dt>Forked from</dt><dd>{{.Manifest.ForkedFrom}}</dd>{{end}}
+  </dl>
+  {{if .Manifest.Tags}}<h3>Tags</h3><ul>{{range .Manifest.Tags}}<li>{{.}}</li>{{end}}</ul>{{end}}
+  {{if .Manifest.Hooks}}<h3>Hooks</h3><ul>{{range .Manifest.Hooks}}<li><strong>{{.Path}}</strong> — {{.Event}} — {{.Purpose}}</li>{{end}}</ul>{{end}}
+  {{if .Manifest.MCPServers}}<h3>MCP servers</h3><ul>{{range .Manifest.MCPServers}}<li><strong>{{.Name}}</strong> — {{.Transport}} — <code>{{.Command}}</code> — {{.Purpose}}</li>{{end}}</ul>{{end}}
+  {{if .Manifest.Parameters}}<h3>Parameters</h3><ul>{{range .Manifest.Parameters}}<li><strong>{{.Name}}</strong> — {{.Description}} — {{if .Required}}required{{else}}optional{{end}}</li>{{end}}</ul>{{end}}
+  {{if .Manifest.UnknownJSON}}<h3>Additional fields</h3><pre>{{.Manifest.UnknownJSON}}</pre>{{end}}
+</section>
+<section aria-labelledby="scan-heading">
+  <h2 id="scan-heading">Registry scan</h2>
+  {{if .Findings}}
+    <p>{{len .Findings}} finding(s)</p>
+    <ul>{{range .Findings}}<li>{{.Kind}} — {{.File}}{{if .Line}}:{{.Line}}{{end}}</li>{{end}}</ul>
+  {{else}}
+    <p>Registry scan passed with no findings.</p>
+  {{end}}
+</section>
+{{end}}

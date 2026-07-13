@@ -1,0 +1,16 @@
+{{define "stack-content"}}
+<article>
+  <header>
+    <h1>{{.Ref}}</h1>
+    {{if .Summary}}<p>{{.Summary}}</p>{{end}}
+  </header>
+  <dl>
+    <dt>Harness</dt><dd>{{.Harness}}</dd>
+    {{if .LatestTrust}}<dt>Latest trust</dt><dd>{{.LatestTrust}}</dd>{{end}}
+  </dl>
+  {{if .Tags}}<ul aria-label="Tags">{{range .Tags}}<li>{{.}}</li>{{end}}</ul>{{end}}
+  {{if .ForkedFromText}}<p>Forked from {{if .ForkedFromURL}}<a href="{{.ForkedFromURL}}">{{.ForkedFromText}}</a>{{else}}{{.ForkedFromText}}{{end}}</p>{{end}}
+</article>
+{{template "commands" .}}
+{{template "versions" .}}
+{{end}}

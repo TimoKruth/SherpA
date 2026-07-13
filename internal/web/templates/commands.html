@@ -1,0 +1,7 @@
+{{define "commands"}}
+<section aria-labelledby="commands-heading">
+  <h2 id="commands-heading">{{if .LatestLabel}}Try latest{{else}}Use this stack{{end}}</h2>
+  <p><code>{{.Commands.Try}}</code></p>
+  <p><code>{{.Commands.Clone}}</code></p>
+</section>
+{{end}}

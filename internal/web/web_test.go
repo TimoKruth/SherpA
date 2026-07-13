@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"html/template"
 	"io"
@@ -88,7 +89,13 @@ func TestExactRoutesAndInputs(t *testing.T) {
 		{name: "robots", path: "/robots.txt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			registry := &fakeRegistry{}
+			registry := &fakeRegistry{
+				stackResult: registryclient.Stack{RepoURL: "https://registry.example/v1/stacks/alice/reviewer.git"},
+				versionResult: registryclient.Version{
+					Version: 2, Manifest: json.RawMessage(`{}`),
+					RepoURL: "https://registry.example/v1/stacks/alice/reviewer.git",
+				},
+			}
 			handler := newTestHandler(t, registry)
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))
@@ -118,7 +125,7 @@ func TestExactRoutesAndInputs(t *testing.T) {
 }
 
 func TestSearchAndStackPageParsing(t *testing.T) {
-	registry := &fakeRegistry{}
+	registry := &fakeRegistry{stackResult: registryclient.Stack{RepoURL: "https://registry.example/v1/stacks/alice/reviewer.git"}}
 	handler := newTestHandler(t, registry)
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/search?q=++review++&harness=codex&tag=safe&page=2", nil))

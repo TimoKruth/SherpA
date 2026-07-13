@@ -55,47 +55,6 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *server) handleStack(w http.ResponseWriter, r *http.Request, owner, name string) {
-	if !validSegment(owner) || !validSegment(name) {
-		s.renderError(w, http.StatusNotFound)
-		return
-	}
-	pageNumber, ok := parsePage(r.URL.Query(), "versions_page")
-	if !ok {
-		s.renderError(w, http.StatusBadRequest)
-		return
-	}
-	page, ok := pageFromNumber(pageNumber, versionPageSize)
-	if !ok {
-		s.renderError(w, http.StatusBadRequest)
-		return
-	}
-	_, err := s.registry.GetStack(r.Context(), owner, name, page)
-	if err != nil {
-		s.renderRegistryError(w, err)
-		return
-	}
-	s.renderSuccess(w, "@"+owner+"/"+name)
-}
-
-func (s *server) handleVersion(w http.ResponseWriter, r *http.Request, owner, name, rawVersion string) {
-	if !validSegment(owner) || !validSegment(name) {
-		s.renderError(w, http.StatusNotFound)
-		return
-	}
-	version, ok := parsePositiveInteger(rawVersion)
-	if !ok {
-		s.renderError(w, http.StatusNotFound)
-		return
-	}
-	_, err := s.registry.GetVersion(r.Context(), owner, name, version)
-	if err != nil {
-		s.renderRegistryError(w, err)
-		return
-	}
-	s.renderSuccess(w, "@"+owner+"/"+name+" version "+strconv.Itoa(version))
-}
-
 func parseSearchQuery(values url.Values) (registryclient.SearchQuery, bool) {
 	q, ok := boundedQueryValue(values, "q", maxQueryBytes)
 	if !ok {

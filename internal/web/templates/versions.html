@@ -1,0 +1,25 @@
+{{define "versions"}}
+<section aria-labelledby="versions-heading">
+  <h2 id="versions-heading">Versions</h2>
+  {{if .Versions}}
+    <ol>
+    {{range .Versions}}
+      <li>
+        <h3>{{if .URL}}<a href="{{.URL}}">Version {{.Version}}</a>{{else}}Version {{.Version}}{{end}}</h3>
+        {{if .PublishedISO}}<time datetime="{{.PublishedISO}}">{{.PublishedText}}</time>{{end}}
+        {{if .Changelog}}<p>{{.Changelog}}</p>{{end}}
+        <dl><dt>Scan</dt><dd>{{.ScanSummary}}</dd><dt>Trust</dt><dd>{{.TrustTier}}</dd></dl>
+      </li>
+    {{end}}
+    </ol>
+  {{else}}
+    <p>No versions published.</p>
+  {{end}}
+  {{if or .PreviousURL .NextURL}}
+  <nav aria-label="Version pages">
+    {{if .PreviousURL}}<a href="{{.PreviousURL}}" rel="prev">Previous</a>{{end}}
+    {{if .NextURL}}<a href="{{.NextURL}}" rel="next">Next</a>{{end}}
+  </nav>
+  {{end}}
+</section>
+{{end}}
