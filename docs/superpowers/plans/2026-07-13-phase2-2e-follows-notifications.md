@@ -4,7 +4,7 @@
 > implementation workers when available, with a separate adversarial/Fable-class review for the
 > session, OAuth/grant, feed-concurrency, and CSRF boundaries.
 
-**Status:** In progress; Tasks 1-6 implemented and verified
+**Status:** In progress; Tasks 1-7 implemented and verified
 
 **Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
 session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
@@ -28,6 +28,10 @@ Task 6 adds all-or-nothing pinned web OAuth configuration, a redirect-rejecting 
 client, one-use registry-tracked state plus signed PKCE cookies, fixed callback redirects, and
 nonce-bound grant exchange into 30-day `web` sessions. Host/header, cookie/query tampering,
 callback/grant replay, non-disclosure, focused race, and repository-wide verification are green.
+Task 7 adds distinct pinned public/private website registry configuration, bearer-isolated typed
+personal client calls, secure login/session/CSRF cookies, exact Origin and double-submit CSRF
+checks, server-side grant exchange, web-purpose identity revalidation, and safe logout. Cookie,
+redirect, auth failure, focused race, and repository-wide verification are green.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -370,28 +374,28 @@ the private `SHERPA_REGISTRY_API_URL`. It is used only for the `/v1/auth/web/sta
 redirect. Both it and `SHERPA_WEB_PUBLIC_BASE_URL` are pinned absolute origins; Host headers never
 construct either.
 
-- [ ] **Step 1: Write public/private URL tests.** Validate path-prefix handling, HTTPS production,
+- [x] **Step 1: Write public/private URL tests.** Validate path-prefix handling, HTTPS production,
   loopback-only HTTP test mode, no userinfo/query/fragment, no accidental private URL in rendered
   links, and no Host/forwarded-host influence.
-- [ ] **Step 2: Write authenticated client tests.** Add typed `Me`, exchange, revoke, follow,
+- [x] **Step 2: Write authenticated client tests.** Add typed `Me`, exchange, revoke, follow,
   unfollow, follows, updates, seen, and trial methods. The bearer is attached only to these fixed
   calls, never anonymous search/detail, redirects, error strings, or logs. Retain 1 MiB/timeout
   bounds and map grant `410` separately.
-- [ ] **Step 3: Write cookie tests.** Exact `__Host-sherpa_login`, `__Host-sherpa_session`, and
+- [x] **Step 3: Write cookie tests.** Exact `__Host-sherpa_login`, `__Host-sherpa_session`, and
   `__Host-sherpa_csrf` attributes, expiry/deletion, malformed/duplicate/oversized cookie rejection,
   and no reflection. All are `Secure; HttpOnly; SameSite=Lax; Path=/`; login handoff is ten minutes,
   session and CSRF are 30 days. Treat invalid/expired registry identity as signed out and clear
   local cookies.
-- [ ] **Step 4: Write CSRF/Origin tests.** Every mutation requires POST, one form token matching
+- [x] **Step 4: Write CSRF/Origin tests.** Every mutation requires POST, one form token matching
   one cookie, and one exact scheme/host/port Origin derived from the pinned public base. Reject
   absent/foreign/opaque/malformed/duplicate values before fake-registry calls. Local test helpers
   must not weaken production configuration.
-- [ ] **Step 5: Implement sign-in/callback/logout.** `/login` creates a random handoff nonce cookie
+- [x] **Step 5: Implement sign-in/callback/logout.** `/login` creates a random handoff nonce cookie
   and issues a `303` to the pinned public registry start with only its SHA-256 challenge. Callback
   requires/clears that cookie and exchanges nonce plus one bounded grant server-side, sets session
   and CSRF cookies, and clears its query via `303 /dashboard`. Both callback responses use
   `Referrer-Policy: no-referrer`. Logout attempts revoke but always clears all three cookies.
-- [ ] **Step 6: Fable-class review and commit.** Confirm browser token cannot reach publisher
+- [x] **Step 6: Fable-class review and commit.** Confirm browser token cannot reach publisher
   templates, JS, logs, URLs, anonymous upstream calls, or cross-origin responses before:
   `git commit -m "feat(web): add secure registry-backed sessions"`
 

@@ -56,8 +56,12 @@ func run(cfg webapp.Config) (*http.Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	registryPublicURL, err := parsePublicBaseURL(cfg.RegistryPublicURL)
+	if err != nil {
+		return nil, err
+	}
 	gate := &readinessHandler{}
-	handler, err := webapp.New(registry, webapp.Options{PublicBaseURL: publicBaseURL, Logger: log.Default()})
+	handler, err := webapp.New(registry, webapp.Options{PublicBaseURL: publicBaseURL, RegistryPublicURL: registryPublicURL, Logger: log.Default()})
 	if err != nil {
 		return nil, errors.New("initialize web handler")
 	}

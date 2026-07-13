@@ -15,6 +15,8 @@ type publicError struct {
 
 var publicErrors = map[int]publicError{
 	http.StatusBadRequest:          {Title: "Invalid request", Message: "The requested input is invalid."},
+	http.StatusUnauthorized:        {Title: "Sign-in failed", Message: "The sign-in request could not be completed."},
+	http.StatusForbidden:           {Title: "Request rejected", Message: "The request could not be verified."},
 	http.StatusNotFound:            {Title: "Page not found", Message: "The requested page could not be found."},
 	http.StatusMethodNotAllowed:    {Title: "Method not allowed", Message: "This page only accepts GET requests."},
 	http.StatusBadGateway:          {Title: "Registry response error", Message: "The registry returned an invalid response."},

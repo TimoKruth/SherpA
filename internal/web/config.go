@@ -20,10 +20,11 @@ const (
 )
 
 type Config struct {
-	Addr            string
-	RegistryAPIURL  string
-	PublicBaseURL   string
-	UpstreamTimeout time.Duration
+	Addr              string
+	RegistryAPIURL    string
+	RegistryPublicURL string
+	PublicBaseURL     string
+	UpstreamTimeout   time.Duration
 }
 
 func LoadConfig() (Config, error) {
@@ -39,13 +40,38 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	registryPublicURL, err := normalizedHTTPURL("SHERPA_REGISTRY_PUBLIC_URL", strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_PUBLIC_URL")), false)
+	if err != nil {
+		return Config{}, err
+	}
+	if (publicURL == "") != (registryPublicURL == "") {
+		return Config{}, errors.New("SHERPA_WEB_PUBLIC_BASE_URL and SHERPA_REGISTRY_PUBLIC_URL must be configured together")
+	}
+	if publicURL != "" {
+		webParsed, _ := url.Parse(publicURL)
+		registryParsed, _ := url.Parse(registryPublicURL)
+		if webParsed.Scheme == registryParsed.Scheme && webParsed.Host == registryParsed.Host {
+			return Config{}, errors.New("website and registry public origins must be distinct")
+		}
+		if !webSecureOrLoopback(webParsed) || !webSecureOrLoopback(registryParsed) {
+			return Config{}, errors.New("public URLs must use HTTPS outside loopback development")
+		}
+	}
 	timeout, err := loadUpstreamTimeout()
 	if err != nil {
 		return Config{}, err
 	}
 	return Config{
-		Addr: addr, RegistryAPIURL: registryURL, PublicBaseURL: publicURL, UpstreamTimeout: timeout,
+		Addr: addr, RegistryAPIURL: registryURL, RegistryPublicURL: registryPublicURL, PublicBaseURL: publicURL, UpstreamTimeout: timeout,
 	}, nil
+}
+
+func webSecureOrLoopback(parsed *url.URL) bool {
+	if parsed.Scheme == "https" {
+		return true
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func loadAddr() (string, error) {
@@ -104,7 +130,18 @@ func normalizedHTTPURL(key, raw string, required bool) (string, error) {
 	if parsed.Opaque != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(raw, "#") {
 		return "", fmt.Errorf("%s must not contain credentials, query, or fragment", key)
 	}
-	parsed.Host = strings.ToLower(parsed.Host)
+	hostname := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(hostname, port)
+	} else if strings.Contains(hostname, ":") {
+		parsed.Host = "[" + hostname + "]"
+	} else {
+		parsed.Host = hostname
+	}
 	parsed.Path = path.Clean(parsed.Path)
 	if parsed.Path == "." || parsed.Path == "/" {
 		parsed.Path = ""

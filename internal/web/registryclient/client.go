@@ -1,6 +1,7 @@
 package registryclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,9 +17,13 @@ import (
 )
 
 var (
-	ErrNotFound    = errors.New("registry resource not found")
-	ErrBadGateway  = errors.New("invalid registry response")
-	ErrUnavailable = errors.New("registry unavailable")
+	ErrNotFound     = errors.New("registry resource not found")
+	ErrBadGateway   = errors.New("invalid registry response")
+	ErrUnavailable  = errors.New("registry unavailable")
+	ErrUnauthorized = errors.New("registry session unauthorized")
+	ErrForbidden    = errors.New("registry request forbidden")
+	ErrGone         = errors.New("registry grant unavailable")
+	ErrRateLimited  = errors.New("registry rate limited")
 )
 
 const (
@@ -31,6 +36,187 @@ type Client struct {
 	base             *url.URL
 	http             *http.Client
 	maxResponseBytes int64
+}
+
+func (c *Client) ExchangeWebGrant(ctx context.Context, grant, nonce string) (WebSession, error) {
+	var result WebSession
+	err := c.authRequest(ctx, http.MethodPost, "/v1/auth/web/exchange", nil, map[string]string{"grant": grant, "handoff_nonce": nonce}, "", &result, http.StatusOK)
+	if err == nil && (!validSessionToken(result.AccessToken) || !validSegment(result.Login) || result.Purpose != "web") {
+		err = ErrBadGateway
+	}
+	return result, err
+}
+
+func validSessionToken(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) Me(ctx context.Context, token string) (Me, error) {
+	var result Me
+	err := c.authRequest(ctx, http.MethodGet, "/v1/me", nil, nil, token, &result, http.StatusOK)
+	if err == nil && (result.Login == "" || (result.Purpose != "cli" && result.Purpose != "web")) {
+		err = ErrBadGateway
+	}
+	return result, err
+}
+
+func (c *Client) Revoke(ctx context.Context, token string) error {
+	return c.authRequest(ctx, http.MethodDelete, "/v1/me/session", nil, nil, token, nil, http.StatusNoContent)
+}
+func (c *Client) Follow(ctx context.Context, token, owner, name string) (Follow, error) {
+	var out Follow
+	if !validSegment(owner) || !validSegment(name) {
+		return out, ErrBadGateway
+	}
+	err := c.authRequest(ctx, http.MethodPut, "/v1/me/follows/"+url.PathEscape(owner)+"/"+url.PathEscape(name), nil, nil, token, &out, http.StatusOK)
+	return out, err
+}
+func (c *Client) Unfollow(ctx context.Context, token, owner, name string) error {
+	if !validSegment(owner) || !validSegment(name) {
+		return ErrBadGateway
+	}
+	return c.authRequest(ctx, http.MethodDelete, "/v1/me/follows/"+url.PathEscape(owner)+"/"+url.PathEscape(name), nil, nil, token, nil, http.StatusNoContent)
+}
+func (c *Client) Follows(ctx context.Context, token string, limit int, cursor string) (FollowPage, error) {
+	var out FollowPage
+	if limit < 1 || limit > maxPageLimit || len(cursor) > 512 {
+		return out, ErrBadGateway
+	}
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	err := c.authRequest(ctx, http.MethodGet, "/v1/me/follows", q, nil, token, &out, http.StatusOK)
+	if err == nil && len(out.Follows) > limit {
+		err = ErrBadGateway
+	}
+	return out, err
+}
+func (c *Client) Updates(ctx context.Context, token string, limit int, cursor string) (UpdatePage, error) {
+	var out UpdatePage
+	if limit < 1 || limit > maxPageLimit || len(cursor) > 512 {
+		return out, ErrBadGateway
+	}
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	err := c.authRequest(ctx, http.MethodGet, "/v1/me/updates", q, nil, token, &out, http.StatusOK)
+	if err == nil && len(out.Updates) > limit {
+		err = ErrBadGateway
+	}
+	return out, err
+}
+func (c *Client) MarkSeen(ctx context.Context, token, owner, name string, version int) (Follow, error) {
+	var out Follow
+	if !validSegment(owner) || !validSegment(name) || version < 1 {
+		return out, ErrBadGateway
+	}
+	err := c.authRequest(ctx, http.MethodPut, "/v1/me/follows/"+url.PathEscape(owner)+"/"+url.PathEscape(name)+"/seen", nil, map[string]int{"version": version}, token, &out, http.StatusOK)
+	return out, err
+}
+func (c *Client) PutTrial(ctx context.Context, token, owner, name string, version int, verdict string) error {
+	if !validSegment(owner) || !validSegment(name) || version < 1 {
+		return ErrBadGateway
+	}
+	return c.authRequest(ctx, http.MethodPut, "/v1/me/trials/"+url.PathEscape(owner)+"/"+url.PathEscape(name)+"/"+strconv.Itoa(version), nil, map[string]string{"verdict": verdict}, token, nil, http.StatusNoContent)
+}
+
+func (c *Client) GetUser(ctx context.Context, handle string, page Page) (UserProfile, error) {
+	var out UserProfile
+	if !validSegment(handle) || !validPage(page) {
+		return out, ErrBadGateway
+	}
+	q := url.Values{"limit": {strconv.Itoa(page.Limit)}, "offset": {strconv.Itoa(page.Offset)}}
+	if err := c.get(ctx, "/v1/users/"+url.PathEscape(handle), q, &out); err != nil {
+		return out, err
+	}
+	if out.Handle != handle || out.TotalStackFollows < 0 || len(out.Stacks) > page.Limit {
+		return UserProfile{}, ErrBadGateway
+	}
+	return out, nil
+}
+
+func (c *Client) authRequest(ctx context.Context, method, endpoint string, query url.Values, requestBody any, token string, destination any, expected int) error {
+	if endpoint != "/v1/auth/web/exchange" && token == "" {
+		return ErrUnauthorized
+	}
+	requestURL := *c.base
+	requestURL.Path = strings.TrimSuffix(c.base.Path, "/") + endpoint
+	if query != nil {
+		requestURL.RawQuery = query.Encode()
+	}
+	var body io.Reader
+	if requestBody != nil {
+		encoded, err := json.Marshal(requestBody)
+		if err != nil {
+			return ErrBadGateway
+		}
+		body = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, requestURL.String(), body)
+	if err != nil {
+		return ErrBadGateway
+	}
+	request.Header.Set("Accept", "application/json")
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	if requestBody != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response, err := c.http.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return ErrUnavailable
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusUnauthorized:
+		return ErrUnauthorized
+	case http.StatusForbidden:
+		return ErrForbidden
+	case http.StatusNotFound:
+		return ErrNotFound
+	case http.StatusGone:
+		return ErrGone
+	case http.StatusTooManyRequests:
+		return ErrRateLimited
+	}
+	if response.StatusCode >= 500 {
+		return ErrUnavailable
+	}
+	if response.StatusCode != expected {
+		return ErrBadGateway
+	}
+	encoded, err := io.ReadAll(io.LimitReader(response.Body, c.maxResponseBytes+1))
+	if err != nil {
+		return ErrUnavailable
+	}
+	if int64(len(encoded)) > c.maxResponseBytes {
+		return ErrBadGateway
+	}
+	if destination == nil {
+		return nil
+	}
+	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return ErrBadGateway
+	}
+	if err := json.Unmarshal(encoded, destination); err != nil {
+		return ErrBadGateway
+	}
+	return nil
 }
 
 func New(rawBaseURL string, timeout time.Duration) (*Client, error) {

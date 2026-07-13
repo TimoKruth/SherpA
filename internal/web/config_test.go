@@ -40,6 +40,7 @@ func TestLoadConfigNormalizesURLsAndTimeout(t *testing.T) {
 	setBaseConfigEnv(t)
 	t.Setenv("SHERPA_REGISTRY_API_URL", "HTTPS://REGISTRY.EXAMPLE/api//v1/../")
 	t.Setenv("SHERPA_WEB_PUBLIC_BASE_URL", "https://WWW.EXAMPLE/catalog/")
+	t.Setenv("SHERPA_REGISTRY_PUBLIC_URL", "https://REGISTRY-PUBLIC.EXAMPLE/root/")
 	t.Setenv("SHERPA_WEB_UPSTREAM_TIMEOUT", "1250ms")
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -50,6 +51,9 @@ func TestLoadConfigNormalizesURLsAndTimeout(t *testing.T) {
 	}
 	if cfg.PublicBaseURL != "https://www.example/catalog" {
 		t.Fatalf("PublicBaseURL = %q", cfg.PublicBaseURL)
+	}
+	if cfg.RegistryPublicURL != "https://registry-public.example/root" {
+		t.Fatalf("RegistryPublicURL = %q", cfg.RegistryPublicURL)
 	}
 	if cfg.UpstreamTimeout != 1250*time.Millisecond {
 		t.Fatalf("UpstreamTimeout = %s", cfg.UpstreamTimeout)
@@ -92,7 +96,7 @@ func TestLoadConfigRejectsUnsafeURLsWithoutEchoingSecrets(t *testing.T) {
 		"https://user:planted-secret@registry.example", "https://registry.example?token=planted-secret",
 		"https://registry.example/#planted-secret", "https://registry.example/#",
 	}
-	for _, key := range []string{"SHERPA_REGISTRY_API_URL", "SHERPA_WEB_PUBLIC_BASE_URL"} {
+	for _, key := range []string{"SHERPA_REGISTRY_API_URL", "SHERPA_WEB_PUBLIC_BASE_URL", "SHERPA_REGISTRY_PUBLIC_URL"} {
 		for _, raw := range invalid {
 			t.Run(key+"_"+raw, func(t *testing.T) {
 				setBaseConfigEnv(t)
@@ -106,6 +110,27 @@ func TestLoadConfigRejectsUnsafeURLsWithoutEchoingSecrets(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLoadConfigRequiresDistinctSecurePublicAuthOrigins(t *testing.T) {
+	for _, tc := range []struct{ web, registry string }{
+		{"https://web.example", ""}, {"", "https://registry.example"},
+		{"https://same.example/a", "https://same.example/b"},
+		{"http://web.example", "https://registry.example"},
+	} {
+		setBaseConfigEnv(t)
+		t.Setenv("SHERPA_WEB_PUBLIC_BASE_URL", tc.web)
+		t.Setenv("SHERPA_REGISTRY_PUBLIC_URL", tc.registry)
+		if _, err := LoadConfig(); err == nil {
+			t.Fatalf("origins accepted: %#v", tc)
+		}
+	}
+	setBaseConfigEnv(t)
+	t.Setenv("SHERPA_WEB_PUBLIC_BASE_URL", "http://127.0.0.1:8080")
+	t.Setenv("SHERPA_REGISTRY_PUBLIC_URL", "http://127.0.0.1:8081")
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("loopback origins: %v", err)
 	}
 }
 
@@ -142,5 +167,6 @@ func setBaseConfigEnv(t *testing.T) {
 	t.Setenv("PORT", "")
 	t.Setenv("SHERPA_REGISTRY_API_URL", "https://registry.example")
 	t.Setenv("SHERPA_WEB_PUBLIC_BASE_URL", "")
+	t.Setenv("SHERPA_REGISTRY_PUBLIC_URL", "")
 	t.Setenv("SHERPA_WEB_UPSTREAM_TIMEOUT", "")
 }

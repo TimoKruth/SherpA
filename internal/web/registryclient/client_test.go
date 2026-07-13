@@ -70,6 +70,102 @@ func TestSearchEncodesQueryPreservesPrefixAndForwardsNoBrowserHeaders(t *testing
 	}
 }
 
+func TestAuthenticatedClientMethodsScopeBearerAndUseFixedRoutes(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if r.URL.Path != "/root/v1/auth/web/exchange" && r.Header.Get("Authorization") != "Bearer web-session" {
+			t.Errorf("authorization on %s = %q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		if r.URL.Path == "/root/v1/auth/web/exchange" && r.Header.Get("Authorization") != "" {
+			t.Errorf("exchange authorization = %q", r.Header.Get("Authorization"))
+		}
+		switch r.URL.Path {
+		case "/root/v1/auth/web/exchange":
+			writeJSON(t, w, `{"access_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","login":"alice","purpose":"web"}`)
+		case "/root/v1/me":
+			writeJSON(t, w, `{"login":"alice","purpose":"web"}`)
+		case "/root/v1/me/follows/alice/reviewer":
+			if r.Method == http.MethodDelete {
+				w.WriteHeader(http.StatusNoContent)
+			} else {
+				writeJSON(t, w, `{"ref":"@alice/reviewer","owner":"alice","name":"reviewer","latest_version":2,"followed_at":"2026-07-13T12:00:00Z"}`)
+			}
+		case "/root/v1/me/follows":
+			writeJSON(t, w, `{"follows":[]}`)
+		case "/root/v1/me/updates":
+			writeJSON(t, w, `{"updates":[]}`)
+		case "/root/v1/me/follows/alice/reviewer/seen":
+			writeJSON(t, w, `{"ref":"@alice/reviewer","owner":"alice","name":"reviewer","latest_version":2,"last_seen_version":2,"followed_at":"2026-07-13T12:00:00Z"}`)
+		case "/root/v1/me/trials/alice/reviewer/2", "/root/v1/me/session":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := mustClient(t, server.URL+"/root", time.Second)
+	ctx := context.Background()
+	session, err := client.ExchangeWebGrant(ctx, strings.Repeat("a", 64), strings.Repeat("n", 43))
+	if err != nil || session.Purpose != "web" {
+		t.Fatalf("exchange=%#v %v", session, err)
+	}
+	if _, err := client.Me(ctx, "web-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Follow(ctx, "web-session", "alice", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Unfollow(ctx, "web-session", "alice", "reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Follows(ctx, "web-session", 25, "cursor"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Updates(ctx, "web-session", 25, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.MarkSeen(ctx, "web-session", "alice", "reviewer", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.PutTrial(ctx, "web-session", "alice", "reviewer", 2, "keep"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Revoke(ctx, "web-session"); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 9 {
+		t.Fatalf("paths = %v", paths)
+	}
+	if _, err := client.Me(ctx, ""); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("empty token error = %v", err)
+	}
+}
+
+func TestAuthenticatedClientMapsErrorsAndRejectsRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   error
+	}{{401, ErrUnauthorized}, {403, ErrForbidden}, {404, ErrNotFound}, {410, ErrGone}, {429, ErrRateLimited}, {500, ErrUnavailable}, {418, ErrBadGateway}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(tc.status) }))
+		client := mustClient(t, srv.URL, time.Second)
+		_, err := client.Me(context.Background(), "secret-token")
+		srv.Close()
+		if !errors.Is(err, tc.want) || strings.Contains(err.Error(), "secret-token") {
+			t.Fatalf("status %d error=%v", tc.status, err)
+		}
+	}
+	targetCalls := 0
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { targetCalls++ }))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, http.StatusFound) }))
+	defer redirect.Close()
+	client := mustClient(t, redirect.URL, time.Second)
+	if _, err := client.Me(context.Background(), "token"); !errors.Is(err, ErrBadGateway) || targetCalls != 0 {
+		t.Fatalf("redirect error=%v target=%d", err, targetCalls)
+	}
+}
+
 func TestDetailRequestsAndTypedResponses(t *testing.T) {
 	published := "2026-07-13T08:09:10Z"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

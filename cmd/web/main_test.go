@@ -77,6 +77,22 @@ func TestRunRejectsInvalidURLsWithoutExposingCredentials(t *testing.T) {
 	}
 }
 
+func TestRunWiresPinnedPublicRegistryForLogin(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer upstream.Close()
+	server, err := run(webapp.Config{Addr: "127.0.0.1:0", RegistryAPIURL: upstream.URL, RegistryPublicURL: "https://registry.example/prefix", PublicBaseURL: "https://web.example", UpstreamTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://evil.example/login", nil)
+	req.Host = "evil.example"
+	server.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusSeeOther || !contains(rr.Header().Get("Location"), "https://registry.example/prefix/v1/auth/web/start?") {
+		t.Fatalf("login=%d location=%q", rr.Code, rr.Header().Get("Location"))
+	}
+}
+
 func TestServeOnListenerGracefullyDrainsActiveRequest(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

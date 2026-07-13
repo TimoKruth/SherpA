@@ -19,6 +19,32 @@ const (
 )
 
 func (s *server) route(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/login":
+		if r.Method != http.MethodGet {
+			s.renderError(w, http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleLogin(w, r)
+		return
+	case "/auth/callback":
+		if r.Method != http.MethodGet {
+			s.renderError(w, http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleAuthCallback(w, r)
+		return
+	case "/auth/error":
+		if r.Method != http.MethodGet { s.renderError(w,http.StatusMethodNotAllowed);return }
+		s.renderError(w,http.StatusUnauthorized);return
+	case "/logout":
+		if r.Method != http.MethodPost {
+			s.renderError(w, http.StatusMethodNotAllowed)
+			return
+		}
+		s.handleLogout(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		s.renderError(w, http.StatusMethodNotAllowed)

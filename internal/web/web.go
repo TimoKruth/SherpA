@@ -34,15 +34,18 @@ func (s *server) canonicalURL(routePath string) string {
 }
 
 type Options struct {
-	PublicBaseURL *url.URL
-	Logger        *log.Logger
+	PublicBaseURL     *url.URL
+	RegistryPublicURL *url.URL
+	Logger            *log.Logger
 }
 
 type server struct {
-	registry      Registry
-	renderer      *renderer
-	publicBaseURL *url.URL
-	logger        *log.Logger
+	registry          Registry
+	renderer          *renderer
+	publicBaseURL     *url.URL
+	logger            *log.Logger
+	authRegistry      AuthRegistry
+	registryPublicURL *url.URL
 }
 
 func New(reg Registry, options Options) (http.Handler, error) {
@@ -62,11 +65,29 @@ func New(reg Registry, options Options) (http.Handler, error) {
 		copy := *options.PublicBaseURL
 		publicBaseURL = &copy
 	}
+	var registryPublicURL *url.URL
+	if options.RegistryPublicURL != nil {
+		copy := *options.RegistryPublicURL
+		registryPublicURL = &copy
+	}
+	var authRegistry AuthRegistry
+	if registryPublicURL != nil {
+		if publicBaseURL == nil {
+			return nil, errors.New("web auth public URLs must be configured together")
+		}
+		var ok bool
+		authRegistry, ok = reg.(AuthRegistry)
+		if !ok {
+			return nil, errors.New("authenticated registry client is required")
+		}
+	}
 	s := &server{
-		registry:      reg,
-		renderer:      renderer,
-		publicBaseURL: publicBaseURL,
-		logger:        logger,
+		registry:          reg,
+		renderer:          renderer,
+		publicBaseURL:     publicBaseURL,
+		logger:            logger,
+		authRegistry:      authRegistry,
+		registryPublicURL: registryPublicURL,
 	}
 	return s.securityHeaders(s.logRequests(http.HandlerFunc(s.route))), nil
 }
