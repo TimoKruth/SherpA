@@ -13,22 +13,25 @@ import (
 )
 
 type server struct {
-	store         store.Store
-	content       content.ContentStore
-	adminToken    string
-	github        registryauth.GitHubClient
-	limiter       *authLimiter
-	trustProxy    bool
-	publicBaseURL string
-	now           func() time.Time
-	logger        *log.Logger
+	store            store.Store
+	content          content.ContentStore
+	adminToken       string
+	github           registryauth.GitHubClient
+	limiter          *authLimiter
+	trustProxy       bool
+	publicBaseURL    string
+	webPublicBaseURL string
+	oauthCookieKey   [32]byte
+	now              func() time.Time
+	logger           *log.Logger
 }
 
 type Options struct {
-	TrustProxy    bool
-	PublicBaseURL string
-	Now           func() time.Time
-	Logger        *log.Logger
+	TrustProxy       bool
+	PublicBaseURL    string
+	WebPublicBaseURL string
+	Now              func() time.Time
+	Logger           *log.Logger
 }
 
 func HealthHandler(ready *atomic.Bool) http.Handler {
@@ -56,20 +59,25 @@ func NewWithOptions(st store.Store, cs content.ContentStore, adminToken string, 
 		logger = log.Default()
 	}
 	s := &server{
-		store:         st,
-		content:       cs,
-		adminToken:    adminToken,
-		github:        github,
-		limiter:       newAuthLimiter(now),
-		trustProxy:    options.TrustProxy,
-		publicBaseURL: options.PublicBaseURL,
-		now:           now,
-		logger:        logger,
+		store:            st,
+		content:          cs,
+		adminToken:       adminToken,
+		github:           github,
+		limiter:          newAuthLimiter(now),
+		trustProxy:       options.TrustProxy,
+		publicBaseURL:    options.PublicBaseURL,
+		webPublicBaseURL: options.WebPublicBaseURL,
+		oauthCookieKey:   newOAuthCookieKey(),
+		now:              now,
+		logger:           logger,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/auth/device/start", s.handleDeviceStart)
 	mux.HandleFunc("POST /v1/auth/device/poll", s.handleDevicePoll)
+	mux.HandleFunc("GET /v1/auth/web/start", s.handleWebStart)
+	mux.HandleFunc("GET /v1/auth/web/callback", s.handleWebCallback)
+	mux.HandleFunc("POST /v1/auth/web/exchange", s.handleWebExchange)
 	mux.HandleFunc("GET /v1/me", s.handleMe)
 	mux.HandleFunc("DELETE /v1/me/session", s.handleRevokeSession)
 	mux.HandleFunc("PUT /v1/me/follows/{owner}/{name}", s.handleFollow)

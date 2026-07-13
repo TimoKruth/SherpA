@@ -26,18 +26,112 @@ type limitEntry struct {
 }
 
 type authLimiter struct {
-	mu      sync.Mutex
-	now     func() time.Time
-	starts  map[string]limitEntry
-	devices map[[sha256.Size]byte]limitEntry
+	mu           sync.Mutex
+	now          func() time.Time
+	starts       map[string]limitEntry
+	devices      map[[sha256.Size]byte]limitEntry
+	webStarts    map[string]countEntry
+	webCallbacks map[string]countEntry
+	webExchanges map[[sha256.Size]byte]countEntry
+	oauthStates  map[[sha256.Size]byte]time.Time
+}
+
+type countEntry struct {
+	count   int
+	expires time.Time
 }
 
 func newAuthLimiter(now func() time.Time) *authLimiter {
 	return &authLimiter{
-		now:     now,
-		starts:  make(map[string]limitEntry),
-		devices: make(map[[sha256.Size]byte]limitEntry),
+		now:          now,
+		starts:       make(map[string]limitEntry),
+		devices:      make(map[[sha256.Size]byte]limitEntry),
+		webStarts:    make(map[string]countEntry),
+		webCallbacks: make(map[string]countEntry),
+		webExchanges: make(map[[sha256.Size]byte]countEntry),
+		oauthStates:  make(map[[sha256.Size]byte]time.Time),
 	}
+}
+
+func (l *authLimiter) registerOAuthState(state string, ttl time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	l.cleanup(now)
+	for len(l.oauthStates) >= limiterEntryCapacity {
+		for key := range l.oauthStates {
+			delete(l.oauthStates, key)
+			break
+		}
+	}
+	l.oauthStates[sha256.Sum256([]byte(state))] = now.Add(ttl)
+}
+
+func (l *authLimiter) consumeOAuthState(state string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	l.cleanup(now)
+	key := sha256.Sum256([]byte(state))
+	expires, ok := l.oauthStates[key]
+	if !ok || !now.Before(expires) {
+		delete(l.oauthStates, key)
+		return false
+	}
+	delete(l.oauthStates, key)
+	return true
+}
+
+func (l *authLimiter) allowWebStart(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	l.cleanup(now)
+	entry := l.webStarts[ip]
+	if entry.expires.IsZero() {
+		entry.expires = now.Add(time.Minute)
+	}
+	if entry.count >= 20 {
+		return false
+	}
+	entry.count++
+	l.webStarts[ip] = entry
+	return true
+}
+
+func (l *authLimiter) allowWebExchange(ip, grant string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	l.cleanup(now)
+	key := sha256.Sum256([]byte(ip + "\x00" + grant))
+	entry := l.webExchanges[key]
+	if entry.expires.IsZero() {
+		entry.expires = now.Add(time.Minute)
+	}
+	if entry.count >= 30 {
+		return false
+	}
+	entry.count++
+	l.webExchanges[key] = entry
+	return true
+}
+
+func (l *authLimiter) allowWebCallback(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	l.cleanup(now)
+	entry := l.webCallbacks[ip]
+	if entry.expires.IsZero() {
+		entry.expires = now.Add(time.Minute)
+	}
+	if entry.count >= 60 {
+		return false
+	}
+	entry.count++
+	l.webCallbacks[ip] = entry
+	return true
 }
 
 func (l *authLimiter) allowStart(ip string) (time.Duration, bool) {
@@ -129,6 +223,44 @@ func (l *authLimiter) cleanup(now time.Time) {
 	for key, entry := range l.devices {
 		if !now.Before(entry.expires) {
 			delete(l.devices, key)
+		}
+	}
+	for key, entry := range l.webStarts {
+		if !now.Before(entry.expires) {
+			delete(l.webStarts, key)
+		}
+	}
+	for key, entry := range l.webCallbacks {
+		if !now.Before(entry.expires) {
+			delete(l.webCallbacks, key)
+		}
+	}
+	for key, entry := range l.webExchanges {
+		if !now.Before(entry.expires) {
+			delete(l.webExchanges, key)
+		}
+	}
+	for len(l.webStarts) > limiterEntryCapacity {
+		for key := range l.webStarts {
+			delete(l.webStarts, key)
+			break
+		}
+	}
+	for len(l.webCallbacks) > limiterEntryCapacity {
+		for key := range l.webCallbacks {
+			delete(l.webCallbacks, key)
+			break
+		}
+	}
+	for len(l.webExchanges) > limiterEntryCapacity {
+		for key := range l.webExchanges {
+			delete(l.webExchanges, key)
+			break
+		}
+	}
+	for key, expires := range l.oauthStates {
+		if !now.Before(expires) {
+			delete(l.oauthStates, key)
 		}
 	}
 }

@@ -22,6 +22,8 @@ type GitHubClient interface {
 	StartDeviceFlow(ctx context.Context) (DeviceCode, error)
 	PollToken(ctx context.Context, deviceCode string) (accessToken string, err error)
 	GetUser(ctx context.Context, accessToken string) (GitHubUser, error)
+	WebAuthorizeURL(state, codeChallenge, callbackURL string) (string, error)
+	ExchangeWebCode(ctx context.Context, code, codeVerifier, callbackURL string) (string, error)
 }
 
 var ErrAuthPending = errors.New("authorization pending")

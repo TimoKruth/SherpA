@@ -4,7 +4,7 @@
 > implementation workers when available, with a separate adversarial/Fable-class review for the
 > session, OAuth/grant, feed-concurrency, and CSRF boundaries.
 
-**Status:** In progress; Tasks 1-5 implemented and verified
+**Status:** In progress; Tasks 1-6 implemented and verified
 
 **Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
 session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
@@ -24,6 +24,10 @@ Task 5 adds a private `0600` trial journal with immutable registry snapshots, ra
 strict verdict and 4 KiB UTF-8 note bounds, deterministic terminal-safe listing, and explicit
 verdict-only sharing. Non-disclosure, failed-share, repeat-share, focused race, and repository-
 wide verification tests are green.
+Task 6 adds all-or-nothing pinned web OAuth configuration, a redirect-rejecting bounded GitHub
+client, one-use registry-tracked state plus signed PKCE cookies, fixed callback redirects, and
+nonce-bound grant exchange into 30-day `web` sessions. Host/header, cookie/query tampering,
+callback/grant replay, non-disclosure, focused race, and repository-wide verification are green.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -317,28 +321,28 @@ Web OAuth is enabled only when both are present. In production `SHERPA_PUBLIC_BA
 base must be HTTPS. Device flow remains usable with only the client ID. Website callback path is
 fixed `/auth/callback`; registry callback is fixed `/v1/auth/web/callback`.
 
-- [ ] **Step 1: Write config validation tests.** Reject partial web config, credentials/query/
+- [x] **Step 1: Write config validation tests.** Reject partial web config, credentials/query/
   fragment, non-HTTPS production origins, equal registry/website origins if cookie isolation would
   be ambiguous, and request-host influence. Preserve current local/device-only configurations.
-- [ ] **Step 2: Write GitHub client tests.** Assert authorize URL contains exact client ID,
+- [x] **Step 2: Write GitHub client tests.** Assert authorize URL contains exact client ID,
   callback, random state, S256 challenge, no broadened scope, and no secret. Token exchange sends
   secret/code/verifier only to fixed GitHub HTTPS endpoints with JSON accept, rejects redirects,
   caps bodies, validates token type, and re-fetches `/user` every login.
-- [ ] **Step 3: Write adversarial handler tests.** Cover missing/duplicate/oversized code/state/
+- [x] **Step 3: Write adversarial handler tests.** Cover missing/duplicate/oversized code/state/
   handoff challenge, absent/tampered/mismatched OAuth cookie, GitHub denial, login rename/conflict,
   fixed redirect, Host/forwarded-host spoofing, newline values, callback replay, rate limits, and
   no sensitive logging. Assert OAuth cookie is
   `__Host-sherpa_oauth; Secure; HttpOnly; SameSite=Lax; Path=/` and is expired on every callback
   outcome.
-- [ ] **Step 4: Write grant exchange tests.** Body-limit and auth-free fixed
+- [x] **Step 4: Write grant exchange tests.** Body-limit and auth-free fixed
   `POST /v1/auth/web/exchange` endpoint; its body requires grant plus handoff nonce. A valid pair
   returns a raw `web` session/login once; a copied grant with the wrong/missing nonce is `410`;
   concurrent replay gets one `200` and one `410`; expired or unknown grants are `410`; responses
   are no-store and never include grant/hash/nonce.
-- [ ] **Step 5: Implement flow and separate rate-limit buckets.** Use `crypto/rand`, SHA-256 PKCE,
+- [x] **Step 5: Implement flow and separate rate-limit buckets.** Use `crypto/rand`, SHA-256 PKCE,
   constant-time state comparison, fixed error codes, two-minute grants, 30-day web sessions, and
   existing proxy-safe client IP logic. Never accept `return_to` from a request.
-- [ ] **Step 6: Fable-class review and commit.** Review OAuth CSRF/login-CSRF, PKCE, cookie-prefix,
+- [x] **Step 6: Fable-class review and commit.** Review OAuth CSRF/login-CSRF, PKCE, cookie-prefix,
   redirect, replay, session-purpose, log, and host-header attacks before:
   `git commit -m "feat(registry): add scoped GitHub web sign-in"`
 

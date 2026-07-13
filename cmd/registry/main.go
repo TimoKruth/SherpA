@@ -133,13 +133,14 @@ func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {
 			}
 		}()
 	}
-	github := registryauth.NewGitHubClient(cfg.GitHubClientID)
+	github := registryauth.NewGitHubClientWithSecret(cfg.GitHubClientID, cfg.GitHubClientSecret)
 	var ready atomic.Bool
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", api.HealthHandler(&ready))
 	mux.Handle("/", api.NewWithOptions(st, cs, cfg.Token, github, api.Options{
-		TrustProxy:    cfg.TrustProxy,
-		PublicBaseURL: cfg.PublicBaseURL,
+		TrustProxy:       cfg.TrustProxy,
+		PublicBaseURL:    cfg.PublicBaseURL,
+		WebPublicBaseURL: cfg.WebPublicBaseURL,
 	}))
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

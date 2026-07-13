@@ -439,24 +439,34 @@ func (p *publishSpyContent) RepoPath(owner, name string) string {
 }
 
 type publishSpyStore struct {
-	upsertUserCalls    int
-	upsertStackCalls   int
-	insertVersionCalls int
-	nextUserID         int64
-	nextStackID        int64
-	stackIDs           map[string]int64
-	stacks             map[string]store.Stack
-	versions           map[string][]store.Version
-	versionByKey       map[string]store.Version
-	insertedVersions   []store.Version
-	insertErr          error
-	getVersionErr      error
-	githubUserID       int64
-	githubLogin        string
-	createdSessionHash string
-	createdSessionTTL  time.Duration
-	createdPurpose     store.SessionPurpose
-	sessionIdentities  map[string]store.SessionIdentity
+	upsertUserCalls        int
+	upsertStackCalls       int
+	insertVersionCalls     int
+	nextUserID             int64
+	nextStackID            int64
+	stackIDs               map[string]int64
+	stacks                 map[string]store.Stack
+	versions               map[string][]store.Version
+	versionByKey           map[string]store.Version
+	insertedVersions       []store.Version
+	insertErr              error
+	getVersionErr          error
+	githubUserID           int64
+	githubLogin            string
+	createdSessionHash     string
+	createdSessionTTL      time.Duration
+	createdPurpose         store.SessionPurpose
+	sessionIdentities      map[string]store.SessionIdentity
+	webGrantHash           string
+	webGrantChallenge      string
+	webGrantTTL            time.Duration
+	webGrantErr            error
+	webExchangeGrantHash   string
+	webExchangeChallenge   string
+	webExchangeSessionHash string
+	webExchangeTTL         time.Duration
+	webExchangeIdentity    store.SessionIdentity
+	webExchangeErr         error
 }
 
 func newPublishSpyStore() *publishSpyStore {
@@ -497,12 +507,20 @@ func (p *publishSpyStore) SessionIdentity(_ context.Context, hash string) (store
 
 func (p *publishSpyStore) RevokeSession(context.Context, int64) error { return nil }
 
-func (p *publishSpyStore) CreateWebGrant(context.Context, int64, string, string, time.Duration) error {
-	return nil
+func (p *publishSpyStore) CreateWebGrant(_ context.Context, _ int64, hash, challenge string, ttl time.Duration) error {
+	p.webGrantHash, p.webGrantChallenge, p.webGrantTTL = hash, challenge, ttl
+	return p.webGrantErr
 }
 
-func (p *publishSpyStore) ExchangeWebGrant(context.Context, string, string, string, time.Duration) (store.SessionIdentity, error) {
-	return store.SessionIdentity{}, store.ErrWebGrantUnavailable
+func (p *publishSpyStore) ExchangeWebGrant(_ context.Context, grantHash, challenge, sessionHash string, ttl time.Duration) (store.SessionIdentity, error) {
+	p.webExchangeGrantHash, p.webExchangeChallenge, p.webExchangeSessionHash, p.webExchangeTTL = grantHash, challenge, sessionHash, ttl
+	if p.webExchangeErr != nil {
+		return store.SessionIdentity{}, p.webExchangeErr
+	}
+	if p.webExchangeIdentity.Login == "" {
+		return store.SessionIdentity{}, store.ErrWebGrantUnavailable
+	}
+	return p.webExchangeIdentity, nil
 }
 
 func (p *publishSpyStore) FollowStack(context.Context, int64, string, string) (store.Follow, error) {

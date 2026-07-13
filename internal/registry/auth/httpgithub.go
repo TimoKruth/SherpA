@@ -3,7 +3,9 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -11,13 +13,18 @@ import (
 )
 
 type HTTPGitHubClient struct {
-	clientID string
-	loginURL string
-	apiURL   string
-	client   *http.Client
+	clientID     string
+	clientSecret string
+	loginURL     string
+	apiURL       string
+	client       *http.Client
 }
 
 func NewGitHubClient(clientID string, httpBaseURLs ...string) *HTTPGitHubClient {
+	return NewGitHubClientWithSecret(clientID, "", httpBaseURLs...)
+}
+
+func NewGitHubClientWithSecret(clientID, clientSecret string, httpBaseURLs ...string) *HTTPGitHubClient {
 	loginURL := "https://github.com"
 	apiURL := "https://api.github.com"
 	if len(httpBaseURLs) > 0 {
@@ -26,7 +33,47 @@ func NewGitHubClient(clientID string, httpBaseURLs ...string) *HTTPGitHubClient 
 	if len(httpBaseURLs) > 1 {
 		apiURL = strings.TrimRight(httpBaseURLs[1], "/")
 	}
-	return &HTTPGitHubClient{clientID: clientID, loginURL: loginURL, apiURL: apiURL, client: &http.Client{Timeout: 30 * time.Second}}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	return &HTTPGitHubClient{clientID: clientID, clientSecret: clientSecret, loginURL: loginURL, apiURL: apiURL, client: &http.Client{
+		Transport: transport, Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("GitHub redirect rejected") },
+	}}
+}
+
+func (g *HTTPGitHubClient) WebAuthorizeURL(state, codeChallenge, callbackURL string) (string, error) {
+	if strings.TrimSpace(g.clientID) == "" || state == "" || codeChallenge == "" || callbackURL == "" {
+		return "", errors.New("GitHub web OAuth is not configured")
+	}
+	u, err := url.Parse(g.loginURL + "/login/oauth/authorize")
+	if err != nil {
+		return "", err
+	}
+	u.RawQuery = url.Values{
+		"client_id": {g.clientID}, "redirect_uri": {callbackURL}, "state": {state},
+		"code_challenge": {codeChallenge}, "code_challenge_method": {"S256"},
+	}.Encode()
+	return u.String(), nil
+}
+
+func (g *HTTPGitHubClient) ExchangeWebCode(ctx context.Context, code, codeVerifier, callbackURL string) (string, error) {
+	if strings.TrimSpace(g.clientSecret) == "" {
+		return "", errors.New("GitHub web OAuth is not configured")
+	}
+	var out struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		Error       string `json:"error"`
+	}
+	if err := g.postForm(ctx, g.loginURL+"/login/oauth/access_token", url.Values{
+		"client_id": {g.clientID}, "client_secret": {g.clientSecret}, "code": {code},
+		"redirect_uri": {callbackURL}, "code_verifier": {codeVerifier},
+	}, &out); err != nil {
+		return "", err
+	}
+	if out.Error != "" || out.AccessToken == "" || !strings.EqualFold(out.TokenType, "bearer") {
+		return "", errors.New("GitHub OAuth token response was invalid")
+	}
+	return out.AccessToken, nil
 }
 
 func (g *HTTPGitHubClient) StartDeviceFlow(ctx context.Context) (DeviceCode, error) {
@@ -87,7 +134,7 @@ func (g *HTTPGitHubClient) GetUser(ctx context.Context, accessToken string) (Git
 		return GitHubUser{}, fmt.Errorf("GitHub user endpoint: HTTP %d", resp.StatusCode)
 	}
 	var user GitHubUser
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+	if err := decodeBoundedGitHubJSON(resp.Body, &user); err != nil {
 		return GitHubUser{}, err
 	}
 	if user.ID == 0 || strings.TrimSpace(user.Login) == "" {
@@ -111,5 +158,19 @@ func (g *HTTPGitHubClient) postForm(ctx context.Context, endpoint string, values
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("GitHub endpoint: HTTP %d", resp.StatusCode)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return decodeBoundedGitHubJSON(resp.Body, out)
+}
+
+func decodeBoundedGitHubJSON(body io.Reader, out any) error {
+	encoded, err := io.ReadAll(io.LimitReader(body, (1<<20)+1))
+	if err != nil {
+		return err
+	}
+	if len(encoded) > 1<<20 {
+		return errors.New("GitHub response too large")
+	}
+	if err := json.Unmarshal(encoded, out); err != nil {
+		return errors.New("GitHub response was invalid")
+	}
+	return nil
 }

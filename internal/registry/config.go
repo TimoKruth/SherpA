@@ -2,6 +2,7 @@ package registry
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path"
@@ -11,31 +12,35 @@ import (
 )
 
 type Config struct {
-	Port             string
-	DatabaseURL      string
-	Token            string
-	ContentDir       string
-	GitHubClientID   string
-	PublicBaseURL    string
-	TrustProxy       bool
-	DBMaxConns       int
-	ExportURL        string
-	ExportToken      string
-	ExportInterval   time.Duration
-	ExportArchiveDir string
+	Port               string
+	DatabaseURL        string
+	Token              string
+	ContentDir         string
+	GitHubClientID     string
+	GitHubClientSecret string
+	PublicBaseURL      string
+	WebPublicBaseURL   string
+	TrustProxy         bool
+	DBMaxConns         int
+	ExportURL          string
+	ExportToken        string
+	ExportInterval     time.Duration
+	ExportArchiveDir   string
 }
 
 func LoadConfig() (Config, error) {
 	cfg := Config{
-		Port:             valueOrDefault("PORT", "8080"),
-		DatabaseURL:      strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		Token:            strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_TOKEN")),
-		ContentDir:       valueOrDefault("SHERPA_CONTENT_DIR", "./registry-content"),
-		GitHubClientID:   strings.TrimSpace(os.Getenv("SHERPA_GITHUB_CLIENT_ID")),
-		PublicBaseURL:    strings.TrimSpace(os.Getenv("SHERPA_PUBLIC_BASE_URL")),
-		ExportURL:        strings.TrimSpace(os.Getenv("SHERPA_EXPORT_URL")),
-		ExportToken:      strings.TrimSpace(os.Getenv("SHERPA_EXPORT_TOKEN")),
-		ExportArchiveDir: strings.TrimSpace(os.Getenv("SHERPA_EXPORT_ARCHIVE_DIR")),
+		Port:               valueOrDefault("PORT", "8080"),
+		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		Token:              strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_TOKEN")),
+		ContentDir:         valueOrDefault("SHERPA_CONTENT_DIR", "./registry-content"),
+		GitHubClientID:     strings.TrimSpace(os.Getenv("SHERPA_GITHUB_CLIENT_ID")),
+		GitHubClientSecret: strings.TrimSpace(os.Getenv("SHERPA_GITHUB_CLIENT_SECRET")),
+		PublicBaseURL:      strings.TrimSpace(os.Getenv("SHERPA_PUBLIC_BASE_URL")),
+		WebPublicBaseURL:   strings.TrimSpace(os.Getenv("SHERPA_WEB_PUBLIC_BASE_URL")),
+		ExportURL:          strings.TrimSpace(os.Getenv("SHERPA_EXPORT_URL")),
+		ExportToken:        strings.TrimSpace(os.Getenv("SHERPA_EXPORT_TOKEN")),
+		ExportArchiveDir:   strings.TrimSpace(os.Getenv("SHERPA_EXPORT_ARCHIVE_DIR")),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -46,6 +51,28 @@ func LoadConfig() (Config, error) {
 		cfg.PublicBaseURL, err = canonicalPublicBaseURL(cfg.PublicBaseURL)
 		if err != nil {
 			return Config{}, fmt.Errorf("SHERPA_PUBLIC_BASE_URL: %w", err)
+		}
+	}
+	webConfigured := cfg.GitHubClientSecret != "" || cfg.WebPublicBaseURL != ""
+	if webConfigured && (cfg.GitHubClientSecret == "" || cfg.WebPublicBaseURL == "") {
+		return Config{}, fmt.Errorf("SHERPA_GITHUB_CLIENT_SECRET and SHERPA_WEB_PUBLIC_BASE_URL must be configured together")
+	}
+	if webConfigured {
+		if cfg.GitHubClientID == "" || cfg.PublicBaseURL == "" {
+			return Config{}, fmt.Errorf("SHERPA_GITHUB_CLIENT_ID and SHERPA_PUBLIC_BASE_URL are required when web OAuth is enabled")
+		}
+		var err error
+		cfg.WebPublicBaseURL, err = canonicalPublicBaseURL(cfg.WebPublicBaseURL)
+		if err != nil {
+			return Config{}, fmt.Errorf("SHERPA_WEB_PUBLIC_BASE_URL: %w", err)
+		}
+		registryURL, _ := url.Parse(cfg.PublicBaseURL)
+		websiteURL, _ := url.Parse(cfg.WebPublicBaseURL)
+		if registryURL.Scheme == websiteURL.Scheme && registryURL.Host == websiteURL.Host {
+			return Config{}, fmt.Errorf("registry and website public origins must be distinct")
+		}
+		if !secureOrLoopback(registryURL) || !secureOrLoopback(websiteURL) {
+			return Config{}, fmt.Errorf("web OAuth public URLs must use HTTPS outside loopback development")
 		}
 	}
 
@@ -64,6 +91,14 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("SHERPA_EXPORT_URL and SHERPA_EXPORT_INTERVAL must be configured together")
 	}
 	return cfg, nil
+}
+
+func secureOrLoopback(parsed *url.URL) bool {
+	if parsed.Scheme == "https" {
+		return true
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func canonicalPublicBaseURL(value string) (string, error) {
@@ -88,7 +123,18 @@ func canonicalPublicBaseURL(value string) (string, error) {
 		return "", fmt.Errorf("fragment is not allowed")
 	}
 
-	parsed.Host = strings.ToLower(parsed.Host)
+	hostname := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(hostname, port)
+	} else if strings.Contains(hostname, ":") {
+		parsed.Host = "[" + hostname + "]"
+	} else {
+		parsed.Host = hostname
+	}
 	parsed.RawPath = ""
 	parsed.RawFragment = ""
 	parsed.Path = path.Clean(parsed.Path)
