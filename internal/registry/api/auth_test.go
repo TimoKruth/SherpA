@@ -120,34 +120,58 @@ func TestDeviceLimiterExpiresPollEntries(t *testing.T) {
 	}
 }
 
-func TestDeviceStartClientIPHonorsTrustProxy(t *testing.T) {
+func TestDeviceStartClientIPHonorsForwardedFor(t *testing.T) {
 	newHandler := func(trustProxy bool) (http.Handler, *registryauth.FakeGitHubClient) {
 		gh := &registryauth.FakeGitHubClient{Device: registryauth.DeviceCode{DeviceCode: "device", Interval: 5, ExpiresIn: 900}}
 		return NewWithOptions(newPublishSpyStore(), newPublishSpyContent(t), "", gh, Options{TrustProxy: trustProxy}), gh
 	}
-	request := func(h http.Handler, realIP string) int {
+	start := func(h http.Handler, headers map[string]string) int {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/v1/auth/device/start", nil)
 		req.RemoteAddr = "192.0.2.10:1234"
-		req.Header.Set("X-Real-IP", realIP)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
 		h.ServeHTTP(rr, req)
 		return rr.Code
 	}
+	xff := func(v string) map[string]string { return map[string]string{"X-Forwarded-For": v} }
 
+	// trustProxy=false: forwarded headers ignored; all requests share RemoteAddr's bucket.
 	direct, directGitHub := newHandler(false)
-	if first, second := request(direct, "198.51.100.1"), request(direct, "198.51.100.2"); first != http.StatusOK || second != http.StatusTooManyRequests {
+	if first, second := start(direct, xff("198.51.100.1")), start(direct, xff("198.51.100.2")); first != http.StatusOK || second != http.StatusTooManyRequests {
 		t.Fatalf("direct statuses = %d, %d", first, second)
 	}
 	if directGitHub.StartCalls != 1 {
 		t.Fatalf("direct StartCalls = %d", directGitHub.StartCalls)
 	}
 
+	// trustProxy=true: the rightmost (proxy-appended) hop identifies the client,
+	// so two distinct clients get independent buckets.
 	proxied, proxiedGitHub := newHandler(true)
-	if first, second := request(proxied, "198.51.100.1"), request(proxied, "198.51.100.2"); first != http.StatusOK || second != http.StatusOK {
+	if first, second := start(proxied, xff("198.51.100.1")), start(proxied, xff("198.51.100.2")); first != http.StatusOK || second != http.StatusOK {
 		t.Fatalf("proxied statuses = %d, %d", first, second)
 	}
 	if proxiedGitHub.StartCalls != 2 {
 		t.Fatalf("proxied StartCalls = %d", proxiedGitHub.StartCalls)
+	}
+
+	// Spoof resistance: prepended (left) entries are attacker-controlled and
+	// must not create new buckets. Two requests whose RIGHTMOST hop is identical
+	// share a bucket regardless of the differing prepended spoof.
+	spoof, _ := newHandler(true)
+	if first := start(spoof, xff("10.0.0.9, 203.0.113.7")); first != http.StatusOK {
+		t.Fatalf("spoof first = %d", first)
+	}
+	if second := start(spoof, xff("10.0.0.250, 203.0.113.7")); second != http.StatusTooManyRequests {
+		t.Fatalf("spoof second = %d, want limited (shared rightmost hop 203.0.113.7)", second)
+	}
+
+	// X-Real-IP is no longer trusted: two requests differing only in X-Real-IP
+	// share RemoteAddr's bucket, so the second is limited.
+	realIP, _ := newHandler(true)
+	if first, second := start(realIP, map[string]string{"X-Real-IP": "198.51.100.77"}), start(realIP, map[string]string{"X-Real-IP": "198.51.100.88"}); first != http.StatusOK || second != http.StatusTooManyRequests {
+		t.Fatalf("X-Real-IP trusted? statuses = %d, %d", first, second)
 	}
 }
 
@@ -187,8 +211,15 @@ func TestDevicePollRateLimitAndSlowDown(t *testing.T) {
 func TestRequestLoggerExcludesSecrets(t *testing.T) {
 	var output bytes.Buffer
 	logger := log.New(&output, "", 0)
-	gh := &registryauth.FakeGitHubClient{PollResults: []registryauth.PollResult{{Err: registryauth.ErrAuthPending}}}
+	gh := &registryauth.FakeGitHubClient{
+		Device:      registryauth.DeviceCode{DeviceCode: "github-token-session-token", ExpiresIn: 900},
+		PollResults: []registryauth.PollResult{{Err: registryauth.ErrAuthPending}},
+	}
 	h := NewWithOptions(newPublishSpyStore(), newPublishSpyContent(t), "", gh, Options{Logger: logger})
+	// Register the code via /start so the poll reaches the pending (202) path,
+	// then assert the poll's log line carries no secrets.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/auth/device/start", nil))
+	output.Reset()
 	req := httptest.NewRequest(http.MethodPost, "/v1/auth/device/poll?token=query-secret", strings.NewReader(`{"device_code":"github-token-session-token"}`))
 	req.Header.Set("Authorization", "Bearer bearer-secret")
 	req.Header.Set("X-Railway-Request-Id", "railway-request-123")
@@ -208,6 +239,19 @@ func TestRequestLoggerExcludesSecrets(t *testing.T) {
 	}
 }
 
+func TestDevicePollRejectsUnregisteredCodeWithoutGitHubCall(t *testing.T) {
+	gh := &registryauth.FakeGitHubClient{PollResults: []registryauth.PollResult{{AccessToken: "should-not-be-used"}}}
+	h := New(newPublishSpyStore(), newPublishSpyContent(t), "", gh)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/auth/device/poll", strings.NewReader(`{"device_code":"never-registered"}`)))
+	if rr.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410 for an unregistered code", rr.Code)
+	}
+	if gh.PollCalls != 0 {
+		t.Fatalf("PollCalls = %d, want 0 (no GitHub call for a code never registered via /start)", gh.PollCalls)
+	}
+}
+
 func TestDevicePollStatusMapping(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -219,9 +263,17 @@ func TestDevicePollStatusMapping(t *testing.T) {
 		{"expired", registryauth.ErrExpired, http.StatusGone, `"error":"device code expired"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			clock := &authTestClock{now: time.Unix(1_700_000_000, 0)}
 			st := newPublishSpyStore()
-			gh := &registryauth.FakeGitHubClient{PollResults: []registryauth.PollResult{{Err: tc.err}}}
-			h := New(st, newPublishSpyContent(t), "", gh)
+			gh := &registryauth.FakeGitHubClient{
+				Device:      registryauth.DeviceCode{DeviceCode: "device", Interval: 5, ExpiresIn: 900},
+				PollResults: []registryauth.PollResult{{Err: tc.err}},
+			}
+			h := NewWithOptions(st, newPublishSpyContent(t), "", gh, Options{Now: clock.Now})
+			// Register the device via /start so the poll is for a known code, then
+			// advance past the initial poll interval.
+			h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/auth/device/start", nil))
+			clock.Advance(5 * time.Second)
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/auth/device/poll", strings.NewReader(`{"device_code":"device"}`)))
 			if rr.Code != tc.status || !strings.Contains(rr.Body.String(), tc.body) {

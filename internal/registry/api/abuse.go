@@ -76,7 +76,13 @@ func (l *authLimiter) registerDevice(code string, interval, expiry time.Duration
 	}
 }
 
-func (l *authLimiter) allowPoll(code string) (time.Duration, bool) {
+// allowPoll reports whether a poll for code may proceed. known is false when the
+// code was never registered via /start on this instance (or has since expired):
+// the caller must treat it as a dead code and MUST NOT contact GitHub. Rejecting
+// unregistered codes closes the rotate-random-codes abuse that would otherwise
+// yield one outbound GitHub token-poll per unauthenticated request (a DoS of the
+// shared OAuth client_id).
+func (l *authLimiter) allowPoll(code string) (retry time.Duration, allowed, known bool) {
 	key := sha256.Sum256([]byte(code))
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -84,15 +90,14 @@ func (l *authLimiter) allowPoll(code string) (time.Duration, bool) {
 	l.cleanup(now)
 	entry, ok := l.devices[key]
 	if !ok {
-		l.makeDeviceRoom()
-		entry = limitEntry{interval: devicePollDefault, expires: now.Add(deviceDefaultExpiry)}
+		return 0, false, false
 	}
 	if now.Before(entry.next) {
-		return entry.next.Sub(now), false
+		return entry.next.Sub(now), false, true
 	}
 	entry.next = now.Add(entry.interval)
 	l.devices[key] = entry
-	return 0, true
+	return 0, true, true
 }
 
 func (l *authLimiter) slowDown(code string) {
@@ -156,8 +161,13 @@ func (l *authLimiter) makeDeviceRoom() {
 
 func clientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
-		forwarded := strings.TrimSpace(r.Header.Get("X-Real-IP"))
-		if net.ParseIP(forwarded) != nil {
+		// Trust ONLY the rightmost X-Forwarded-For entry: the hop appended by
+		// our own edge proxy (Railway). A client can prepend spoofed entries to
+		// the left, but cannot control the value the trusted proxy appends. We
+		// deliberately do NOT read X-Real-IP: it is a single client-forwardable
+		// value with no append semantics, so trusting it would let a caller set
+		// an arbitrary per-IP rate-limit bucket and bypass the start limit.
+		if forwarded := rightmostForwardedFor(r.Header.Get("X-Forwarded-For")); forwarded != "" {
 			return forwarded
 		}
 	}
@@ -166,6 +176,21 @@ func clientIP(r *http.Request, trustProxy bool) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+// rightmostForwardedFor returns the last comma-separated entry of an
+// X-Forwarded-For header if it is a valid IP, else "". Only the rightmost hop
+// is trusted (see clientIP); a non-IP rightmost value falls back to RemoteAddr.
+func rightmostForwardedFor(header string) string {
+	if strings.TrimSpace(header) == "" {
+		return ""
+	}
+	parts := strings.Split(header, ",")
+	last := strings.TrimSpace(parts[len(parts)-1])
+	if net.ParseIP(last) != nil {
+		return last
+	}
+	return ""
 }
 
 func writeRateLimited(w http.ResponseWriter, retry time.Duration) {

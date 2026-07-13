@@ -55,7 +55,16 @@ func (s *server) handleDevicePoll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "device_code is required")
 		return
 	}
-	if retry, allowed := s.limiter.allowPoll(req.DeviceCode); !allowed {
+	retry, allowed, known := s.limiter.allowPoll(req.DeviceCode)
+	if !known {
+		// Never registered via /start on this instance (or already expired):
+		// reject as a dead code WITHOUT contacting GitHub. This closes the
+		// code-rotation abuse that would otherwise turn every unauthenticated
+		// poll into an outbound GitHub token-poll.
+		writeError(w, http.StatusGone, "device code expired")
+		return
+	}
+	if !allowed {
 		writeRateLimited(w, retry)
 		return
 	}

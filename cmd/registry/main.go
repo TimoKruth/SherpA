@@ -53,6 +53,7 @@ func sleepWithContext(ctx context.Context, delay time.Duration) error {
 
 func openPostgresWithRetry(ctx context.Context, dsn string, maxConns int, open postgresOpener, sleep retrySleeper) (*store.PostgresStore, error) {
 	delay := postgresRetryDelay
+	var lastErr error
 	for attempt := 1; attempt <= postgresOpenAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -61,6 +62,7 @@ func openPostgresWithRetry(ctx context.Context, dsn string, maxConns int, open p
 		if err == nil {
 			return st, nil
 		}
+		lastErr = err
 		if attempt == postgresOpenAttempts {
 			break
 		}
@@ -75,7 +77,9 @@ func openPostgresWithRetry(ctx context.Context, dsn string, maxConns int, open p
 			}
 		}
 	}
-	return nil, errors.New("open registry database: retry limit reached")
+	// pgx redacts the password in its connection errors, so wrapping the last
+	// cause is secret-safe and gives ops something to debug a dead boot with.
+	return nil, fmt.Errorf("open registry database: retry limit reached after %d attempts: %w", postgresOpenAttempts, lastErr)
 }
 
 func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {

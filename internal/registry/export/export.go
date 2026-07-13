@@ -379,10 +379,18 @@ func Upload(ctx context.Context, archivePath, collectorURL, token string) error 
 		return fmt.Errorf("open export archive: %w", err)
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat export archive: %w", err)
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, collectorURL, file)
 	if err != nil {
 		return errors.New("create export upload request")
 	}
+	// An *os.File body leaves ContentLength unset (chunked transfer), which a
+	// collector that doesn't validate the manifest could store truncated. Set it
+	// explicitly so the upload is a definite length.
+	request.ContentLength = info.Size()
 	request.Header.Set("Content-Type", "application/gzip")
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)

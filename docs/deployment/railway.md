@@ -23,8 +23,12 @@ platform behavior, not an application guarantee.
 - Services in the same project and environment have private `railway.internal` networking.
   See [Private networking](https://docs.railway.com/private-networking).
 - Public HTTP requests have a 15-minute maximum duration and Railway supplies
-  `X-Real-IP`, `X-Forwarded-Proto`, and `X-Railway-Request-Id`. See
+  `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Railway-Request-Id`. See
   [public-networking limits](https://docs.railway.com/networking/public-networking/specs-and-limits).
+  Per-IP auth rate limiting keys on the **rightmost** `X-Forwarded-For` hop (the value the
+  Railway edge appends); client-prependable headers, including `X-Real-IP` and any left-hand
+  `X-Forwarded-For` entries, are not trusted for identity. This assumption is verified at the
+  staging gate — see step 6.
 
 Keep the registry at one replica while it owns a local bare-Git volume. Railway snapshots
 are the fast in-project recovery tier. The application export sent outside Railway is the
@@ -52,8 +56,12 @@ RPO/RTO, collector/retention policy, resource limits, and alert ownership.
 ## Provisioning
 
 1. Create `staging` and `production` environments. Begin with staging only.
-2. Create a Railway Postgres service in the selected region. Do not expose its TCP port
-   publicly. Add a reference variable on the registry service:
+2. Create a Railway Postgres service in the selected region, **provisioned at major version
+   16** to match the `pg_dump` baked into the runtime image (Dockerfile `postgres:16-bookworm`).
+   `pg_dump` refuses a server newer than itself, so a PG17+ server silently breaks every
+   scheduled off-site export; if you must run a newer server, bump the image's `postgres` base
+   in lockstep. Do not expose its TCP port publicly. Add a reference variable on the registry
+   service:
 
    ```text
    DATABASE_URL=${{Postgres.DATABASE_URL}}
@@ -91,7 +99,7 @@ Configure variables in Railway's secret/variable UI. Never place secret values i
 | `SHERPA_CONTENT_DIR` | Required; `/data/git` |
 | `SHERPA_PUBLIC_BASE_URL` | Required; canonical public HTTPS origin |
 | `SHERPA_GITHUB_CLIENT_ID` | Required; environment-specific OAuth App with device flow |
-| `SHERPA_TRUST_PROXY` | Set `true` on Railway; affects scheme and `X-Real-IP`, never host |
+| `SHERPA_TRUST_PROXY` | Set `true` on Railway; trusts `X-Forwarded-Proto` for scheme and the rightmost `X-Forwarded-For` hop for per-IP rate limiting, never host |
 | `SHERPA_DB_MAX_CONNS` | Optional positive pool cap matched to the Postgres plan |
 | `SHERPA_REGISTRY_TOKEN` | Optional admin/CI bypass; omit for normal session-only operation |
 | `PORT` | Injected by Railway; do not hard-code it |
@@ -172,11 +180,22 @@ step. Do not record tokens or device codes.
    reports `trust_tier=linked`.
 5. Make a wrong-owner publish attempt under another login. Confirm HTTP `403`, no version
    row, and no new Git tag. Run `registry audit` to support the no-content-change check.
-6. Exercise the public auth controls from a staging workstation: send two device-start
-   requests inside one minute and confirm the second is `429` with `Retry-After`; send JSON
-   larger than 4 KiB to device poll and confirm `413`; send the same non-secret test device
-   code twice without waiting and confirm the second poll is `429`. Confirm locally rejected
-   requests do not produce GitHub-call errors and request logs contain no headers or bodies.
+6. Exercise the public auth controls from a staging workstation:
+   - Send two device-start requests inside one minute and confirm the second is `429` with
+     `Retry-After`; send JSON larger than 4 KiB to device poll and confirm `413`.
+   - Start a real device flow, then poll its (registered) device code twice without waiting and
+     confirm the second poll is `429`. Poll a random, never-started device code and confirm
+     `410` with no GitHub-call error in the logs (unregistered codes must never reach GitHub).
+   - **Verify per-IP identity depends on the Railway edge, not a client header.** From two
+     genuinely different source IPs, confirm each gets its own device-start allowance (proving
+     Railway populates the rightmost `X-Forwarded-For` hop and clients are not all collapsed
+     into one global bucket). Then, from a single IP already rate-limited, send device-start
+     with a forged `X-Real-IP` and with an extra prepended `X-Forwarded-For` entry; confirm
+     **neither** header grants a fresh allowance (no rate-limit bypass). If two distinct clients
+     share a bucket, Railway is not appending `X-Forwarded-For` as assumed — stop and reconcile
+     before production.
+   - Confirm locally rejected requests do not produce GitHub-call errors and request logs
+     contain no headers or bodies.
 7. Search and view the published stack, then clone its returned `repo_url`. Confirm the URL is
    the configured public HTTPS domain even when a test request supplies a spoofed
    `X-Forwarded-Host`.
