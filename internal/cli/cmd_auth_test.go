@@ -89,6 +89,24 @@ func TestLegacyRegistrySessionFailsClosed(t *testing.T) {
 	}
 }
 
+func TestRegistryUserSessionIsIssuerScopedAndIgnoresAdminToken(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SHERPA_REGISTRY_TOKEN", "admin-token")
+	if _, err := registryUserSession(home, "https://registry.example"); err == nil || !strings.Contains(err.Error(), "not logged in") {
+		t.Fatalf("missing session error = %v", err)
+	}
+	if err := saveRegistrySession(home, "HTTPS://REGISTRY.EXAMPLE:443/", "user-token", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := registryUserSession(home, "https://registry.example")
+	if err != nil || session.AccessToken != "user-token" || session.Login != "alice" || session.RegistryURL != "https://registry.example" {
+		t.Fatalf("session = %#v, %v", session, err)
+	}
+	if _, err := registryUserSession(home, "https://other.example"); err == nil || !strings.Contains(err.Error(), "registry session belongs to") {
+		t.Fatalf("issuer mismatch error = %v", err)
+	}
+}
+
 func TestRegistryPublishForbiddenExplainsOwnerScope(t *testing.T) {
 	var out bytes.Buffer
 	printRegistryPublishError(&out, http.StatusForbidden, []byte(`{"error":"forbidden"}`))

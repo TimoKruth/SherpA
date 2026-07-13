@@ -6,14 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"sherpa/internal/registryurl"
 )
 
 type registrySession struct {
@@ -114,41 +113,26 @@ func registryToken(home, targetRegistryURL string) (string, error) {
 	return token, nil
 }
 
-func normalizeRegistryBase(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", errors.New("registry URL is required")
-	}
-	u, err := url.Parse(raw)
+func registryUserSession(home, targetRegistryURL string) (registrySession, error) {
+	targetRegistryURL, err := normalizeRegistryBase(targetRegistryURL)
 	if err != nil {
-		return "", fmt.Errorf("registry URL: %w", err)
+		return registrySession{}, err
 	}
-	if u.Scheme == "" || u.Host == "" {
-		return "", errors.New("registry URL must include scheme and host")
+	token, login, sessionRegistryURL, err := loadRegistrySession(home)
+	if os.IsNotExist(err) {
+		return registrySession{}, errors.New("not logged in; run `sherpa login`")
 	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
-		return "", errors.New("registry URL must not include credentials, query, or fragment")
+	if err != nil {
+		return registrySession{}, err
 	}
+	if sessionRegistryURL != targetRegistryURL {
+		return registrySession{}, fmt.Errorf("registry session belongs to %s; log in to %s", sessionRegistryURL, targetRegistryURL)
+	}
+	return registrySession{AccessToken: token, Login: login, RegistryURL: sessionRegistryURL}, nil
+}
 
-	u.Scheme = strings.ToLower(u.Scheme)
-	hostname := strings.ToLower(u.Hostname())
-	port := u.Port()
-	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
-		port = ""
-	}
-	if port != "" {
-		u.Host = net.JoinHostPort(hostname, port)
-	} else if strings.Contains(hostname, ":") {
-		u.Host = "[" + hostname + "]"
-	} else {
-		u.Host = hostname
-	}
-	u.Path = path.Clean("/" + strings.Trim(u.Path, "/"))
-	if u.Path == "/" {
-		u.Path = ""
-	}
-	u.RawPath = ""
-	return u.String(), nil
+func normalizeRegistryBase(raw string) (string, error) {
+	return registryurl.Normalize(raw)
 }
 
 func cmdLogin(ctx *Ctx, args []string) error {

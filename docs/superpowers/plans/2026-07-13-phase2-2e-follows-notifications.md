@@ -4,7 +4,7 @@
 > implementation workers when available, with a separate adversarial/Fable-class review for the
 > session, OAuth/grant, feed-concurrency, and CSRF boundaries.
 
-**Status:** In progress; Task 1 implemented and verified
+**Status:** In progress; Tasks 1-3 implemented and verified
 
 **Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
 session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
@@ -12,6 +12,10 @@ inserts, and fail-closed web-session publish rejection. Focused race tests, the 
 suite, vet, command builds, and whitespace checks are green. Task 2 adds idempotent follows,
 derived keyset-paged update feeds, monotonic seen state, verdict-only feedback, scoped personal
 APIs, public follower counts, and bounded expert data with the same verification gates green.
+Task 3 adds canonical registry issuers shared by session and non-secret state, backward-compatible
+state migration, atomic `0600` saves, an issuer-scoped user-session lookup, and a typed bounded
+social client that rejects redirects and redacts all remote details from errors. Its focused race
+suite and the repository-wide verification gates are green.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -194,19 +198,19 @@ Add `Registry *RegistryOrigin` to `state.Profile`. JSON fields use `omitempty`; 
 readable. Canonical registry keys reuse the session issuer normalizer rather than inventing a
 second URL equivalence rule.
 
-- [ ] **Step 1: Write state migration/permission tests.** Load old fixtures, nil maps, unknown
+- [x] **Step 1: Write state migration/permission tests.** Load old fixtures, nil maps, unknown
   additive fields, duplicate pending refs, and registry URLs with equivalent trailing slash/path
   forms. Save remains atomic and mode `0600`; no token enters serialized state.
-- [ ] **Step 2: Write the bounded client tests.** Follow/unfollow/list/seen/trial calls build fixed
+- [x] **Step 2: Write the bounded client tests.** Follow/unfollow/list/seen/trial calls build fixed
   URLs, send the issuer-matched bearer only, reject redirects, cap JSON, honor context/timeouts,
   classify `401/403/404/410/429/5xx`, and redact bearer/body/base URL from errors.
-- [ ] **Step 3: Refactor auth lookup once.** Expose an internal helper that loads the registry-
+- [x] **Step 3: Refactor auth lookup once.** Expose an internal helper that loads the registry-
   scoped session currently used by publish. Preserve `SHERPA_REGISTRY_TOKEN` precedence only for
   publish; personal calls explicitly reject/ignore it and require a saved user session.
-- [ ] **Step 4: Implement state/client.** Keep public search behavior compatible while consolidating
+- [x] **Step 4: Implement state/client.** Keep public search behavior compatible while consolidating
   endpoint/client construction enough to avoid unbounded `http.Get` in new paths. Do not broaden
   this task into an unrelated full client rewrite.
-- [ ] **Step 5: Verify and commit.** Run:
+- [x] **Step 5: Verify and commit.** Run:
   `go test -race ./internal/state ./internal/cli`
   `git commit -m "feat(cli): add registry-scoped social state and client"`
 
