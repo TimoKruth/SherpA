@@ -74,6 +74,11 @@ func validateListenAddr(addr string) error {
 }
 
 func validatePort(port string) error {
+	for _, char := range port {
+		if char < '0' || char > '9' {
+			return errors.New("invalid port")
+		}
+	}
 	value, err := strconv.Atoi(port)
 	if err != nil || value < 1 || value > 65535 {
 		return errors.New("invalid port")

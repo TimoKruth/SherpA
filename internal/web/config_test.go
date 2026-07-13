@@ -66,7 +66,7 @@ func TestLoadConfigRequiresRegistryURL(t *testing.T) {
 }
 
 func TestLoadConfigRejectsInvalidPortsAndAddresses(t *testing.T) {
-	for _, port := range []string{"0", "65536", "-1", "abc", "80.5"} {
+	for _, port := range []string{"0", "65536", "-1", "+8080", "abc", "80.5"} {
 		t.Run("port_"+port, func(t *testing.T) {
 			setBaseConfigEnv(t)
 			t.Setenv("PORT", port)
