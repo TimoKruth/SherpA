@@ -173,6 +173,28 @@ func TestDeviceStartClientIPHonorsForwardedFor(t *testing.T) {
 	if first, second := start(realIP, map[string]string{"X-Real-IP": "198.51.100.77"}), start(realIP, map[string]string{"X-Real-IP": "198.51.100.88"}); first != http.StatusOK || second != http.StatusTooManyRequests {
 		t.Fatalf("X-Real-IP trusted? statuses = %d, %d", first, second)
 	}
+
+	// Multi-line X-Forwarded-For: a proxy may append its hop as a separate header
+	// line. The rightmost hop across all lines identifies the client, so two
+	// requests sharing that final hop share a bucket despite differing earlier
+	// lines.
+	multiline, _ := newHandler(true)
+	startLines := func(lines ...string) int {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/auth/device/start", nil)
+		req.RemoteAddr = "192.0.2.10:1234"
+		for _, line := range lines {
+			req.Header.Add("X-Forwarded-For", line)
+		}
+		multiline.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if first := startLines("1.1.1.1", "203.0.113.7"); first != http.StatusOK {
+		t.Fatalf("multiline first = %d", first)
+	}
+	if second := startLines("9.9.9.9", "203.0.113.7"); second != http.StatusTooManyRequests {
+		t.Fatalf("multiline second = %d, want limited (shared final-line hop 203.0.113.7)", second)
+	}
 }
 
 func TestDevicePollRateLimitAndSlowDown(t *testing.T) {

@@ -167,7 +167,11 @@ func clientIP(r *http.Request, trustProxy bool) string {
 		// deliberately do NOT read X-Real-IP: it is a single client-forwardable
 		// value with no append semantics, so trusting it would let a caller set
 		// an arbitrary per-IP rate-limit bucket and bypass the start limit.
-		if forwarded := rightmostForwardedFor(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		// Join all X-Forwarded-For header lines before taking the rightmost hop:
+		// a proxy may append its hop as a separate header line rather than
+		// comma-extending the client's, and only the true rightmost (edge) hop
+		// is trustworthy.
+		if forwarded := rightmostForwardedFor(strings.Join(r.Header.Values("X-Forwarded-For"), ",")); forwarded != "" {
 			return forwarded
 		}
 	}
