@@ -4,7 +4,7 @@
 > implementation workers when available, with a separate adversarial/Fable-class review for the
 > session, OAuth/grant, feed-concurrency, and CSRF boundaries.
 
-**Status:** In progress; Tasks 1-9 implemented and verified
+**Status:** Implemented; automated gates green, live Railway acceptance pending
 
 **Implementation record (2026-07-13):** Task 1 adds additive social tables, explicit CLI/web
 session purposes, revocation and nonce-bound one-use grant primitives, transactional version/event
@@ -44,6 +44,10 @@ grant exchange/replay, purpose-scoped publish denial, admin personal-API denial,
 The adversarial/full-regression corpus, uncached suite, focused race suite, vet, command builds,
 registry Docker smoke, corrected auth-enabled website Docker smoke, and whitespace checks are
 green; the review found no remaining Important or Critical auth/privacy/publish boundary issue.
+Task 10 documents registry-only OAuth secrets and callback ownership, the website's transient
+opaque browser credential without inventing a deploy-time session key, separate staging and
+production OAuth Apps, the pre-2e web-session rollback purge, and the operator-recorded 12-step
+live Railway gate. README command/config coverage and documentation/shell validation are green.
 
 **Goal:** Add stack follows, bounded pending-update feeds, scoped website sign-in, CLI update
 awareness, and privacy-preserving trial feedback while keeping publish constant-time in follower
@@ -511,20 +515,20 @@ construct either.
 - Modify: `docs/superpowers/plans/2026-07-13-phase2-2e-follows-notifications.md` status after
   automated implementation only; do not mark the live gate complete without operator evidence
 
-- [ ] **Step 1: Amend registry variables.** Document registry-only
+- [x] **Step 1: Amend registry variables.** Document registry-only
   `SHERPA_GITHUB_CLIENT_SECRET`, registry-side `SHERPA_WEB_PUBLIC_BASE_URL`, separate staging/prod
   OAuth Apps and exact callback URLs, minimal scopes, secret rotation/revocation, and unchanged
   device-flow requirements. Never put values in docs or build args.
-- [ ] **Step 2: Amend website separation truthfully.** Add public registry origin, browser cookies,
+- [x] **Step 2: Amend website separation truthfully.** Add public registry origin, browser cookies,
   and transient user session credentials. Keep no DB/volume/admin/GitHub secret/deploy-time
   session key. Document that auth availability now depends on the registry while public process
   health remains local.
-- [ ] **Step 3: Add migration/rollback notes.** Migrations remain additive. Old images ignore new
+- [x] **Step 3: Add migration/rollback notes.** Migrations remain additive. Old images ignore new
   tables/columns and rollback safely; once web sessions exist, an old image treats them as normal
   sessions unless publish checks are in that old image. Therefore rollback below the 2e boundary
   requires first revoking/deleting `purpose='web'` sessions or disabling web login, then deploying
   the old image. This is a security-critical exception to the earlier generic additive rollback.
-- [ ] **Step 4: Add live staging gate.** Record exact commits/domains/operator/times without
+- [x] **Step 4: Add live staging gate.** Record exact commits/domains/operator/times without
   secrets. Required checks:
   1. Existing 2c-iii and 2d gates passed for the candidate.
   2. Real GitHub website login uses the staging OAuth App and pinned callback/domain.
@@ -548,7 +552,7 @@ construct either.
       values; export/restore includes follows/events/feedback and grant/session hashes only.
   12. Separate registry-only and website-only rollback drills preserve publish authorization and
       public discovery; pre-2e registry rollback follows the web-session revocation procedure.
-- [ ] **Step 5: Verify docs and commit.** Run `git diff --check`, validate any changed JSON/shell,
+- [x] **Step 5: Verify docs and commit.** Run `git diff --check`, validate any changed JSON/shell,
   and commit:
   `git commit -m "docs: add 2e deployment and staging gate"`
 

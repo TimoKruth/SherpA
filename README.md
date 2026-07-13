@@ -1,6 +1,6 @@
 # SherpA
 
-SherpA is a Phase 1 CLI for sharing and trying complete Claude Code setups as versioned, sanitized stacks. Power users build global instructions, skills, subagents, hooks, MCP servers, settings, and keybindings that can meaningfully change agent performance, but those setups are hard to discover, try, revert, fork, and update safely. SherpA starts with Claude Code only: experts can publish a stack, users can try or clone it, `sherpa back` restores the protected `mine` profile, and local changes are saved as a fork that can track upstream.
+SherpA is a CLI and registry for sharing and trying complete agent setups as versioned, sanitized stacks. Power users build global instructions, skills, subagents, hooks, MCP servers, settings, and keybindings that can meaningfully change agent performance, but those setups are hard to discover, try, revert, fork, update, and follow safely. SherpA supports Claude Code and Codex harnesses: experts can publish a stack, users can try or clone it, `sherpa back` restores the protected `mine` profile, and local changes are saved as a fork that can track upstream.
 
 Design spec: [docs/superpowers/specs/2026-07-08-follow-the-expert-design.md](docs/superpowers/specs/2026-07-08-follow-the-expert-design.md)
 
@@ -12,22 +12,38 @@ go build ./cmd/sherpa
 
 ## Commands
 
-Phase 1 implements the following commands.
+The current CLI implements the following commands.
 
 | Command | Behavior |
 |---|---|
 | `sherpa init` | Import `~/.claude` as the protected `mine` profile. |
-| `sherpa search <query>` | Search a Phase 1 JSON index from `SHERPA_INDEX_URL` and print matching Claude Code stacks. |
-| `sherpa try <git-url-or-profile>` | Clone if needed, show the review gate, and launch a Claude Code session under that profile without changing the active profile. |
-| `sherpa clone <git-url>` | Clone, quarantine, validate, and install a stack as a persistent profile without activating it. |
+| `sherpa login` / `sherpa logout` | Create or remove an issuer-scoped GitHub-backed registry session. |
+| `sherpa search <query>` | Search `SHERPA_REGISTRY_URL`, falling back to the Phase 1 JSON index when configured. |
+| `sherpa try <git-url-or-@owner/name-or-profile>` | Clone if needed, show the review gate, and launch under that profile without changing the active profile. |
+| `sherpa clone <git-url-or-@owner/name>` | Clone, quarantine, validate, and install a stack without activating it; registry refs auto-follow best effort. |
 | `sherpa back` | Switch the active profile back to `mine`. |
 | `sherpa use <profile>` | Switch the active profile to an installed profile. |
 | `sherpa run [args...]` | Run Claude Code under the active profile, reusing credentials from `mine` when available. |
 | `sherpa save [-m msg]` | Commit modifications in the active profile's local branch. |
 | `sherpa diff` | Show local profile changes, or a fork's changes against upstream. |
 | `sherpa update [<profile>]` | Fetch upstream tags, show changelog and diffstat, then merge after confirmation. |
-| `sherpa publish --remote <git-url>` | Scan, review, bump the stack version, tag, and push a new stack version. |
-| `sherpa status` | Show the active profile and installed profiles. |
+| `sherpa publish --remote <git-url>` / `--registry <url>` | Scan, review, bump, tag, and publish a new immutable version. |
+| `sherpa follow @owner/name` / `sherpa unfollow @owner/name` | Manage an issuer-scoped registry follow. |
+| `sherpa updates [--limit N]` | List pending immutable versions without marking them seen. |
+| `sherpa updates --seen @owner/name@vN` | Explicitly mark a followed version reviewed. |
+| `sherpa trial record|list|share` | Keep a local private trial journal and explicitly share verdict-only feedback. |
+| `sherpa status` | Show local profiles first, then a bounded online/cached pending-update summary. |
+
+## Registry Configuration
+
+Set `SHERPA_REGISTRY_URL` to the canonical registry origin before `sherpa login`, search, follow,
+or updates. Login writes an issuer-scoped `0600` session under `SHERPA_HOME`; a staging session is
+never sent to production. `SHERPA_REGISTRY_TOKEN` is an optional admin/CI publish bypass and is not
+used by personal follow, update, or trial-sharing commands.
+
+Registry and website deployment variables, OAuth callback ownership, backup/restore, rollback,
+and live staging gates are documented in
+[docs/deployment/railway.md](docs/deployment/railway.md).
 
 ## Trust Model
 

@@ -1,8 +1,9 @@
 # Railway Deployment Runbook
 
 This runbook deploys the SherpA registry as one Railway API service, one Railway
-Postgres service, and one persistent Git volume. Use separate Railway environments,
-databases, volumes, OAuth applications, domains, and secrets for staging and production.
+Postgres service, and one persistent Git volume, plus a separate stateless discovery website.
+Use separate Railway environments, databases, volumes, OAuth applications, domains, and
+secrets for staging and production.
 
 Production is not approved until the staging gate in this document has been recorded for
 the exact commit being promoted.
@@ -46,7 +47,7 @@ Record these values in the operator change ticket. Do not put secret values in t
 | Off-site collector | Provider, HTTPS endpoint, encryption, access owner, and restore access |
 | Retention | Immutable/off-site retention and deletion policy that satisfies the RPO |
 | Railway plan | Postgres limits/PITR availability, volume size, CPU, memory, and spend caps |
-| OAuth | Separate GitHub OAuth Apps with device flow enabled |
+| OAuth | Separate GitHub OAuth Apps with device flow enabled and exact registry callback URLs |
 | Operations | Alert destinations, on-call owner, and quarterly restore-drill owner |
 | Admin bypass | Whether production needs a separately rotated admin token at all |
 
@@ -99,6 +100,8 @@ Configure variables in Railway's secret/variable UI. Never place secret values i
 | `SHERPA_CONTENT_DIR` | Required; `/data/git` |
 | `SHERPA_PUBLIC_BASE_URL` | Required; canonical public HTTPS origin |
 | `SHERPA_GITHUB_CLIENT_ID` | Required; environment-specific OAuth App with device flow |
+| `SHERPA_GITHUB_CLIENT_SECRET` | Required for website sign-in; registry-only OAuth App secret |
+| `SHERPA_WEB_PUBLIC_BASE_URL` | Required with the client secret; exact canonical website HTTPS origin used for fixed handoff redirects |
 | `SHERPA_TRUST_PROXY` | Set `true` on Railway; trusts `X-Forwarded-Proto` for scheme and the rightmost `X-Forwarded-For` hop for per-IP rate limiting, never host |
 | `SHERPA_DB_MAX_CONNS` | Optional positive pool cap matched to the Postgres plan |
 | `SHERPA_REGISTRY_TOKEN` | Optional admin/CI bypass; omit for normal session-only operation |
@@ -108,9 +111,27 @@ Configure variables in Railway's secret/variable UI. Never place secret values i
 | `SHERPA_EXPORT_INTERVAL` | Required with export URL; Go duration such as `24h` |
 | `SHERPA_EXPORT_ARCHIVE_DIR` | Optional; use `/tmp/sherpa-exports`, never a child of `/data/git` |
 
-Staging and production values must be independent. Rotate the optional admin and export
-tokens through the Railway variable UI and the receiving system. A GitHub client ID is
-public; GitHub access tokens and SherpA session tokens remain secret.
+Staging and production values must be independent. Rotate the GitHub client secret, optional
+admin token, and export token through the Railway variable UI and the receiving system. Revoke
+the old OAuth App secret in GitHub after the replacement deployment is verified. A GitHub client
+ID is public; the client secret, GitHub access tokens, grants, and SherpA session tokens remain
+secret.
+
+### GitHub OAuth Apps
+
+Create a separate GitHub OAuth App for each environment. Enable device flow and set its callback
+URL to the exact registry route:
+
+```text
+https://<registry-domain>/v1/auth/web/callback
+```
+
+The callback belongs to the registry, not the website. Set the registry's
+`SHERPA_WEB_PUBLIC_BASE_URL` to `https://<website-domain>`; the registry redirects only to that
+pinned origin after OAuth. The application requests no repository or organization scope and uses
+the resulting token only to read the authenticated GitHub user's public identity. Do not add
+broader scopes. Store `SHERPA_GITHUB_CLIENT_SECRET` only on the registry service. The website
+must never receive it.
 
 ## Off-Site Exports
 
@@ -255,6 +276,20 @@ current migrations are additive (`CREATE TABLE IF NOT EXISTS` and `ADD COLUMN IF
 so application image rollback is currently schema-compatible and needs no database rollback.
 An attached volume can cause brief redeploy downtime.
 
+Phase 2e adds a security-critical exception for registry rollback. A pre-2e image does not know
+that `purpose='web'` sessions must be denied for publish and may treat them like CLI sessions.
+Before rolling the registry below the 2e boundary:
+
+1. Disable new web login by removing both `SHERPA_GITHUB_CLIENT_SECRET` and the registry-side
+   `SHERPA_WEB_PUBLIC_BASE_URL`, then deploy a current image and confirm web login is unavailable.
+2. Revoke all existing web sessions and outstanding grants in Postgres (`DELETE FROM sessions
+   WHERE purpose='web'`; `DELETE FROM web_grants`) from an audited recovery/operations session.
+3. Confirm a previously issued web token receives `401` and no new grant can be minted.
+4. Only then deploy the pre-2e image and rerun publish authorization checks.
+
+Rolling back to another 2e-aware image does not require this purge. Website-only rollback remains
+stateless and does not change registry sessions.
+
 Do not roll Postgres or Git back merely because an application image failed; that can discard
 accepted publishes and split the stores. Use the restore procedure when data rollback is
 actually required. Any future non-additive migration requires an explicit
@@ -300,6 +335,8 @@ Configure the website service as follows:
    `go.sum`, `cmd/web`, and `internal/**` from the shared Go module.
 4. Give the website its own public HTTPS domain. Set `SHERPA_WEB_PUBLIC_BASE_URL` to that exact
    canonical origin, without userinfo, query, or fragment.
+   Set `SHERPA_REGISTRY_PUBLIC_URL` to the registry's exact canonical public HTTPS origin. These
+   two public variables are an all-or-nothing pair and their origins must be distinct.
 5. Set an explicit registry-service `PORT=8080`. Both registry and website listeners bind on
    `[::]`, which is required for reliable Railway private networking.
 6. Configure the web service's private upstream reference as:
@@ -320,12 +357,15 @@ Configure the website service as follows:
 | --- | --- |
 | `SHERPA_REGISTRY_API_URL` | Required; fixed Railway private HTTP origin shown above |
 | `SHERPA_WEB_PUBLIC_BASE_URL` | Required; website's canonical public HTTPS origin |
+| `SHERPA_REGISTRY_PUBLIC_URL` | Required with the website public base; registry's canonical public HTTPS origin for sign-in redirects |
 | `SHERPA_WEB_UPSTREAM_TIMEOUT` | Optional; defaults to `5s`, allowed range `100ms` through `30s` |
 | `PORT` | Injected by Railway; the web process derives `[::]:PORT` |
 | `SHERPA_WEB_ADDR` | Optional explicit listener override; normally omit on Railway |
 
-The website service accepts no secret. Railway private DNS and the public origins are
-configuration, not credentials.
+The website service accepts no deploy-time secret. Railway private DNS and the public origins are
+configuration, not credentials. At runtime it receives an opaque per-user web session token and
+CSRF value in host-only `Secure; HttpOnly; SameSite=Lax; Path=/` cookies. Those transient values
+are credentials and must not appear in variables, logs, URLs, templates, JavaScript, or caches.
 
 ### Website and Registry Separation
 
@@ -333,8 +373,8 @@ The website must have **none** of the following settings or resources:
 
 - a volume or `SHERPA_CONTENT_DIR`;
 - `DATABASE_URL` or any Postgres reference;
-- `SHERPA_GITHUB_CLIENT_ID`, GitHub tokens, or OAuth configuration;
-- `SHERPA_REGISTRY_TOKEN`, registry session data, or a cookie/session secret;
+- `SHERPA_GITHUB_CLIENT_ID`, `SHERPA_GITHUB_CLIENT_SECRET`, GitHub tokens, or registry-side OAuth configuration;
+- `SHERPA_REGISTRY_TOKEN`, a static registry session, or a cookie signing/encryption secret;
 - `SHERPA_EXPORT_URL`, `SHERPA_EXPORT_TOKEN`, or export storage access;
 - private keys or other application credentials.
 
@@ -346,7 +386,9 @@ source of Git clone/try commands.
 Scope variables to their individual Railway services. A website deploy must not restart,
 reconfigure, or remount the registry. A website failure cannot affect registry API, login,
 publish, clone, or CLI use. During a registry outage the website process and `/healthz` remain
-available, while dynamic pages explicitly return `503` until the registry recovers.
+available. Public dynamic pages return bounded `503` responses; authenticated pages degrade
+safely without clearing a still-valid cookie. Sign-in, follow, dashboard, seen, and logout
+revocation depend on the registry, although logout always clears local browser cookies.
 
 ### Website Deploy and Rollback
 
@@ -376,7 +418,8 @@ request bodies, query values, commands containing private data, or credentials.
 1. Deploy the website service from `deploy/web/railway.json`; confirm the image/config source is
    the web path, not the root registry config.
 2. Confirm `/healthz` is `200` and PID 1 is non-root; confirm the service environment has no DB,
-   OAuth, registry-session, admin, or export secret.
+   GitHub/OAuth, static registry/admin, cookie-key, or export secret. Runtime browser cookies are
+   expected only after sign-in and must never appear in the service environment.
 3. Load home/search/stack/version through the public domain and compare displayed metadata and
    `repo_url` commands with direct registry API responses.
 4. Run both copied commands on a clean CLI home and confirm clone/try reaches the registry host,
@@ -393,9 +436,52 @@ request bodies, query values, commands containing private data, or credentials.
 9. Inspect desktop/mobile screenshots and keyboard navigation for overflow, overlap, readable
    focus, form labels, command copying, and long malicious-looking publisher text.
 10. Inspect Railway logs: no query text, command content, upstream body, scan excerpt, headers,
-    credentials, or full internal/public URL with query is present.
+    session/grant/CSRF value, credentials, or full internal/public URL with query is present.
 11. Configure external continuous uptime checks for both the public home page and `/healthz`;
     Railway's deploy healthcheck alone is not continuous monitoring.
 
 Production website domain exposure requires all eleven website steps, in addition to the
 registry gate, to pass for the exact commit being promoted.
+
+## Phase 2e Live Staging Acceptance Gate
+
+Run this gate after both preceding staging gates pass for the same candidate. For every step,
+record the registry commit, website commit, staging registry and website domains, operator,
+start/end time, result, and non-secret evidence references. Never record tokens, grants, device
+codes, CSRF values, OAuth codes/verifiers, trial notes, request bodies, or private export URLs.
+
+1. Confirm the complete registry 2c-iii and website 2d gates above passed for the exact candidate
+   commits and domains.
+2. Complete real GitHub website sign-in using the staging OAuth App. Confirm GitHub returns only
+   to the pinned staging registry callback and the final browser location is the pinned staging
+   website `/dashboard`.
+3. Confirm a replayed OAuth callback/grant, a copied grant without its original handoff nonce,
+   and tampered state fail. Inspect browser storage/history: login, session, and CSRF cookies have
+   exact `Secure; HttpOnly; SameSite=Lax; Path=/` attributes and the grant query is cleared.
+4. Confirm a web session can follow but receives `403` on publish, a CLI session can follow and
+   same-owner publish, and the admin bearer receives `401` on `/v1/me` and personal endpoints.
+5. Follow the current v1, publish v2, and confirm the dashboard and `sherpa updates` show the same
+   pending version. Repeated feed/dashboard GETs must not clear it.
+6. Confirm successful `sherpa update` or explicit web Mark reviewed clears pending without
+   activating a profile automatically. Send older seen versions afterward and confirm pending
+   state does not move backward.
+7. Clone a registry ref online and confirm auto-follow. Repeat during registry outage: install
+   still completes and queues one follow; after recovery an online social command syncs it once
+   without duplicates.
+8. Record a trial with notes and confirm the journal remains local mode `0600`. Explicit share
+   sends only immutable stack/version identity and the selected verdict, never notes or paths.
+9. At the real Railway edge, confirm spoofed Host/forwarded headers do not change pinned origins;
+   foreign or duplicate Origin/CSRF, arbitrary return URLs, tampered OAuth state, and repeated
+   grants are rejected.
+10. Stop or block the registry. Confirm website `/healthz` stays `200`, authenticated pages
+    degrade safely without exposing/clearing a valid session, local CLI status/profiles still
+    work, and logout still clears all website cookies even if registry revocation fails.
+11. Inspect Railway/application/collector logs and an off-site export/restore. Confirm no OAuth,
+    session, grant, CSRF, authorization, trial-note, or database secret is exposed; restored data
+    includes follows, events, verdict-only feedback, and only grant/session hashes.
+12. Drill website-only and registry-only rollback separately. Confirm public discovery and
+    publish authorization survive. Before any pre-2e registry rollback, perform the web-session
+    revocation procedure in this runbook and prove an old web token cannot publish.
+
+Production 2e exposure requires all twelve steps to pass for the exact deployed commits. A failed
+or missing step leaves 2e at **automated gates green, live Railway acceptance pending**.
