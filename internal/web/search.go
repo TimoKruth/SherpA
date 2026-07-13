@@ -85,7 +85,15 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) renderSearchPage(w http.ResponseWriter, title string, noIndex bool, page *searchPageView) {
-	if err := s.renderer.render(w, http.StatusOK, pageData{Title: title, NoIndex: noIndex, SearchPage: page}); err != nil {
+	robots := "index,follow"
+	if noIndex {
+		robots = "noindex,follow"
+	}
+	description := page.Description
+	if description == "" {
+		description = "Search versioned SherpA agent setups by harness and tag."
+	}
+	if err := s.renderer.render(w, http.StatusOK, pageData{Title: title, Description: description, Robots: robots, SearchPage: page}); err != nil {
 		s.logger.Printf("render search page failed error_type=%T", err)
 		writeFallbackError(w)
 	}

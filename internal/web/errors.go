@@ -46,9 +46,10 @@ func (s *server) renderError(w http.ResponseWriter, status int) {
 	}
 	data := pageData{
 		Title:        copy.Title,
+		Description:  copy.Message,
+		Robots:       "noindex",
 		ErrorTitle:   copy.Title,
 		ErrorMessage: copy.Message,
-		NoIndex:      true,
 	}
 	if err := s.renderer.render(w, status, data); err != nil {
 		s.logger.Printf("render error page failed status=%d error_type=%T", status, err)

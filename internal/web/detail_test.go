@@ -86,8 +86,11 @@ func TestCommandsUseOnlyAPIRepoURL(t *testing.T) {
 	if rr.Code != http.StatusOK || !strings.Contains(body, "sherpa try "+testRepoURL) || !strings.Contains(body, "sherpa clone "+testRepoURL) {
 		t.Fatalf("response = %d %s", rr.Code, body)
 	}
-	if strings.Contains(body, "attacker.example") || strings.Contains(body, "website.example") {
-		t.Fatalf("request/website host altered command: %s", body)
+	if strings.Contains(body, "attacker.example") {
+		t.Fatalf("request host altered page: %s", body)
+	}
+	if !strings.Contains(body, `rel="canonical" href="https://website.example/prefix/stacks/alice/reviewer"`) {
+		t.Fatalf("pinned canonical URL missing: %s", body)
 	}
 }
 
@@ -159,7 +162,7 @@ func TestVersionRendersManifestScanAndLatestCommandsWithoutExcerpt(t *testing.T)
 			t.Fatalf("forbidden value %q rendered/logged: body=%s logs=%s", forbidden, body, logs.String())
 		}
 	}
-	if strings.Contains(body, "<script>") || strings.Contains(body, "<img") {
+	if strings.Contains(body, "<script>unknown") || strings.Contains(body, "<img src=x") {
 		t.Fatalf("live publisher markup rendered: %s", body)
 	}
 	if _, exists := reflect.TypeOf(ScanFindingView{}).FieldByName("Excerpt"); exists {

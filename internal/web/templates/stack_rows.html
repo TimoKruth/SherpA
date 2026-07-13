@@ -1,16 +1,16 @@
 {{define "stack-rows"}}
-<section aria-label="Stacks">
+<section class="stack-list" aria-label="Stacks">
   {{if .Rows}}
     {{range .Rows}}
-    <article>
-      <h2>{{if .StackURL}}<a href="{{.StackURL}}">{{.Ref}}</a>{{else}}{{.Ref}}{{end}}</h2>
-      {{if .Summary}}<p>{{.Summary}}</p>{{end}}
-      <dl>
+    <article class="stack-row">
+      <h2 class="stack-row__title">{{if .StackURL}}<a href="{{.StackURL}}">{{.Ref}}</a>{{else}}{{.Ref}}{{end}}</h2>
+      {{if .Summary}}<p class="stack-row__summary">{{.Summary}}</p>{{end}}
+      <dl class="stack-row__meta">
         <dt>Harness</dt><dd>{{.Harness}}</dd>
         <dt>Latest version</dt><dd>v{{.Version}}</dd>
         <dt>Trust</dt><dd>{{.TrustTier}}</dd>
       </dl>
-      {{if .Tags}}<ul aria-label="Tags">{{range .Tags}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      {{if .Tags}}<ul class="tag-list" aria-label="Tags">{{range .Tags}}<li class="tag">{{.}}</li>{{end}}</ul>{{end}}
       {{if .ForkedFromText}}<p>Forked from {{if .ForkedFromURL}}<a href="{{.ForkedFromURL}}">{{.ForkedFromText}}</a>{{else}}{{.ForkedFromText}}{{end}}</p>{{end}}
     </article>
     {{end}}

@@ -194,7 +194,7 @@ func TestInvalidInputMakesNoRegistryCall(t *testing.T) {
 }
 
 func TestNonGETRejectedWithoutRegistryCall(t *testing.T) {
-	for _, path := range []string{"/", "/search", "/stacks/alice/reviewer", "/stacks/alice/reviewer/v/1", "/healthz", "/unknown"} {
+	for _, path := range []string{"/", "/search", "/stacks/alice/reviewer", "/stacks/alice/reviewer/v/1", "/static/app.css", "/healthz", "/unknown"} {
 		registry := &fakeRegistry{}
 		handler := newTestHandler(t, registry)
 		rr := httptest.NewRecorder()

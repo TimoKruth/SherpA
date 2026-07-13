@@ -70,7 +70,7 @@ func TestSearchForwardsFiltersAndRendersPagination(t *testing.T) {
 		`name="tag" maxlength="64" value="security"`,
 		`href="/search?harness=codex&q=red+team&tag=security" rel="prev"`,
 		`href="/search?harness=codex&page=3&q=red+team&tag=security" rel="next"`,
-		`name="robots" content="noindex"`,
+		`name="robots" content="noindex,follow"`,
 		"No stacks found.",
 	} {
 		if !strings.Contains(body, want) {
@@ -163,7 +163,7 @@ func TestSearchEscapesAdversarialPublisherAndQueryData(t *testing.T) {
 	handler.ServeHTTP(rr, request)
 	body := rr.Body.String()
 
-	for _, unsafe := range []string{"<script", "<img", "<svg", `href="javascript:`, `onclick="`, `onmouseover="`} {
+	for _, unsafe := range []string{"<script>alert", "<img src=x", "<svg onload", `href="javascript:`, `onclick="`, `onmouseover="`} {
 		if strings.Contains(strings.ToLower(body), strings.ToLower(unsafe)) {
 			t.Fatalf("live unsafe markup %q in: %s", unsafe, body)
 		}

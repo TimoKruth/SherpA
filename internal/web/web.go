@@ -2,18 +2,35 @@ package web
 
 import (
 	"context"
+	"embed"
 	"errors"
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"sherpa/internal/web/registryclient"
 )
+
+//go:embed static/*
+var staticFiles embed.FS
 
 type Registry interface {
 	Search(context.Context, registryclient.SearchQuery) (registryclient.SearchResult, error)
 	GetStack(context.Context, string, string, registryclient.Page) (registryclient.Stack, error)
 	GetVersion(context.Context, string, string, int) (registryclient.Version, error)
+}
+
+func (s *server) canonicalURL(routePath string) string {
+	if s.publicBaseURL == nil {
+		return ""
+	}
+	canonical := *s.publicBaseURL
+	canonical.Path = strings.TrimRight(canonical.Path, "/") + routePath
+	canonical.RawPath = ""
+	canonical.RawQuery = ""
+	canonical.Fragment = ""
+	return canonical.String()
 }
 
 type Options struct {

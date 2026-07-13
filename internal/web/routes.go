@@ -1,6 +1,7 @@
 package web
 
 import (
+	"io/fs"
 	"math"
 	"net/http"
 	"net/url"
@@ -42,6 +43,18 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write([]byte("User-agent: *\nAllow: /\n"))
 		return
+	case "/static/app.css":
+		s.serveStatic(w, "static/app.css", "text/css; charset=utf-8")
+		return
+	case "/static/app.js":
+		s.serveStatic(w, "static/app.js", "text/javascript; charset=utf-8")
+		return
+	case "/static/sherpa-mark.png":
+		s.serveStatic(w, "static/sherpa-mark.png", "image/png")
+		return
+	case "/static/favicon.png":
+		s.serveStatic(w, "static/favicon.png", "image/png")
+		return
 	}
 
 	segments := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
@@ -53,6 +66,19 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.renderError(w, http.StatusNotFound)
 	}
+}
+
+func (s *server) serveStatic(w http.ResponseWriter, name, contentType string) {
+	content, err := fs.ReadFile(staticFiles, name)
+	if err != nil {
+		s.logger.Printf("embedded asset unavailable asset=%q", name)
+		s.renderError(w, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
 }
 
 func parseSearchQuery(values url.Values) (registryclient.SearchQuery, bool) {

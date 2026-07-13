@@ -174,6 +174,17 @@ func TestResponseClassification(t *testing.T) {
 	}
 }
 
+func TestGetStackRejectsMismatchedIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(t, w, `{"name":"other","owner":"mallory","repo_url":"https://registry.example/v1/stacks/mallory/other.git","versions":[]}`)
+	}))
+	defer server.Close()
+	client := mustClient(t, server.URL, time.Second)
+	if _, err := client.GetStack(context.Background(), "alice", "reviewer", Page{Limit: 25}); !errors.Is(err, ErrBadGateway) {
+		t.Fatalf("mismatched stack identity error = %v", err)
+	}
+}
+
 func TestTransportTimeoutAndCancellation(t *testing.T) {
 	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	client := mustClient(t, closed.URL, time.Second)

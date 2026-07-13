@@ -1,11 +1,11 @@
 {{define "search-content"}}
-<section aria-labelledby="search-heading">
+<section class="catalog-intro" aria-labelledby="search-heading">
   <h1 id="search-heading">{{.Heading}}</h1>
   {{template "search-form" .Form}}
 </section>
 {{template "stack-rows" .}}
 {{if or .PreviousURL .NextURL}}
-<nav aria-label="Search result pages">
+<nav class="pagination" aria-label="Search result pages">
   {{if .PreviousURL}}<a href="{{.PreviousURL}}" rel="prev">Previous</a>{{end}}
   {{if .NextURL}}<a href="{{.NextURL}}" rel="next">Next</a>{{end}}
 </nav>

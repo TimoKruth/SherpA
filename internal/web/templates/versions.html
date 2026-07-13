@@ -1,14 +1,13 @@
 {{define "versions"}}
-<section aria-labelledby="versions-heading">
+<section class="content-section" aria-labelledby="versions-heading">
   <h2 id="versions-heading">Versions</h2>
   {{if .Versions}}
-    <ol>
+    <ol class="version-list">
     {{range .Versions}}
-      <li>
-        <h3>{{if .URL}}<a href="{{.URL}}">Version {{.Version}}</a>{{else}}Version {{.Version}}{{end}}</h3>
-        {{if .PublishedISO}}<time datetime="{{.PublishedISO}}">{{.PublishedText}}</time>{{end}}
-        {{if .Changelog}}<p>{{.Changelog}}</p>{{end}}
-        <dl><dt>Scan</dt><dd>{{.ScanSummary}}</dd><dt>Trust</dt><dd>{{.TrustTier}}</dd></dl>
+      <li class="version-row">
+        <h3 class="version-row__title">{{if .URL}}<a href="{{.URL}}">Version {{.Version}}</a>{{else}}Version {{.Version}}{{end}}</h3>
+        <div class="version-row__summary">{{if .PublishedISO}}<time datetime="{{.PublishedISO}}">{{.PublishedText}}</time>{{end}}{{if .Changelog}}<p>{{.Changelog}}</p>{{end}}</div>
+        <dl class="version-row__meta"><dt>Scan</dt><dd>{{.ScanSummary}}</dd><dt>Trust</dt><dd>{{.TrustTier}}</dd></dl>
       </li>
     {{end}}
     </ol>
@@ -16,7 +15,7 @@
     <p>No versions published.</p>
   {{end}}
   {{if or .PreviousURL .NextURL}}
-  <nav aria-label="Version pages">
+  <nav class="pagination" aria-label="Version pages">
     {{if .PreviousURL}}<a href="{{.PreviousURL}}" rel="prev">Previous</a>{{end}}
     {{if .NextURL}}<a href="{{.NextURL}}" rel="next">Next</a>{{end}}
   </nav>

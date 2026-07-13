@@ -130,7 +130,7 @@ func (c *Client) GetStack(ctx context.Context, owner, name string, page Page) (S
 	if err := c.get(ctx, path, values, &stack); err != nil {
 		return Stack{}, err
 	}
-	if !validRepoURL(stack.RepoURL) || (stack.NextVersionsOffset != nil && *stack.NextVersionsOffset < 0) {
+	if stack.Owner != owner || stack.Name != name || !validRepoURL(stack.RepoURL) || (stack.NextVersionsOffset != nil && *stack.NextVersionsOffset < 0) {
 		return Stack{}, ErrBadGateway
 	}
 	return stack, nil

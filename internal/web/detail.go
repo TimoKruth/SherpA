@@ -162,10 +162,32 @@ func (s *server) handleVersion(w http.ResponseWriter, r *http.Request, owner, na
 
 func (s *server) renderDetailPage(w http.ResponseWriter, title string, data pageData) {
 	data.Title = title
+	data.Robots = "index,follow"
+	data.OpenGraphTitle = title + " · SherpA"
+	switch {
+	case data.StackPage != nil:
+		data.Description = data.StackPage.Summary
+		if data.Description == "" {
+			data.Description = "Explore " + data.StackPage.Ref + " versions, trust, and setup commands."
+		}
+		data.CanonicalURL = s.canonicalURL(stackPathFromRef(data.StackPage.Ref))
+	case data.VersionPage != nil:
+		data.Description = "Inspect " + data.VersionPage.Ref + " version " + strconv.Itoa(data.VersionPage.Version) + " manifest, trust, and registry scan."
+		data.CanonicalURL = s.canonicalURL(versionPathFromRef(data.VersionPage.Ref, data.VersionPage.Version))
+	}
+	data.OpenGraphURL = data.CanonicalURL
 	if err := s.renderer.render(w, http.StatusOK, data); err != nil {
 		s.logger.Printf("render detail page failed error_type=%T", err)
 		writeFallbackError(w)
 	}
+}
+
+func stackPathFromRef(ref string) string {
+	return "/stacks/" + strings.TrimPrefix(ref, "@")
+}
+
+func versionPathFromRef(ref string, version int) string {
+	return stackPathFromRef(ref) + "/v/" + strconv.Itoa(version)
 }
 
 func commandView(repoURL string) (CommandView, bool) {

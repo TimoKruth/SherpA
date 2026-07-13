@@ -12,13 +12,17 @@ import (
 var templateFiles embed.FS
 
 type pageData struct {
-	Title        string
-	ErrorTitle   string
-	ErrorMessage string
-	NoIndex      bool
-	SearchPage   *searchPageView
-	StackPage    *stackPageView
-	VersionPage  *versionPageView
+	Title          string
+	Description    string
+	Robots         string
+	CanonicalURL   string
+	OpenGraphURL   string
+	OpenGraphTitle string
+	ErrorTitle     string
+	ErrorMessage   string
+	SearchPage     *searchPageView
+	StackPage      *stackPageView
+	VersionPage    *versionPageView
 }
 
 type renderer struct {

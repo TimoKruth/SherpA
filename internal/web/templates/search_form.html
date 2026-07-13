@@ -1,7 +1,7 @@
 {{define "search-form"}}
-<form action="/search" method="get" role="search">
+<form class="search-form" action="/search" method="get" role="search">
   <label for="search-q">Search</label>
-  <input id="search-q" name="q" type="search" maxlength="200" value="{{.Q}}">
+  <input id="search-q" name="q" type="search" maxlength="200" value="{{.Q}}" placeholder="Owner, name, or summary">
   <label for="search-harness">Harness</label>
   <select id="search-harness" name="harness">
     <option value=""{{if .AnySelected}} selected{{end}}>Any</option>
