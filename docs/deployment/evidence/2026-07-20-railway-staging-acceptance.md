@@ -13,7 +13,7 @@
 | Operator | Timo Kruth |
 | UTC start | `2026-07-20T04:29:54Z` |
 | UTC end | Not run |
-| Final status | Corrected registry candidate deployed; initial Phase 2c-iii checks green; off-site recovery pending |
+| Final status | Blocked at Phase 2c-iii.9: configured off-site collector returned HTTP 404; original export interval restored |
 
 ## Tooling
 
@@ -47,6 +47,7 @@
 | `2026-07-20T04:48Z` | PostgreSQL volume-persistence redeploy | One brief PostgreSQL restart; no application schemas or rows changed | Same PG16 image and volume retained; only `/var/lib/postgresql/data/.sherpa-volume-probe` created and removed | Explicit interactive approval received immediately before the drill |
 | `2026-07-20T05:55Z` | Push corrected client-IP candidate to `origin/main` | GitHub publication and automatic replacement registry deployment | Revert only the focused application commit if verification failed; preserve deployment evidence | Explicit interactive approval received before push |
 | `2026-07-20T06:07Z` | Primary registry persistence redeploy | Brief registry API/login/publish/clone interruption | Corrected candidate and both existing stores retained; prior healthy deployment preserved in history | Explicit interactive approval received immediately before the drill |
+| `2026-07-20T06:20Z` | Temporarily set registry export interval to 1 minute | Two configuration deployments and bounded increased export frequency | Exact prior interval restored from a mode-0600 file after the bounded attempt; primary stores unchanged | Explicit interactive approval received immediately before the drill |
 
 ## Postgres provisioning
 
@@ -71,7 +72,7 @@
 | 2c-iii.6 auth controls and edge IP | Pass | `2026-07-20T05:20Z`–`06:04Z` | Oversized body 413, unknown code 410, registered-code second poll 429. Initial live test reproduced two starts as 200/200; corrected candidate then produced 200/429. Two genuinely different network labels each produced `200,429,429,429` for normal, repeat, forged `X-Real-IP`, and prepended XFF requests | Focused fix `b2e91ac`; no source IP addresses retained |
 | 2c-iii.7 search/detail/clone and host pinning | Pass | `2026-07-20T05:58Z`–`06:00Z` | One linked search result; detail URL stayed pinned under forged forwarded-host input; forged routing Host was rejected 404 by Railway edge; fresh isolated HTTPS clone succeeded | Search response key is `stacks`; clone's unauthenticated auto-follow queued as expected |
 | 2c-iii.8 registry redeploy persistence | Pass | `2026-07-20T06:07Z`–`06:09Z` | Health, exact `v2` metadata, linked trust, Git clone, and audit survived an approved redeploy on the same Postgres and `/data` stores | Persistence deployment `71bf77bd-016e-4244-ac85-4df0f354ceee`; candidate `b2e91ac` |
-| 2c-iii.9 off-site export upload | Not run | | | |
+| 2c-iii.9 off-site export upload | Blocked | `2026-07-20T06:20Z`–`06:27Z` | One-minute scheduler produced a complete pending archive, but three bounded upload attempts returned HTTP 404. The collector is configured with HTTPS and a token; no URL or credential was recorded. The exact prior interval was restored and the restoring deployment reached `SUCCESS` | Export deployment `dfb04d81-403c-4fe5-b110-576bd3d582a7`; restore deployment `159180e4-d49d-4838-8f6f-5ea9cf32b89c`; no recovery resources created |
 | 2c-iii.10 sibling restore and audit | Not run | | | |
 | 2c-iii.11 secret-safe logs | Preliminary pass | `2026-07-20T06:09Z` | Bounded local scan of mode-0600 registry log export detected no prohibited device codes, token fields, authorization values, secret-variable names, or token patterns | Final review repeats after export/restore |
 
@@ -112,12 +113,12 @@
 
 | Field | Value |
 |---|---|
-| Collector object ID | Not run |
-| Recovery Postgres/service IDs | Not run |
-| Recovery registry/service IDs | Not run |
-| Recovery volume IDs | Not run |
-| Manifest verification | Not run |
-| `registry audit` | Not run |
+| Collector object ID | Blocked — collector returned HTTP 404 and no retrievable object was established |
+| Recovery Postgres/service IDs | Not created; gate stopped before approved recovery infrastructure |
+| Recovery registry/service IDs | Not created; gate stopped before approved recovery infrastructure |
+| Recovery volume IDs | Not created |
+| Manifest verification | Not run; no collector object available for retrieval |
+| `registry audit` | Primary registry pass (`missing=0 extra=0`); recovery audit not run |
 | Recovery smoke | Not run |
 
 ## Rollback summary
