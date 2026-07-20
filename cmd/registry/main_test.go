@@ -251,6 +251,35 @@ func TestDispatchExportUsageAndUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestRunWiresPersistentExportArchiveDirectory(t *testing.T) {
+	originalValidate := validateExportScheduler
+	t.Cleanup(func() { validateExportScheduler = originalValidate })
+	stop := errors.New("stop before opening database")
+	var got registryexport.SchedulerConfig
+	validateExportScheduler = func(cfg registryexport.SchedulerConfig) error {
+		got = cfg
+		return stop
+	}
+
+	srv, cleanup, err := run(context.Background(), Config{
+		DatabaseURL: "postgres://db.internal/sherpa", ContentDir: "/data/git",
+		ExportURL: "https://collector.example/upload", ExportToken: "collector-token",
+		ExportInterval: time.Hour, ExportArchiveDir: "/data/exports",
+	})
+	if !errors.Is(err, stop) {
+		t.Fatalf("run error = %v, want validation sentinel", err)
+	}
+	if srv != nil || cleanup != nil {
+		t.Fatal("validation failure returned server or cleanup")
+	}
+	if got.ArchiveDir != "/data/exports" || got.ContentDir != "/data/git" {
+		t.Fatalf("scheduler directories = content %q archive %q", got.ContentDir, got.ArchiveDir)
+	}
+	if got.CollectorURL != "https://collector.example/upload" || got.Token != "collector-token" || got.Interval != time.Hour {
+		t.Fatalf("scheduler config = %#v", got)
+	}
+}
+
 func TestRunCleanupStopsExportSchedulerBeforeReturning(t *testing.T) {
 	dsn := store.StartPostgres(t)
 	originalStart := startExportScheduler
@@ -266,7 +295,7 @@ func TestRunCleanupStopsExportSchedulerBeforeReturning(t *testing.T) {
 	}
 	srv, cleanup, err := run(context.Background(), Config{
 		DatabaseURL: dsn, ContentDir: t.TempDir(), ExportURL: "https://backups.example/upload",
-		ExportInterval: time.Hour, ExportArchiveDir: t.TempDir(),
+		ExportToken: "collector-secret", ExportInterval: time.Hour, ExportArchiveDir: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -323,7 +352,8 @@ func TestOpenPostgresWithRetry(t *testing.T) {
 func TestRunRejectsUnsafeExportConfigurationBeforeOpeningDatabase(t *testing.T) {
 	srv, cleanup, err := run(context.Background(), Config{
 		DatabaseURL: "postgres://must-not-be-opened", ContentDir: t.TempDir(),
-		ExportURL: "http://collector.example/upload", ExportInterval: time.Hour,
+		ExportURL: "http://collector.example/upload", ExportToken: "collector-secret",
+		ExportInterval: time.Hour, ExportArchiveDir: t.TempDir(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
 		t.Fatalf("run error = %v, want HTTPS collector error", err)

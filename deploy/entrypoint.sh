@@ -6,9 +6,14 @@ if [[ "$(id -u)" != "0" ]]; then
   exit 1
 fi
 
-content_dir="${SHERPA_CONTENT_DIR:-/data/git}"
-mkdir -p -- "$content_dir"
-chown sherpa:sherpa -- "$content_dir"
+SHERPA_CONTENT_DIR="${SHERPA_CONTENT_DIR:-/data/git}"
+export_archive_configured="${SHERPA_EXPORT_ARCHIVE_DIR:+yes}"
+SHERPA_EXPORT_ARCHIVE_DIR="${SHERPA_EXPORT_ARCHIVE_DIR:-/data/exports}"
+export SHERPA_CONTENT_DIR
+install -d -m 0700 -o sherpa -g sherpa "$SHERPA_CONTENT_DIR" "$SHERPA_EXPORT_ARCHIVE_DIR"
+if [ -z "$export_archive_configured" ]; then
+  unset SHERPA_EXPORT_ARCHIVE_DIR
+fi
 
 export HOME=/home/sherpa
 exec setpriv \

@@ -62,16 +62,18 @@ done
 curl --fail --silent --show-error "http://127.0.0.1:${host_port}/healthz" | grep -qx 'ok'
 
 sherpa_uid="$(docker exec "$registry_container" getent passwd sherpa | cut -d: -f3)"
+sherpa_gid="$(docker exec "$registry_container" getent group sherpa | cut -d: -f3)"
 pid_one_uid="$(docker exec "$registry_container" awk '/^Uid:/{print $2}' /proc/1/status)"
-if [[ -z "$sherpa_uid" || "$pid_one_uid" != "$sherpa_uid" ]]; then
-  echo "PID 1 UID ${pid_one_uid:-unknown} does not match sherpa UID ${sherpa_uid:-unknown}" >&2
+pid_one_gid="$(docker exec "$registry_container" awk '/^Gid:/{print $2}' /proc/1/status)"
+if [[ "$sherpa_uid" != "998" || "$sherpa_gid" != "998" || "$pid_one_uid" != "998" || "$pid_one_gid" != "998" ]]; then
+  echo "sherpa or PID 1 identity is not UID/GID 998: sherpa=${sherpa_uid:-unknown}:${sherpa_gid:-unknown} pid1=${pid_one_uid:-unknown}:${pid_one_gid:-unknown}" >&2
   exit 1
 fi
-docker exec --user sherpa "$registry_container" sh -c \
-  'test -w /data/git && : > /data/git/.smoke-write && rm /data/git/.smoke-write'
-docker exec --user sherpa "$registry_container" git --version >/dev/null
-docker exec --user sherpa "$registry_container" \
-  sh -c 'registry export /tmp/sherpa-smoke-export.tar.gz >/dev/null && test -s /tmp/sherpa-smoke-export.tar.gz && rm /tmp/sherpa-smoke-export.tar.gz'
+docker exec --user 998:998 "$registry_container" sh -c \
+  'test -w /data/git && test -w /data/exports && : > /data/git/.smoke-write && : > /data/exports/.smoke-write && rm /data/git/.smoke-write /data/exports/.smoke-write'
+docker exec --user 998:998 "$registry_container" git --version >/dev/null
+docker exec --user 998:998 "$registry_container" sh -c \
+  'registry export /data/exports/sherpa-smoke-export.tar.gz >/dev/null && test -s /data/exports/sherpa-smoke-export.tar.gz && test -z "$(find /data/git -type f -name '\''sherpa-*.tar.gz'\'' -print -quit)" && rm /data/exports/sherpa-smoke-export.tar.gz'
 
 docker run --rm --entrypoint /bin/sh "$image" -c \
   'test ! -e /src && test ! -e /usr/local/go && ! command -v go >/dev/null 2>&1'
