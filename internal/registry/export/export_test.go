@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -682,6 +683,124 @@ func TestValidateSchedulerConfigRejectsArchiveSymlinkIntoContent(t *testing.T) {
 	}
 }
 
+func TestStartSchedulerRejectsMissingParentSwappedIntoContentDuringPreparation(t *testing.T) {
+	root := t.TempDir()
+	contentDir := filepath.Join(root, "content")
+	if err := os.Mkdir(contentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archiveParent := filepath.Join(root, "missing-parent")
+	archiveDir := filepath.Join(archiveParent, "exports")
+	originalHook := beforePrepareArchiveDirectory
+	t.Cleanup(func() { beforePrepareArchiveDirectory = originalHook })
+	beforePrepareArchiveDirectory = func(string) {
+		if err := os.Symlink(contentDir, archiveParent); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := StartScheduler(context.Background(), SchedulerConfig{
+		ContentDir: contentDir, ArchiveDir: archiveDir,
+		CollectorURL: "https://collector.example/upload", Token: "secret", Interval: time.Hour,
+		Logger: log.New(io.Discard, "", 0),
+	})
+	if err == nil || (!strings.Contains(err.Error(), "prepare") && !strings.Contains(err.Error(), "outside")) {
+		t.Fatalf("post-preparation containment error = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(contentDir, "exports")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe preparation touched content directory: %v", err)
+	}
+}
+
+func TestStartSchedulerRejectsArchiveDirectoryFIFOReplacementWithoutBlocking(t *testing.T) {
+	root := t.TempDir()
+	contentDir := filepath.Join(root, "content")
+	archiveDir := filepath.Join(root, "exports")
+	if err := os.Mkdir(contentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	preserved := archiveDir + ".validated"
+	originalHook := beforeOpenArchiveQueue
+	t.Cleanup(func() { beforeOpenArchiveQueue = originalHook })
+	beforeOpenArchiveQueue = func(string) {
+		if err := os.Rename(archiveDir, preserved); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(archiveDir, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- StartScheduler(context.Background(), SchedulerConfig{
+			ContentDir: contentDir, ArchiveDir: archiveDir,
+			CollectorURL: "https://collector.example/upload", Token: "secret", Interval: time.Hour,
+			Logger: log.New(io.Discard, "", 0),
+		})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("FIFO replacement was accepted as archive directory")
+		}
+	case <-time.After(time.Second):
+		writer, _ := os.OpenFile(archiveDir, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if writer != nil {
+			_ = writer.Close()
+		}
+		t.Fatal("opening FIFO replacement blocked scheduler startup")
+	}
+}
+
+func TestStartSchedulerKeepsUsingValidatedDirectoryAfterPathSwap(t *testing.T) {
+	root := t.TempDir()
+	contentDir := filepath.Join(root, "content")
+	archiveDir := filepath.Join(root, "exports")
+	if err := os.Mkdir(contentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	attackerPartial := createTempPartial(t, contentDir, time.Now().Add(-48*time.Hour))
+	validatedPartial := createTempPartial(t, archiveDir, time.Now().Add(-48*time.Hour))
+	preservedArchiveDir := archiveDir + ".validated"
+	originalHook := afterArchiveQueueValidated
+	t.Cleanup(func() { afterArchiveQueueValidated = originalHook })
+	afterArchiveQueueValidated = func() {
+		if err := os.Rename(archiveDir, preservedArchiveDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(contentDir, archiveDir); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := StartScheduler(ctx, SchedulerConfig{
+		ContentDir: contentDir, ArchiveDir: archiveDir,
+		CollectorURL: "https://collector.example/upload", Token: "secret", Interval: time.Hour,
+		Logger: log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(attackerPartial); err != nil {
+		t.Fatalf("swapped-in content entry was touched: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(preservedArchiveDir, filepath.Base(validatedPartial))); !os.IsNotExist(err) {
+		t.Fatalf("stale entry in validated directory was not cleaned: %v", err)
+	}
+	if info, err := os.Stat(preservedArchiveDir); err != nil || !info.IsDir() {
+		t.Fatalf("validated archive directory was not preserved: %v", err)
+	}
+}
+
 func TestStartSchedulerWhitespaceOnlyConfigurationIsDisabledWithoutFilesystemAccessOrPanic(t *testing.T) {
 	t.Chdir(t.TempDir())
 	var panicValue any
@@ -788,6 +907,26 @@ func TestCompletedArchiveNameMatchesOnlySchedulerGeneratedGrammar(t *testing.T) 
 	} {
 		if completedArchiveName(name) {
 			t.Errorf("unsafe archive name %q was accepted", name)
+		}
+	}
+}
+
+func TestPendingArchiveBaseAcceptsOnlyCanonicalPrivateClaims(t *testing.T) {
+	base := generatedPendingName(time.Now())
+	claim := fmt.Sprintf(".sherpa-queue-claim-%d-%d-%s", os.Getpid(), 1, base)
+	if got, ok := pendingArchiveBase(claim); !ok || got != base {
+		t.Fatalf("generated private claim = %q, %v", got, ok)
+	}
+	for _, name := range []string{
+		".sherpa-queue-claim-0-1-" + base,
+		".sherpa-queue-claim-01-1-" + base,
+		fmt.Sprintf(".sherpa-queue-claim-%d-01-%s", os.Getpid(), base),
+		fmt.Sprintf(".sherpa-queue-claim-%d-0-%s", os.Getpid(), base),
+		fmt.Sprintf(".sherpa-queue-claim-%d-1-sherpa-attacker.tar.gz", os.Getpid()),
+		fmt.Sprintf(".sherpa-queue-claim-%d-1-%s\nforged", os.Getpid(), base),
+	} {
+		if got, ok := pendingArchiveBase(name); ok {
+			t.Errorf("unsafe private claim %q accepted as %q", name, got)
 		}
 	}
 }
@@ -928,6 +1067,110 @@ func TestCleanupStaleExportPartialsRemovesOnlyActualTempNamesOlderThan24Hours(t 
 		if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("lookalike entry %q removed: %v", name, err)
 		}
+	}
+}
+
+func TestCleanupStaleExportPartialsRecoversPrivateClaimsAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().Round(time.Second)
+	old := now.Add(-25 * time.Hour)
+	partial := createTempPartial(t, dir, old)
+	workspace, err := os.MkdirTemp(dir, ".sherpa-export-work-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(workspace, old, old); err != nil {
+		t.Fatal(err)
+	}
+	originalCounter := queueClaimCounter.Load()
+	queueClaimCounter.Store(0)
+	t.Cleanup(func() { queueClaimCounter.Store(originalCounter) })
+	partialClaim := filepath.Join(dir, fmt.Sprintf(".sherpa-cleanup-claim-%d-1-%s", os.Getpid(), filepath.Base(partial)))
+	workspaceClaim := filepath.Join(dir, fmt.Sprintf(".sherpa-cleanup-claim-%d-2-%s", os.Getpid(), filepath.Base(workspace)))
+	if err := os.Rename(partial, partialClaim); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(workspace, workspaceClaim); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(workspaceClaim, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := cleanupStaleExportPartials(dir, now, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed recovered claims = %d, want 2", removed)
+	}
+	for _, path := range []string{partialClaim, workspaceClaim} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("recovered cleanup claim remains: %s: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+func TestCleanupStaleExportPartialsPreservesYoungReplacementsInstalledBeforeClaim(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().Round(time.Second)
+	old := now.Add(-25 * time.Hour)
+	oldPartial := createTempPartial(t, dir, old)
+	if err := os.WriteFile(oldPartial, []byte("old partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(oldPartial, old, old); err != nil {
+		t.Fatal(err)
+	}
+	oldWorkspace, err := os.MkdirTemp(dir, ".sherpa-export-work-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(oldWorkspace, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	originalHook := beforeClaimStaleExportEntry
+	t.Cleanup(func() { beforeClaimStaleExportEntry = originalHook })
+	beforeClaimStaleExportEntry = func(path string) {
+		preserved := path + ".old"
+		if err := os.Rename(path, preserved); err != nil {
+			t.Fatal(err)
+		}
+		if generatedPartialArchiveName(filepath.Base(path)) {
+			if err := os.WriteFile(path, []byte("young replacement"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, "sentinel"), []byte("young replacement"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	removed, err := cleanupStaleExportPartials(dir, now, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed = %d, want 0", removed)
+	}
+	partialContents, err := os.ReadFile(oldPartial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(partialContents) != "young replacement" {
+		t.Fatalf("partial replacement contents = %q", partialContents)
+	}
+	workspaceContents, err := os.ReadFile(filepath.Join(oldWorkspace, "sentinel"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(workspaceContents) != "young replacement" {
+		t.Fatalf("workspace replacement contents = %q", workspaceContents)
 	}
 }
 
@@ -1085,37 +1328,65 @@ func TestStartSchedulerDrainsMultipleArchivesOldestFirst(t *testing.T) {
 	}
 }
 
-func TestStartSchedulerRestartAfterRemoteCommitResendsThenDeletes(t *testing.T) {
+func TestDrainPendingArchivesRestartAfterStoredDeleteFailureResendsExistingThenDeletes(t *testing.T) {
 	dir := t.TempDir()
-	pending := writePendingArchive(t, dir, generatedPendingName(time.Now()), "archive", time.Now())
-	originalRun, originalUpload := runExport, uploadPendingArchive
-	t.Cleanup(func() { runExport, uploadPendingArchive = originalRun, originalUpload })
-	var runs atomic.Int32
-	resent := make(chan string, 1)
-	runExport = func(context.Context, string, string, string) error {
-		runs.Add(1)
-		return nil
-	}
+	payload := []byte("archive committed before restart")
+	pending := writePendingArchive(t, dir, generatedPendingName(time.Now()), string(payload), time.Now())
+	originalUpload, originalRemove := uploadPendingArchive, removeClaimedPendingArchive
+	t.Cleanup(func() {
+		uploadPendingArchive = originalUpload
+		removeClaimedPendingArchive = originalRemove
+	})
+	statuses := []string{"stored", "existing"}
+	var uploads int
 	uploadPendingArchive = func(_ context.Context, file *os.File, _ os.FileInfo, _, _ string) (UploadResult, error) {
-		resent <- file.Name()
-		return validatedUploadResult("existing"), nil
+		body, err := io.ReadAll(file)
+		if err != nil {
+			return UploadResult{}, err
+		}
+		if !bytes.Equal(body, payload) {
+			t.Fatalf("upload %d bytes = %q", uploads+1, body)
+		}
+		if uploads >= len(statuses) {
+			t.Fatal("archive uploaded more than twice")
+		}
+		status := statuses[uploads]
+		uploads++
+		return validatedUploadResult(status), nil
+	}
+	removeClaimedPendingArchive = func(*archiveQueue, string) error {
+		return errors.New("deterministic local delete failure")
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := startTestScheduler(ctx, schedulerTestConfig(dir, time.Hour))
-	select {
-	case got := <-resent:
-		if got != pending {
-			t.Fatalf("resent path = %q, want %q", got, pending)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("restart did not resend committed archive")
+	remaining, err := drainPendingArchives(context.Background(), schedulerTestConfig(dir, time.Hour))
+	if remaining != 1 || err == nil || err.Error() != "remove uploaded export archive" {
+		t.Fatalf("first drain result = remaining %d, error %v", remaining, err)
 	}
-	waitForPathRemoval(t, pending)
-	cancel()
-	waitForScheduler(t, done)
-	if runs.Load() != 0 {
-		t.Fatalf("export runs = %d, want 0", runs.Load())
+	if _, err := os.Lstat(pending); !os.IsNotExist(err) {
+		t.Fatalf("original pathname remains after private claim: %v", err)
+	}
+	queued, err := discoverPendingArchives(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].Base != filepath.Base(pending) {
+		t.Fatalf("recoverable claimed queue = %#v", queued)
+	}
+
+	removeClaimedPendingArchive = originalRemove
+	remaining, err = drainPendingArchives(context.Background(), schedulerTestConfig(dir, time.Hour))
+	if err != nil || remaining != 0 {
+		t.Fatalf("restart drain result = remaining %d, error %v", remaining, err)
+	}
+	if uploads != 2 {
+		t.Fatalf("uploads = %d, want stored then existing", uploads)
+	}
+	queued, err = discoverPendingArchives(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("queue after validated existing response = %#v", queued)
 	}
 }
 
@@ -1161,11 +1432,11 @@ func TestStartSchedulerPreservesAllArchivesAfterMidQueueFailure(t *testing.T) {
 	}
 }
 
-func TestDrainPendingArchivesRejectsSymlinkSwapBeforeUploadWithoutSendingTargetBytes(t *testing.T) {
+func TestDrainPendingArchivesRejectsSymlinkToFIFOWithoutBlockingOrOpeningTarget(t *testing.T) {
 	dir := t.TempDir()
 	pending := writePendingArchive(t, dir, generatedPendingName(time.Now()), "queued archive", time.Now())
-	target := filepath.Join(t.TempDir(), "target-secret")
-	if err := os.WriteFile(target, []byte("target bytes must not upload"), 0o600); err != nil {
+	fifo := filepath.Join(t.TempDir(), "blocking-fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var requested atomic.Bool
@@ -1174,27 +1445,45 @@ func TestDrainPendingArchivesRejectsSymlinkSwapBeforeUploadWithoutSendingTargetB
 	}))
 	defer server.Close()
 
-	originalOpen := openPendingArchive
-	t.Cleanup(func() { openPendingArchive = originalOpen })
+	originalBeforeHook, originalAfterHook := beforeOpenPendingArchive, afterOpenPendingArchive
+	t.Cleanup(func() {
+		beforeOpenPendingArchive = originalBeforeHook
+		afterOpenPendingArchive = originalAfterHook
+	})
+	var openedTarget atomic.Bool
+	afterOpenPendingArchive = func(string) { openedTarget.Store(true) }
 	preserved := pending + ".original"
-	openPendingArchive = func(path string) (*os.File, error) {
+	beforeOpenPendingArchive = func(path string) {
 		if err := os.Rename(path, preserved); err != nil {
-			return nil, err
+			t.Fatal(err)
 		}
-		if err := os.Symlink(target, path); err != nil {
-			return nil, err
+		if err := os.Symlink(fifo, path); err != nil {
+			t.Fatal(err)
 		}
-		return os.Open(path)
 	}
 
-	remaining, err := drainPendingArchives(context.Background(), schedulerTestConfigWithCollector(dir, time.Hour, server.URL))
-	if remaining != 1 || err == nil || err.Error() != "pending export archive changed" {
-		t.Fatalf("drain result = remaining %d, error %v", remaining, err)
+	done := make(chan struct{})
+	var remaining int
+	var drainErr error
+	go func() {
+		remaining, drainErr = drainPendingArchives(context.Background(), schedulerTestConfigWithCollector(dir, time.Hour, server.URL))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("queue open followed a symlink to a FIFO and blocked")
+	}
+	if remaining != 1 || drainErr == nil || drainErr.Error() != "pending export archive changed" {
+		t.Fatalf("drain result = remaining %d, error %v", remaining, drainErr)
+	}
+	if openedTarget.Load() {
+		t.Fatal("queue open dereferenced the symlink target")
 	}
 	if requested.Load() {
-		t.Fatal("symlink target bytes were uploaded")
+		t.Fatal("symlink target was uploaded")
 	}
-	for _, path := range []string{pending, preserved, target} {
+	for _, path := range []string{pending, preserved, fifo} {
 		if _, err := os.Lstat(path); err != nil {
 			t.Fatalf("safe path %q missing: %v", path, err)
 		}
@@ -1241,6 +1530,112 @@ func TestDrainPendingArchivesDoesNotDeleteReplacementCreatedDuringSuccessfulUplo
 	}
 }
 
+func TestDrainPendingArchivesClaimSetupFailureLeavesOnlyOriginalQueueEntry(t *testing.T) {
+	dir := t.TempDir()
+	pending := writePendingArchive(t, dir, generatedPendingName(time.Now()), "original archive", time.Now())
+	originalUpload, originalHook := uploadPendingArchive, beforePendingClaimRename
+	t.Cleanup(func() {
+		uploadPendingArchive = originalUpload
+		beforePendingClaimRename = originalHook
+	})
+	uploadPendingArchive = func(context.Context, *os.File, os.FileInfo, string, string) (UploadResult, error) {
+		return validatedUploadResult("stored"), nil
+	}
+	beforePendingClaimRename = func(string) error {
+		return errors.New("deterministic interruption before claim rename")
+	}
+
+	remaining, err := drainPendingArchives(context.Background(), schedulerTestConfig(dir, time.Hour))
+	if remaining != 1 || err == nil || err.Error() != "pending export archive changed" {
+		t.Fatalf("drain result = remaining %d, error %v", remaining, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(pending) {
+		t.Fatalf("queue entries after interrupted claim = %v", entries)
+	}
+}
+
+func TestDrainPendingArchivesDoesNotOverwriteCollidingPrivateClaim(t *testing.T) {
+	dir := t.TempDir()
+	pending := writePendingArchive(t, dir, generatedPendingName(time.Now()), "original archive", time.Now())
+	originalUpload, originalHook := uploadPendingArchive, beforePendingClaimRename
+	t.Cleanup(func() {
+		uploadPendingArchive = originalUpload
+		beforePendingClaimRename = originalHook
+	})
+	uploadPendingArchive = func(context.Context, *os.File, os.FileInfo, string, string) (UploadResult, error) {
+		return validatedUploadResult("stored"), nil
+	}
+	var collisionPath string
+	beforePendingClaimRename = func(path string) error {
+		collisionPath = path
+		return os.WriteFile(path, []byte("preserve colliding claim"), 0o600)
+	}
+
+	remaining, err := drainPendingArchives(context.Background(), schedulerTestConfig(dir, time.Hour))
+	if remaining != 1 || err == nil || err.Error() != "pending export archive changed" {
+		t.Fatalf("drain result = remaining %d, error %v", remaining, err)
+	}
+	contents, err := os.ReadFile(collisionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "preserve colliding claim" {
+		t.Fatalf("colliding claim contents = %q", contents)
+	}
+	if _, err := os.Stat(pending); err != nil {
+		t.Fatalf("original queue entry was not preserved: %v", err)
+	}
+}
+
+func TestDrainPendingArchivesDoesNotDeleteReplacementInstalledImmediatelyBeforeClaim(t *testing.T) {
+	dir := t.TempDir()
+	pending := writePendingArchive(t, dir, generatedPendingName(time.Now()), "original archive", time.Now())
+	preserved := pending + ".uploaded"
+	replacement := []byte("last-window replacement")
+	originalUpload, originalHook := uploadPendingArchive, beforeClaimPendingArchive
+	t.Cleanup(func() {
+		uploadPendingArchive = originalUpload
+		beforeClaimPendingArchive = originalHook
+	})
+	uploadPendingArchive = func(_ context.Context, file *os.File, _ os.FileInfo, _, _ string) (UploadResult, error) {
+		contents, err := io.ReadAll(file)
+		if err != nil {
+			return UploadResult{}, err
+		}
+		if string(contents) != "original archive" {
+			t.Fatalf("uploaded bytes = %q", contents)
+		}
+		return validatedUploadResult("stored"), nil
+	}
+	beforeClaimPendingArchive = func(path string) {
+		if err := os.Rename(path, preserved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, replacement, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	remaining, err := drainPendingArchives(context.Background(), schedulerTestConfig(dir, time.Hour))
+	if remaining != 1 || err == nil || err.Error() != "pending export archive changed" {
+		t.Fatalf("drain result = remaining %d, error %v", remaining, err)
+	}
+	contents, readErr := os.ReadFile(pending)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(contents, replacement) {
+		t.Fatalf("replacement contents = %q", contents)
+	}
+	if _, err := os.Stat(preserved); err != nil {
+		t.Fatalf("uploaded original was not preserved by test: %v", err)
+	}
+}
+
 func TestDrainPendingArchivesDeletesUnchangedUploadedFile(t *testing.T) {
 	dir := t.TempDir()
 	pending := writePendingArchive(t, dir, generatedPendingName(time.Now()), "original archive", time.Now())
@@ -1263,6 +1658,37 @@ func TestDrainPendingArchivesDeletesUnchangedUploadedFile(t *testing.T) {
 	}
 	if _, err := os.Lstat(pending); !os.IsNotExist(err) {
 		t.Fatalf("unchanged uploaded file remains: %v", err)
+	}
+}
+
+func TestDrainPendingArchivesRealHTTPUploadRetainsFileOwnershipAndDeletes(t *testing.T) {
+	dir := t.TempDir()
+	payload := []byte("real queued archive")
+	pending := writePendingArchive(t, dir, generatedPendingName(time.Now()), string(payload), time.Now())
+	digest := sha256.Sum256(payload)
+	objectID := "sha256:" + hex.EncodeToString(digest[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		if !bytes.Equal(body, payload) {
+			t.Errorf("uploaded body = %q", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"object_id":%q,"status":"stored"}`, objectID)
+	}))
+	defer server.Close()
+	originalUpload := uploadPendingArchive
+	t.Cleanup(func() { uploadPendingArchive = originalUpload })
+	uploadPendingArchive = uploadArchiveFile
+
+	remaining, err := drainPendingArchives(context.Background(), schedulerTestConfigWithCollector(dir, time.Hour, server.URL))
+	if err != nil || remaining != 0 {
+		t.Fatalf("drain result = remaining %d, error %v", remaining, err)
+	}
+	if _, err := os.Lstat(pending); !os.IsNotExist(err) {
+		t.Fatalf("successfully uploaded archive remains: %v", err)
 	}
 }
 
