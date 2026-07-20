@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sherpa/internal/recoveryarchive"
@@ -1081,11 +1082,20 @@ func runSchedulerCycleIn(ctx context.Context, cfg SchedulerConfig, now time.Time
 }
 
 // PreparedScheduler owns a validated export queue and its cooperative lifetime
-// lock. Run must be called exactly once so it can release both on return.
+// lock until Close is called. Run performs scheduler work but never releases
+// that ownership.
 type PreparedScheduler struct {
 	cfg   SchedulerConfig
 	queue *archiveQueue
 	ops   schedulerOps
+
+	mu        sync.Mutex
+	started   bool
+	running   bool
+	closed    bool
+	runDone   chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // PrepareScheduler validates an enabled scheduler's physical queue and acquires
@@ -1109,10 +1119,14 @@ func prepareScheduler(cfg SchedulerConfig, ops schedulerOps) (*PreparedScheduler
 	return &PreparedScheduler{cfg: cfg, queue: queue, ops: ops}, nil
 }
 
-// Run blocks until ctx is cancelled and releases the prepared queue lock before
-// returning.
+// Run blocks until ctx is cancelled or scheduler work terminates. It may be
+// called once and does not release the prepared queue lock; the owner must call
+// Close after Run has returned.
 func (scheduler *PreparedScheduler) Run(ctx context.Context) error {
-	defer scheduler.queue.close()
+	if err := scheduler.beginRun(); err != nil {
+		return err
+	}
+	defer scheduler.finishRun()
 	if _, err := cleanupStaleExportPartialsIn(scheduler.queue, scheduler.ops.now(), staleExportPartialMaxAge); err != nil {
 		return errors.New("clean stale export partials")
 	}
@@ -1148,6 +1162,51 @@ func (scheduler *PreparedScheduler) Run(ctx context.Context) error {
 	}
 }
 
+func (scheduler *PreparedScheduler) beginRun() error {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	if scheduler.closed {
+		return errors.New("export scheduler is closed")
+	}
+	if scheduler.started {
+		return errors.New("export scheduler has already run")
+	}
+	scheduler.started = true
+	scheduler.running = true
+	scheduler.runDone = make(chan struct{})
+	return nil
+}
+
+func (scheduler *PreparedScheduler) finishRun() {
+	scheduler.mu.Lock()
+	done := scheduler.runDone
+	scheduler.running = false
+	scheduler.runDone = nil
+	scheduler.mu.Unlock()
+	close(done)
+}
+
+// Close waits for a running scheduler to return, then idempotently releases the
+// prepared queue descriptor and cooperative lifetime lock. Close never performs
+// queue discovery, cleanup, upload, or export work.
+func (scheduler *PreparedScheduler) Close() error {
+	for {
+		scheduler.mu.Lock()
+		if scheduler.running {
+			done := scheduler.runDone
+			scheduler.mu.Unlock()
+			<-done
+			continue
+		}
+		scheduler.closed = true
+		scheduler.mu.Unlock()
+		scheduler.closeOnce.Do(func() {
+			scheduler.closeErr = scheduler.queue.close()
+		})
+		return scheduler.closeErr
+	}
+}
+
 // StartScheduler prepares the scheduler synchronously, then runs it until ctx is
 // cancelled. Empty scheduler settings disable it.
 func StartScheduler(ctx context.Context, cfg SchedulerConfig) error {
@@ -1159,7 +1218,15 @@ func startScheduler(ctx context.Context, cfg SchedulerConfig, ops schedulerOps) 
 	if err != nil || scheduler == nil {
 		return err
 	}
-	return scheduler.Run(ctx)
+	runErr := scheduler.Run(ctx)
+	closeErr := scheduler.Close()
+	if runErr != nil {
+		return runErr
+	}
+	if closeErr != nil {
+		return errors.New("close export scheduler")
+	}
+	return nil
 }
 
 func logSchedulerRetry(cfg SchedulerConfig, queueCount int, base string, modTime time.Time, retryClass string) {

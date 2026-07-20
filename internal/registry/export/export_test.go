@@ -1506,6 +1506,92 @@ func TestStartSchedulerStopsAfterUndurableArchiveRemoval(t *testing.T) {
 	}
 }
 
+func TestPreparedSchedulerTerminalRunRetainsQueueLockUntilClose(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writePendingArchive(t, dir, generatedPendingName(time.Now()), "archive", time.Now())
+	cfg := schedulerTestConfig(dir, time.Hour)
+	ops := defaultSchedulerOps()
+	ops.upload = func(context.Context, *os.File, os.FileInfo, string, string) (UploadResult, error) {
+		return validatedUploadResult("stored"), nil
+	}
+	ops.syncQueue = func(*archiveQueue) error {
+		return errors.New("deterministic directory sync failure")
+	}
+
+	scheduler, err := prepareScheduler(cfg, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "sync export archive directory") {
+		t.Fatalf("scheduler run error = %v, want terminal sync failure", err)
+	}
+	if contender, err := PrepareScheduler(cfg); err == nil || contender != nil || !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("contender before explicit close = %v, %v; want lock contention", contender, err)
+	}
+	if err := scheduler.Close(); err != nil {
+		t.Fatalf("close scheduler: %v", err)
+	}
+	fresh, err := PrepareScheduler(cfg)
+	if err != nil {
+		t.Fatalf("prepare after close: %v", err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatalf("close fresh scheduler: %v", err)
+	}
+}
+
+func TestPreparedSchedulerCloseIsIdempotentAndDoesNotRunQueueWork(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := createTempPartial(t, dir, time.Now().Add(-48*time.Hour))
+	cfg := schedulerTestConfig(dir, time.Hour)
+	ops := defaultSchedulerOps()
+	var exports atomic.Int32
+	var uploads atomic.Int32
+	ops.runExport = func(context.Context, string, string, string) error {
+		exports.Add(1)
+		return nil
+	}
+	ops.upload = func(context.Context, *os.File, os.FileInfo, string, string) (UploadResult, error) {
+		uploads.Add(1)
+		return validatedUploadResult("stored"), nil
+	}
+
+	scheduler, err := prepareScheduler(cfg, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if err := scheduler.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	if exports.Load() != 0 || uploads.Load() != 0 {
+		t.Fatalf("close ran queue work: exports=%d uploads=%d", exports.Load(), uploads.Load())
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("close removed stale queue entry: %v", err)
+	}
+	if err := scheduler.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("run after close error = %v, want closed scheduler rejection", err)
+	}
+
+	fresh, err := PrepareScheduler(cfg)
+	if err != nil {
+		t.Fatalf("prepare after idempotent close: %v", err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatalf("close fresh scheduler: %v", err)
+	}
+}
+
 func TestStartSchedulerTwoLifetimesRetryStoredDeleteFailureAsExisting(t *testing.T) {
 	t.Parallel()
 

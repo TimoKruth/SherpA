@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,33 @@ type exportSchedulerFunc func(context.Context) error
 
 func (run exportSchedulerFunc) Run(ctx context.Context) error {
 	return run(ctx)
+}
+
+func (exportSchedulerFunc) Close() error {
+	return nil
+}
+
+type recordingExportScheduler struct {
+	run        func(context.Context) error
+	close      func() error
+	runCalls   atomic.Int32
+	closeCalls atomic.Int32
+}
+
+func (scheduler *recordingExportScheduler) Run(ctx context.Context) error {
+	scheduler.runCalls.Add(1)
+	if scheduler.run == nil {
+		return nil
+	}
+	return scheduler.run(ctx)
+}
+
+func (scheduler *recordingExportScheduler) Close() error {
+	scheduler.closeCalls.Add(1)
+	if scheduler.close == nil {
+		return nil
+	}
+	return scheduler.close()
 }
 
 func TestRunBootsRegistryWithPostgres(t *testing.T) {
@@ -348,6 +376,9 @@ func TestRunAcquiresExportQueueLockBeforeReadinessAndReleasesDuringCleanup(t *te
 	if err := fresh.Run(stopped); err != nil {
 		t.Fatalf("run scheduler after cleanup: %v", err)
 	}
+	if err := fresh.Close(); err != nil {
+		t.Fatalf("close scheduler after cleanup test: %v", err)
+	}
 }
 
 func TestRunLockContenderDoesNotCleanActiveContentStage(t *testing.T) {
@@ -366,9 +397,7 @@ func TestRunLockContenderDoesNotCleanActiveContentStage(t *testing.T) {
 		t.Fatalf("prepare primary scheduler: %v", err)
 	}
 	defer func() {
-		stopped, stop := context.WithCancel(context.Background())
-		stop()
-		if err := primary.Run(stopped); err != nil {
+		if err := primary.Close(); err != nil {
 			t.Errorf("release primary scheduler: %v", err)
 		}
 	}()
@@ -394,6 +423,194 @@ func TestRunLockContenderDoesNotCleanActiveContentStage(t *testing.T) {
 	}
 	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "active publish" {
 		t.Fatalf("active stage sentinel after contention = %q, %v; want preserved", data, err)
+	}
+}
+
+func TestRegistrySchedulerFatalExitDropsReadinessAndKeepsLockUntilCleanup(t *testing.T) {
+	dsn := store.StartPostgres(t)
+	contentDir := t.TempDir()
+	archiveDir := t.TempDir()
+	if err := os.Chmod(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		DatabaseURL: dsn, ContentDir: contentDir, ExportURL: "https://backups.example/upload",
+		ExportToken: "collector-secret", ExportInterval: time.Hour, ExportArchiveDir: archiveDir,
+	}
+
+	runStarted := make(chan struct{})
+	allowFailure := make(chan struct{})
+	terminal := errors.New("terminal scheduler failure")
+	var scheduler *recordingExportScheduler
+	ops := defaultRegistryRunOps()
+	ops.prepareExportScheduler = func(exportCfg registryexport.SchedulerConfig) (exportScheduler, error) {
+		prepared, err := registryexport.PrepareScheduler(exportCfg)
+		if err != nil {
+			return nil, err
+		}
+		scheduler = &recordingExportScheduler{
+			run: func(context.Context) error {
+				close(runStarted)
+				<-allowFailure
+				return terminal
+			},
+			close: prepared.Close,
+		}
+		return scheduler, nil
+	}
+
+	runtime, err := startRegistryWithOps(context.Background(), cfg, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.cleanup()
+	select {
+	case <-runStarted:
+	case <-time.After(time.Second):
+		t.Fatal("scheduler did not start")
+	}
+
+	health := httptest.NewRecorder()
+	runtime.server.Handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "http://registry.test/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health before scheduler failure = %d, want 200", health.Code)
+	}
+	activeStage := filepath.Join(contentDir, ".stage-active-after-scheduler-failure")
+	if err := os.Mkdir(activeStage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(activeStage, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("active publish"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	close(allowFailure)
+	select {
+	case err := <-runtime.schedulerFatal:
+		if !errors.Is(err, terminal) {
+			t.Fatalf("scheduler fatal error = %v, want terminal failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scheduler fatal error was not delivered")
+	}
+	health = httptest.NewRecorder()
+	runtime.server.Handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "http://registry.test/healthz", nil))
+	if health.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health after scheduler failure = %d, want 503", health.Code)
+	}
+
+	contenderServer, contenderCleanup, err := run(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "export archive directory is already in use") {
+		t.Fatalf("overlapping contender error = %v, want queue lock contention", err)
+	}
+	if contenderServer != nil || contenderCleanup != nil {
+		t.Fatal("overlapping contender returned server or cleanup")
+	}
+	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "active publish" {
+		t.Fatalf("active stage after terminal scheduler failure = %q, %v; want preserved", data, err)
+	}
+
+	runtime.cleanup()
+	if scheduler.closeCalls.Load() != 1 {
+		t.Fatalf("scheduler close calls = %d, want 1", scheduler.closeCalls.Load())
+	}
+	fresh, err := registryexport.PrepareScheduler(registryexport.SchedulerConfig{
+		ContentDir: contentDir, DatabaseURL: dsn, ArchiveDir: archiveDir,
+		CollectorURL: cfg.ExportURL, Token: cfg.ExportToken, Interval: cfg.ExportInterval,
+	})
+	if err != nil {
+		t.Fatalf("prepare scheduler after registry cleanup: %v", err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatalf("close fresh scheduler: %v", err)
+	}
+}
+
+func TestRegistryStartupFailuresClosePreparedSchedulerWithoutRunningIt(t *testing.T) {
+	dsn := store.StartPostgres(t)
+	startupFailure := errors.New("deterministic startup failure")
+
+	for _, tc := range []struct {
+		name      string
+		configure func(*registryRunOps, string)
+		wantError string
+	}{
+		{
+			name: "database open",
+			configure: func(ops *registryRunOps, _ string) {
+				ops.openPostgres = func(context.Context, string, ...int) (*store.PostgresStore, error) {
+					return nil, startupFailure
+				}
+				ops.sleep = func(context.Context, time.Duration) error { return nil }
+			},
+			wantError: "open registry database",
+		},
+		{
+			name: "content directory creation",
+			configure: func(ops *registryRunOps, contentDir string) {
+				ops.mkdirAll = func(path string, mode os.FileMode) error {
+					if path == contentDir {
+						return startupFailure
+					}
+					return os.MkdirAll(path, mode)
+				}
+			},
+			wantError: "prepare registry content directory",
+		},
+		{
+			name: "abandoned stage cleanup",
+			configure: func(ops *registryRunOps, _ string) {
+				ops.cleanAbandonedStages = func(string) (int, error) { return 0, startupFailure }
+			},
+			wantError: "clean abandoned content stages",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contentDir := t.TempDir()
+			archiveDir := t.TempDir()
+			if err := os.Chmod(archiveDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := Config{
+				DatabaseURL: dsn, ContentDir: contentDir, ExportURL: "https://backups.example/upload",
+				ExportToken: "collector-secret", ExportInterval: time.Hour, ExportArchiveDir: archiveDir,
+			}
+			var scheduler *recordingExportScheduler
+			ops := defaultRegistryRunOps()
+			ops.prepareExportScheduler = func(exportCfg registryexport.SchedulerConfig) (exportScheduler, error) {
+				prepared, err := registryexport.PrepareScheduler(exportCfg)
+				if err != nil {
+					return nil, err
+				}
+				scheduler = &recordingExportScheduler{close: prepared.Close}
+				return scheduler, nil
+			}
+			tc.configure(&ops, contentDir)
+
+			runtime, err := startRegistryWithOps(context.Background(), cfg, ops)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("startup error = %v, want %q", err, tc.wantError)
+			}
+			if runtime != nil {
+				t.Fatal("failed startup returned runtime")
+			}
+			if scheduler == nil {
+				t.Fatal("startup failed before scheduler preparation")
+			}
+			if scheduler.runCalls.Load() != 0 || scheduler.closeCalls.Load() != 1 {
+				t.Fatalf("scheduler lifecycle calls = run %d close %d, want 0 and 1", scheduler.runCalls.Load(), scheduler.closeCalls.Load())
+			}
+			fresh, err := registryexport.PrepareScheduler(registryexport.SchedulerConfig{
+				ContentDir: contentDir, DatabaseURL: dsn, ArchiveDir: archiveDir,
+				CollectorURL: cfg.ExportURL, Token: cfg.ExportToken, Interval: cfg.ExportInterval,
+			})
+			if err != nil {
+				t.Fatalf("prepare after failed startup: %v", err)
+			}
+			if err := fresh.Close(); err != nil {
+				t.Fatalf("close fresh scheduler: %v", err)
+			}
+		})
 	}
 }
 
