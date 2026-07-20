@@ -42,17 +42,18 @@
 
 | UTC time | Action | Expected impact | Rollback/cleanup | Approval |
 |---|---|---|---|---|
+| `2026-07-20T04:48Z` | PostgreSQL volume-persistence redeploy | One brief PostgreSQL restart; no application schemas or rows changed | Same PG16 image and volume retained; only `/var/lib/postgresql/data/.sherpa-volume-probe` created and removed | Explicit interactive approval received immediately before the drill |
 
 ## Postgres provisioning
 
 | Field | Value |
 |---|---|
 | Service ID | `d67d4334-d3ca-4ca4-ab4c-099452c88557` |
-| Volume ID | Not run |
-| Deployment ID | Not run |
-| PG16 active | Not run |
-| Required mount | Not run |
-| Public TCP absent | Not run |
+| Volume ID | `1012e6ae-def9-4c6e-9ecc-aa3ccae71a3c` (`postgres-volume`, 5000 MB, `Ready`) |
+| Deployment ID | Initial `8ab1f3d0-c6d5-4148-a28e-f2b9b516235f`; persistence redeploy `116d4229-50d1-4bda-8c58-0ba1ee9c41a3`; both `SUCCESS` |
+| PG16 active | Pass — `ghcr.io/railwayapp-templates/postgres-ssl:16` |
+| Required mount | Pass — `/var/lib/postgresql/data`; exact non-secret probe survived redeploy on the same volume and was removed |
+| Public TCP absent | Pass — public service/custom domain list empty |
 
 ## Phase 2c-iii registry gate
 
