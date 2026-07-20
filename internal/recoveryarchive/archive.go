@@ -114,6 +114,7 @@ func ValidateFile(ctx context.Context, archivePath string, limits Limits) (Repor
 	logicalBudget := artifactBudget{limit: limits.MaxUncompressedBytes}
 	var verifiedBytes int64
 
+members:
 	for {
 		if err := ctx.Err(); err != nil {
 			return Report{}, err
@@ -127,9 +128,6 @@ func ValidateFile(ctx context.Context, archivePath string, limits Limits) (Repor
 		}
 		if err != nil {
 			return Report{}, classifyStreamError(ctx, compressed, decompressed, err, FailureInvalidTar)
-		}
-		if manifestSeen {
-			return Report{}, validationError{class: FailureManifestNotFinal}
 		}
 		memberCount++
 		if memberCount > limits.MaxMembers {
@@ -174,7 +172,11 @@ func ValidateFile(ctx context.Context, archivePath string, limits Limits) (Repor
 			if err != nil {
 				return Report{}, err
 			}
+			if err := validateFinalTerminator(contextualDecompressed, header.Size); err != nil {
+				return Report{}, classifyStreamError(ctx, compressed, decompressed, err, FailureInvalidTar)
+			}
 			manifestSeen = true
+			break members
 		default:
 			if !validRepositoryPath(header.Name) {
 				return Report{}, validationError{class: FailureInvalidRepository}
@@ -241,6 +243,37 @@ func Classify(err error) FailureClass {
 		return validation.class
 	}
 	return ""
+}
+
+func validateFinalTerminator(reader io.Reader, size int64) error {
+	padding := (tarBlockBytes - size%tarBlockBytes) % tarBlockBytes
+	if _, err := io.CopyN(io.Discard, reader, padding); err != nil {
+		return err
+	}
+
+	var block [tarBlockBytes]byte
+	if _, err := io.ReadFull(reader, block[:]); err != nil {
+		return err
+	}
+	if !zeroBlock(block[:]) {
+		return validationError{class: FailureManifestNotFinal}
+	}
+	if _, err := io.ReadFull(reader, block[:]); err != nil {
+		return err
+	}
+	if !zeroBlock(block[:]) {
+		return validationError{class: FailureInvalidTar}
+	}
+	return nil
+}
+
+func zeroBlock(block []byte) bool {
+	for _, value := range block {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func sparseMember(header *tar.Header) bool {

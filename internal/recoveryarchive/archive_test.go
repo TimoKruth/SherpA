@@ -330,15 +330,25 @@ func TestValidateFileRequiresCanonicalTarTerminator(t *testing.T) {
 	writeTarMembers(t, &canonical, completeMembers(t))
 	contents := canonical.Bytes()
 	prefix := contents[:len(contents)-2*tarBlockSize]
-	for name, archive := range map[string][]byte{
-		"no terminator":        prefix,
-		"one-block terminator": contents[:len(contents)-tarBlockSize],
-		"orphan PAX header":    append(append([]byte(nil), prefix...), orphanExtension(t, tar.TypeXHeader, nil, true)...),
-		"orphan GNU long name": append(append([]byte(nil), prefix...), orphanExtension(t, tar.TypeGNULongName, []byte("orphan\x00"), false)...),
-	} {
-		t.Run(name, func(t *testing.T) {
-			path := writeGzipBytes(t, archive)
-			assertFailureClass(t, path, recoveryarchive.DefaultLimits(), recoveryarchive.FailureInvalidTar)
+	terminator := make([]byte, 2*tarBlockSize)
+	paxSparseBody := []byte(paxRecord("GNU.sparse.numblocks", "1") + paxRecord("GNU.sparse.map", "0,1") + paxRecord("GNU.sparse.size", "8192"))
+	cases := []struct {
+		name    string
+		archive []byte
+		want    recoveryarchive.FailureClass
+	}{
+		{name: "no terminator", archive: append([]byte(nil), prefix...), want: recoveryarchive.FailureInvalidTar},
+		{name: "one-block terminator", archive: append([]byte(nil), contents[:len(contents)-tarBlockSize]...), want: recoveryarchive.FailureInvalidTar},
+		{name: "orphan PAX header", archive: joinBytes(prefix, orphanExtension(t, tar.TypeXHeader, nil, true)), want: recoveryarchive.FailureManifestNotFinal},
+		{name: "orphan GNU long name", archive: joinBytes(prefix, orphanExtension(t, tar.TypeGNULongName, []byte("orphan\x00"), false)), want: recoveryarchive.FailureManifestNotFinal},
+		{name: "hidden PAX before terminator", archive: joinBytes(prefix, orphanExtension(t, tar.TypeXHeader, []byte(paxRecord("comment", "orphan")), false), terminator), want: recoveryarchive.FailureManifestNotFinal},
+		{name: "hidden PAX sparse metadata before terminator", archive: joinBytes(prefix, orphanExtension(t, tar.TypeXHeader, paxSparseBody, false), terminator), want: recoveryarchive.FailureManifestNotFinal},
+		{name: "hidden GNU long name before terminator", archive: joinBytes(prefix, orphanExtension(t, tar.TypeGNULongName, []byte("orphan\x00"), false), terminator), want: recoveryarchive.FailureManifestNotFinal},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeGzipBytes(t, test.archive)
+			assertFailureClass(t, path, recoveryarchive.DefaultLimits(), test.want)
 		})
 	}
 }
@@ -531,6 +541,14 @@ func assertFitsDecompressionBuffer(t testing.TB, path string) {
 	if info.Size() >= 4096 {
 		t.Fatalf("compressed fixture is %d bytes, want less than the 4096-byte buffer", info.Size())
 	}
+}
+
+func joinBytes(parts ...[]byte) []byte {
+	var joined []byte
+	for _, part := range parts {
+		joined = append(joined, part...)
+	}
+	return joined
 }
 
 func orphanExtension(t testing.TB, typeflag byte, body []byte, appendZeroBlock bool) []byte {
