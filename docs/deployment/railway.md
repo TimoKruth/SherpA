@@ -155,11 +155,12 @@ The scheduler deletes a local archive after a successful upload. A failed archiv
 new archive until that pending archive uploads and is deleted. This bounds local accumulation
 to one archive, but a failed upload or missing collector object is still an alert because the
 off-site recovery point is not advancing. Keep the archive directory outside `/data/git` and
-monitor its capacity. The root entrypoint must precreate this queue as a real `0700` directory
-owned by the registry UID/GID; the scheduler validates that identity and holds a cooperative
-lock for its lifetime. Keep `numReplicas=1`, and do not run another registry, sidecar, shell, or
-job as the registry UID against the same queue. Collector retention is the authoritative
-retention policy.
+monitor its capacity. `/data` must remain a real, root-owned volume mountpoint that is not
+writable by the registry UID; the root entrypoint alone precreates the queue beneath it as a
+real `0700` directory owned by the registry UID/GID. The scheduler validates that identity and
+holds a cooperative lock for its lifetime. Keep `numReplicas=1`, and do not run another
+registry, sidecar, shell, or job as the registry UID against the same queue. Collector retention
+is the authoritative retention policy.
 
 For a manual local archive in a container or recovery environment:
 
