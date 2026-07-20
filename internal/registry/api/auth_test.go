@@ -171,11 +171,15 @@ func TestDeviceStartClientIPHonorsForwardedFor(t *testing.T) {
 		t.Fatalf("spoof second = %d, want limited (shared rightmost hop 203.0.113.7)", second)
 	}
 
-	// X-Real-IP is no longer trusted: two requests differing only in X-Real-IP
-	// share RemoteAddr's bucket, so the second is limited.
-	realIP, _ := newHandler(true)
-	if first, second := start(realIP, map[string]string{"X-Real-IP": "198.51.100.77"}), start(realIP, map[string]string{"X-Real-IP": "198.51.100.88"}); first != http.StatusOK || second != http.StatusTooManyRequests {
-		t.Fatalf("X-Real-IP trusted? statuses = %d, %d", first, second)
+	// Railway strips client-supplied forwarding headers and sets X-Real-IP to
+	// the connecting client. Distinct X-Real-IP values therefore get independent
+	// buckets even when the proxy connection shares one RemoteAddr.
+	realIP, realIPGitHub := newHandler(true)
+	if first, second := start(realIP, map[string]string{"X-Real-IP": "198.51.100.77"}), start(realIP, map[string]string{"X-Real-IP": "198.51.100.88"}); first != http.StatusOK || second != http.StatusOK {
+		t.Fatalf("X-Real-IP statuses = %d, %d", first, second)
+	}
+	if realIPGitHub.StartCalls != 2 {
+		t.Fatalf("X-Real-IP StartCalls = %d, want 2", realIPGitHub.StartCalls)
 	}
 
 	// Multi-line X-Forwarded-For: a proxy may append its hop as a separate header

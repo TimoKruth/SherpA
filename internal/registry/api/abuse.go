@@ -293,16 +293,13 @@ func (l *authLimiter) makeDeviceRoom() {
 
 func clientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
-		// Trust ONLY the rightmost X-Forwarded-For entry: the hop appended by
-		// our own edge proxy (Railway). A client can prepend spoofed entries to
-		// the left, but cannot control the value the trusted proxy appends. We
-		// deliberately do NOT read X-Real-IP: it is a single client-forwardable
-		// value with no append semantics, so trusting it would let a caller set
-		// an arbitrary per-IP rate-limit bucket and bypass the start limit.
-		// Join all X-Forwarded-For header lines before taking the rightmost hop:
-		// a proxy may append its hop as a separate header line rather than
-		// comma-extending the client's, and only the true rightmost (edge) hop
-		// is trustworthy.
+		// Railway strips client-supplied forwarding headers and sets X-Real-IP
+		// to the connecting client's address. Prefer that authoritative value;
+		// retain the rightmost X-Forwarded-For fallback for trusted proxies that
+		// append their own hop but do not provide X-Real-IP.
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(realIP) != nil {
+			return realIP
+		}
 		if forwarded := rightmostForwardedFor(strings.Join(r.Header.Values("X-Forwarded-For"), ",")); forwarded != "" {
 			return forwarded
 		}
