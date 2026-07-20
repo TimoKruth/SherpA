@@ -28,15 +28,15 @@
 
 | Check | Result | Non-secret evidence |
 |---|---|---|
-| Candidate and working tree | Not run | |
-| gofmt | Not run | |
-| Go tests | Not run | |
-| Race tests | Not run | |
-| go vet | Not run | |
-| Go builds | Not run | |
-| Registry image smoke | Not run | |
-| Website image smoke | Not run | |
-| Config syntax and diff check | Not run | |
+| Candidate and working tree | Pass | Exact candidate `312479ee55539560936129db21bcec8da7b9827a` extracted with `git archive` into a mode-0700 directory without `.git`; committed drift from `origin/main` is documentation-only; only the three preserved `.DS_Store` files are untracked |
+| gofmt | Pass | Check-only `gofmt -l .` emitted no paths |
+| Go tests | Pass | `go test -count=1 ./...` passed on the exact candidate. The first run saw one transient Docker host-port connection reset while opening ephemeral PostgreSQL; the isolated test and full-suite rerun passed, and no application defect reproduced |
+| Race tests | Pass | `go test -race ./internal/registry/... ./internal/web/... ./internal/cli ./internal/state ./internal/integration` passed |
+| go vet | Pass | `go vet ./...` exited 0 |
+| Go builds | Pass | `go build ./cmd/...` exited 0 |
+| Registry image smoke | Pass | `sherpa-registry:test`, image `sha256:cb83070a3e3949448fe68a4b9b1141f60634197d0e43e5a19cd1a10a5a895694`; PG16, health, non-root, writable data, Git, `pg_dump`, and final-image checks passed |
+| Website image smoke | Pass | `sherpa-web:test`, image `sha256:0d7f756148d425815d36184d9604faf018aec822ab32c3ef9c474e27d5e5ec7e`; public-page, command, header, non-root, outage/recovery, and final-image checks passed |
+| Config syntax and diff check | Pass | Shell syntax, both Railway JSON files, and `git diff --check` passed |
 
 ## Disruptive-action approvals
 
