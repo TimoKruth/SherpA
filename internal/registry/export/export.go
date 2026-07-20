@@ -332,6 +332,33 @@ type UploadResult struct {
 	Status   string `json:"status"`
 }
 
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if contextErr := r.ctx.Err(); contextErr != nil {
+		return n, contextErr
+	}
+	return n, err
+}
+
+func hashArchive(ctx context.Context, reader io.Reader) (string, error) {
+	hash := sha256.New()
+	if _, err := io.Copy(hash, contextReader{ctx: ctx, reader: reader}); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
 // Upload sends a completed archive to an HTTPS collector. Plain HTTP is only
 // accepted for loopback addresses so local integration tests remain practical.
 func Upload(ctx context.Context, archivePath, collectorURL, token string) (UploadResult, error) {
@@ -348,11 +375,13 @@ func Upload(ctx context.Context, archivePath, collectorURL, token string) (Uploa
 	if err != nil {
 		return UploadResult{}, fmt.Errorf("stat export archive: %w", err)
 	}
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	objectID, err := hashArchive(ctx, file)
+	if err != nil {
+		if ctx.Err() != nil {
+			return UploadResult{}, ctx.Err()
+		}
 		return UploadResult{}, errors.New("hash export archive")
 	}
-	objectID := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return UploadResult{}, errors.New("rewind export archive")
 	}
@@ -384,14 +413,14 @@ func Upload(ctx context.Context, archivePath, collectorURL, token string) (Uploa
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxCollectorResponseBodySize))
 		return UploadResult{}, fmt.Errorf("export collector returned HTTP %d", response.StatusCode)
 	}
-	if response.ContentLength >= maxCollectorResponseBodySize {
+	if response.ContentLength > maxCollectorResponseBodySize {
 		return UploadResult{}, errors.New("export collector response is too large")
 	}
-	encoded, err := io.ReadAll(io.LimitReader(response.Body, maxCollectorResponseBodySize))
+	encoded, err := io.ReadAll(io.LimitReader(response.Body, maxCollectorResponseBodySize+1))
 	if err != nil {
 		return UploadResult{}, errors.New("read export collector response")
 	}
-	if len(encoded) >= maxCollectorResponseBodySize {
+	if len(encoded) > maxCollectorResponseBodySize {
 		return UploadResult{}, errors.New("export collector response is too large")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))

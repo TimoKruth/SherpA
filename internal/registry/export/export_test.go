@@ -220,6 +220,79 @@ func TestDatabaseEnvironmentDefaultsAndRejectsMalformedURLsWithoutSecrets(t *tes
 	}
 }
 
+func TestHashArchiveDoesNotReadWithCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reader := &countingHashReader{}
+
+	_, err := hashArchive(ctx, reader)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("hashArchive error = %v, want context canceled", err)
+	}
+	if reader.reads != 0 {
+		t.Fatalf("underlying reads = %d, want 0", reader.reads)
+	}
+}
+
+func TestHashArchiveStopsAfterContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &cancellationHashReader{
+		started:    make(chan struct{}),
+		resume:     make(chan struct{}),
+		secondRead: make(chan struct{}),
+		finish:     make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := hashArchive(ctx, reader)
+		done <- err
+	}()
+
+	<-reader.started
+	cancel()
+	close(reader.resume)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("hashArchive error = %v, want context canceled", err)
+		}
+	case <-reader.secondRead:
+		close(reader.finish)
+		<-done
+		t.Fatal("hashArchive read again after context cancellation")
+	case <-time.After(time.Second):
+		close(reader.finish)
+		t.Fatal("hashArchive did not stop after context cancellation")
+	}
+}
+
+func TestHashArchiveReturnsCancellationFromTerminalRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &terminalCancellationHashReader{cancel: cancel}
+
+	_, err := hashArchive(ctx, reader)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("hashArchive error = %v, want context canceled", err)
+	}
+	if reader.reads != 1 {
+		t.Fatalf("underlying reads = %d, want 1", reader.reads)
+	}
+}
+
+func TestHashArchiveHashesNormally(t *testing.T) {
+	contents := []byte("complete gzip bytes")
+	digest := sha256.Sum256(contents)
+	want := "sha256:" + hex.EncodeToString(digest[:])
+
+	got, err := hashArchive(context.Background(), bytes.NewReader(contents))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("hashArchive = %q, want %q", got, want)
+	}
+}
+
 func TestUploadAcceptsCreatedStoredResponse(t *testing.T) {
 	path, objectID := writeUploadArchive(t, []byte("complete gzip bytes"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -311,16 +384,49 @@ func TestUploadRejectsStatusCodeStatusBodyMismatch(t *testing.T) {
 	}
 }
 
-func TestUploadBoundsCollectorResponseBody(t *testing.T) {
-	path, _ := writeUploadArchive(t, []byte("complete gzip bytes"))
+func TestUploadAcceptsCollectorResponseAtExactSizeLimit(t *testing.T) {
+	path, objectID := writeUploadArchive(t, []byte("complete gzip bytes"))
+	body := []byte(fmt.Sprintf(`{"object_id":%q,"status":"stored"}`, objectID))
+	body = append(body, bytes.Repeat([]byte(" "), maxCollectorResponseBodySize-len(body))...)
+	if len(body) != maxCollectorResponseBodySize {
+		t.Fatalf("response body size = %d, want %d", len(body), maxCollectorResponseBodySize)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
 		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, strings.Repeat("{", (64<<10)+1))
+		_, _ = w.Write(body)
 	}))
 	defer server.Close()
 
-	if _, err := Upload(context.Background(), path, server.URL, "collector-secret"); err == nil {
+	result, err := Upload(context.Background(), path, server.URL, "collector-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != (UploadResult{ObjectID: objectID, Status: "stored"}) {
+		t.Fatalf("Upload result = %+v", result)
+	}
+}
+
+func TestUploadRejectsCollectorResponseAboveSizeLimit(t *testing.T) {
+	path, objectID := writeUploadArchive(t, []byte("complete gzip bytes"))
+	body := []byte(fmt.Sprintf(`{"object_id":%q,"status":"stored"}`, objectID))
+	body = append(body, bytes.Repeat([]byte(" "), maxCollectorResponseBodySize+1-len(body))...)
+	if len(body) != maxCollectorResponseBodySize+1 {
+		t.Fatalf("response body size = %d, want %d", len(body), maxCollectorResponseBodySize+1)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		w.(http.Flusher).Flush()
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	_, err := Upload(context.Background(), path, server.URL, "collector-secret")
+	if err == nil {
 		t.Fatal("Upload accepted an oversized collector response")
+	}
+	if err.Error() != "export collector response is too large" {
+		t.Fatalf("Upload error = %q, want size-limit rejection", err)
 	}
 }
 
@@ -347,6 +453,12 @@ func TestUploadSendsArchiveWithOnlyConfiguredAuthorization(t *testing.T) {
 	path, objectID := writeUploadArchive(t, payload)
 	var received []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength != int64(len(payload)) || r.ContentLength <= 0 {
+			t.Errorf("ContentLength = %d, want %d", r.ContentLength, len(payload))
+		}
+		if len(r.TransferEncoding) != 0 {
+			t.Errorf("TransferEncoding = %q, want none", r.TransferEncoding)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer collector-secret" {
 			t.Errorf("Authorization = %q", got)
 		}
@@ -502,6 +614,47 @@ func TestValidateSchedulerConfigRejectsTokenOnlyAndInsecureCollector(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
 		t.Fatalf("insecure collector error = %v", err)
 	}
+}
+
+type countingHashReader struct {
+	reads int
+}
+
+func (r *countingHashReader) Read([]byte) (int, error) {
+	r.reads++
+	return 0, io.EOF
+}
+
+type cancellationHashReader struct {
+	started    chan struct{}
+	resume     chan struct{}
+	secondRead chan struct{}
+	finish     chan struct{}
+	reads      int
+}
+
+func (r *cancellationHashReader) Read(p []byte) (int, error) {
+	r.reads++
+	if r.reads == 1 {
+		close(r.started)
+		<-r.resume
+		return copy(p, "archive bytes"), nil
+	}
+	close(r.secondRead)
+	<-r.finish
+	return 0, io.EOF
+}
+
+type terminalCancellationHashReader struct {
+	cancel context.CancelFunc
+	reads  int
+}
+
+func (r *terminalCancellationHashReader) Read(p []byte) (int, error) {
+	r.reads++
+	n := copy(p, "archive bytes")
+	r.cancel()
+	return n, io.EOF
 }
 
 func writeUploadArchive(t *testing.T, contents []byte) (string, string) {
