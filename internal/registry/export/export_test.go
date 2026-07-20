@@ -279,6 +279,22 @@ func TestHashArchiveReturnsCancellationFromTerminalRead(t *testing.T) {
 	}
 }
 
+func TestHashArchiveChecksContextAfterCopy(t *testing.T) {
+	ctx := &stagedCancellationContext{cancelAt: 3}
+	reader := &terminalEOFHashReader{}
+
+	_, err := hashArchive(ctx, reader)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("hashArchive error = %v, want context canceled", err)
+	}
+	if ctx.errCalls != ctx.cancelAt {
+		t.Fatalf("context error checks = %d, want %d", ctx.errCalls, ctx.cancelAt)
+	}
+	if reader.reads != 1 {
+		t.Fatalf("underlying reads = %d, want 1", reader.reads)
+	}
+}
+
 func TestHashArchiveHashesNormally(t *testing.T) {
 	contents := []byte("complete gzip bytes")
 	digest := sha256.Sum256(contents)
@@ -290,6 +306,25 @@ func TestHashArchiveHashesNormally(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("hashArchive = %q, want %q", got, want)
+	}
+}
+
+func TestUploadReturnsPreCanceledContextWithoutRequest(t *testing.T) {
+	path, _ := writeUploadArchive(t, []byte("complete gzip bytes"))
+	var requested atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requested.Store(true)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := Upload(ctx, path, server.URL, "collector-secret")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Upload error = %v, want context canceled", err)
+	}
+	if requested.Load() {
+		t.Fatal("Upload sent a request after the context was canceled")
 	}
 }
 
@@ -643,6 +678,31 @@ func (r *cancellationHashReader) Read(p []byte) (int, error) {
 	close(r.secondRead)
 	<-r.finish
 	return 0, io.EOF
+}
+
+type stagedCancellationContext struct {
+	cancelAt int
+	errCalls int
+}
+
+func (*stagedCancellationContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*stagedCancellationContext) Done() <-chan struct{}       { return nil }
+func (c *stagedCancellationContext) Err() error {
+	c.errCalls++
+	if c.errCalls >= c.cancelAt {
+		return context.Canceled
+	}
+	return nil
+}
+func (*stagedCancellationContext) Value(any) any { return nil }
+
+type terminalEOFHashReader struct {
+	reads int
+}
+
+func (r *terminalEOFHashReader) Read(p []byte) (int, error) {
+	r.reads++
+	return copy(p, "archive bytes"), io.EOF
 }
 
 type terminalCancellationHashReader struct {
