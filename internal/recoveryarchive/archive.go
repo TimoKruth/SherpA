@@ -15,6 +15,8 @@ import (
 	"strings"
 )
 
+const tarBlockBytes = 512
+
 type Limits struct {
 	MaxCompressedBytes   int64
 	MaxUncompressedBytes int64
@@ -99,7 +101,9 @@ func ValidateFile(ctx context.Context, archivePath string, limits Limits) (Repor
 	}
 	gzipReader.Multistream(false)
 	decompressed := &boundedReader{reader: gzipReader, limit: limits.MaxUncompressedBytes}
-	tarReader := tar.NewReader(decompressed)
+	framing := &tarFramingReader{reader: decompressed}
+	contextualDecompressed := &contextReader{ctx: ctx, reader: framing}
+	tarReader := tar.NewReader(contextualDecompressed)
 
 	artifacts := make(map[string]Artifact)
 	seen := make(map[string]struct{})
@@ -107,6 +111,7 @@ func ValidateFile(ctx context.Context, archivePath string, limits Limits) (Repor
 	manifestSeen := false
 	postgresSeen := false
 	memberCount := 0
+	logicalBudget := artifactBudget{limit: limits.MaxUncompressedBytes}
 	var verifiedBytes int64
 
 	for {
@@ -115,6 +120,9 @@ func ValidateFile(ctx context.Context, archivePath string, limits Limits) (Repor
 		}
 		header, err := tarReader.Next()
 		if err == io.EOF {
+			if !framing.hasCanonicalTerminator() {
+				return Report{}, validationError{class: FailureInvalidTar}
+			}
 			break
 		}
 		if err != nil {
@@ -137,14 +145,14 @@ func ValidateFile(ctx context.Context, archivePath string, limits Limits) (Repor
 			return Report{}, validationError{class: FailureDuplicateMember}
 		}
 		seen[header.Name] = struct{}{}
-		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+		if sparseMember(header) || (header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA) {
 			return Report{}, validationError{class: FailureUnsupportedType}
 		}
 
 		switch header.Name {
 		case "postgres.dump":
 			postgresSeen = true
-			artifact, size, err := readArtifact(tarReader, header.Name)
+			artifact, size, err := readArtifact(ctx, tarReader, header.Name, header.Size, &logicalBudget)
 			if err != nil {
 				return Report{}, classifyStreamError(ctx, compressed, decompressed, err, FailureInvalidTar)
 			}
@@ -171,7 +179,7 @@ func ValidateFile(ctx context.Context, archivePath string, limits Limits) (Repor
 			if !validRepositoryPath(header.Name) {
 				return Report{}, validationError{class: FailureInvalidRepository}
 			}
-			artifact, size, err := readArtifact(tarReader, header.Name)
+			artifact, size, err := readArtifact(ctx, tarReader, header.Name, header.Size, &logicalBudget)
 			if err != nil {
 				return Report{}, classifyStreamError(ctx, compressed, decompressed, err, FailureInvalidTar)
 			}
@@ -182,7 +190,7 @@ func ValidateFile(ctx context.Context, archivePath string, limits Limits) (Repor
 
 	var trailing [1]byte
 	for {
-		n, err := decompressed.Read(trailing[:])
+		n, err := contextualDecompressed.Read(trailing[:])
 		if decompressed.exceeded || compressed.exceeded {
 			return Report{}, validationError{class: FailureLimitExceeded}
 		}
@@ -235,6 +243,18 @@ func Classify(err error) FailureClass {
 	return ""
 }
 
+func sparseMember(header *tar.Header) bool {
+	if header.Typeflag == tar.TypeGNUSparse {
+		return true
+	}
+	for key := range header.PAXRecords {
+		if strings.HasPrefix(key, "GNU.sparse.") {
+			return true
+		}
+	}
+	return false
+}
+
 func safeMemberPath(name string) bool {
 	if name == "" || path.IsAbs(name) || strings.Contains(name, "\\") {
 		return false
@@ -253,17 +273,37 @@ func validRepositoryPath(name string) bool {
 		strings.HasSuffix(segments[2], ".bundle") && strings.TrimSuffix(segments[2], ".bundle") != ""
 }
 
-func readArtifact(reader io.Reader, name string) (Artifact, int64, error) {
+func readArtifact(ctx context.Context, reader io.Reader, name string, size int64, budget *artifactBudget) (Artifact, int64, error) {
+	if err := budget.reserve(size); err != nil {
+		return Artifact{}, 0, err
+	}
 	hash := sha256.New()
 	counter := &byteCounter{}
-	if _, err := io.Copy(io.MultiWriter(hash, counter), reader); err != nil {
+	contextual := &contextReader{ctx: ctx, reader: reader}
+	if _, err := io.Copy(io.MultiWriter(hash, counter), contextual); err != nil {
 		return Artifact{}, 0, err
+	}
+	if counter.size != size {
+		return Artifact{}, 0, io.ErrUnexpectedEOF
 	}
 	return Artifact{
 		Path:   name,
 		SHA256: hex.EncodeToString(hash.Sum(nil)),
 		Size:   counter.size,
 	}, counter.size, nil
+}
+
+type artifactBudget struct {
+	limit int64
+	used  int64
+}
+
+func (budget *artifactBudget) reserve(size int64) error {
+	if size < 0 || budget.limit < 0 || budget.used > budget.limit || size > budget.limit-budget.used {
+		return validationError{class: FailureLimitExceeded}
+	}
+	budget.used += size
+	return nil
 }
 
 func manifestMatches(manifest Manifest, artifacts map[string]Artifact) bool {
@@ -291,10 +331,53 @@ func classifyStreamError(ctx context.Context, compressed, decompressed *boundedR
 	if compressed.exceeded || decompressed.exceeded {
 		return validationError{class: FailureLimitExceeded}
 	}
+	var validation validationError
+	if errors.As(err, &validation) {
+		return validation
+	}
 	if errors.Is(err, gzip.ErrHeader) || errors.Is(err, gzip.ErrChecksum) {
 		return validationError{class: FailureInvalidGzip}
 	}
 	return validationError{class: fallback}
+}
+
+type tarFramingReader struct {
+	reader io.Reader
+	tail   [2 * tarBlockBytes]byte
+	length int
+}
+
+func (reader *tarFramingReader) Read(contents []byte) (int, error) {
+	n, err := reader.reader.Read(contents)
+	reader.record(contents[:n])
+	return n, err
+}
+
+func (reader *tarFramingReader) record(contents []byte) {
+	if len(contents) >= len(reader.tail) {
+		copy(reader.tail[:], contents[len(contents)-len(reader.tail):])
+		reader.length = len(reader.tail)
+		return
+	}
+	if reader.length+len(contents) > len(reader.tail) {
+		overflow := reader.length + len(contents) - len(reader.tail)
+		copy(reader.tail[:], reader.tail[overflow:reader.length])
+		reader.length -= overflow
+	}
+	copy(reader.tail[reader.length:], contents)
+	reader.length += len(contents)
+}
+
+func (reader *tarFramingReader) hasCanonicalTerminator() bool {
+	if reader.length != len(reader.tail) {
+		return false
+	}
+	for _, value := range reader.tail {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type byteCounter struct {

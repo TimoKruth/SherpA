@@ -8,6 +8,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -288,6 +290,61 @@ func TestValidateFileEnforcesCompressedUncompressedMemberManifestAndPathLimits(t
 	assertFailureClass(t, path, limits, recoveryarchive.FailureLimitExceeded)
 }
 
+func TestValidateFileRejectsGNUSparseAndPAXSparseArtifacts(t *testing.T) {
+	limits := recoveryarchive.DefaultLimits()
+	for name, archive := range map[string][]byte{
+		"GNU sparse type":     gnuSparseTar(t, 8<<10),
+		"PAX sparse metadata": paxSparseTar(t, 8<<10),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeGzipBytes(t, archive)
+			assertFailureClass(t, path, limits, recoveryarchive.FailureUnsupportedType)
+		})
+	}
+}
+
+func TestValidateFileHonorsCancellationWhileReadingBufferedPAXMetadata(t *testing.T) {
+	path := bufferedOrphanPAXArchive(t)
+	assertFitsDecompressionBuffer(t, path)
+	ctx := newCancelOnErrCallContext(9)
+
+	_, err := recoveryarchive.ValidateFile(ctx, path, recoveryarchive.DefaultLimits())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ValidateFile error = %v, want context cancellation (Err calls: %d)", err, ctx.calls)
+	}
+}
+
+func TestValidateFileHonorsCancellationWhileReadingBufferedManifest(t *testing.T) {
+	path := bufferedInvalidManifestArchive(t)
+	assertFitsDecompressionBuffer(t, path)
+	ctx := newCancelOnErrCallContext(9)
+
+	_, err := recoveryarchive.ValidateFile(ctx, path, recoveryarchive.DefaultLimits())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ValidateFile error = %v, want context cancellation (Err calls: %d)", err, ctx.calls)
+	}
+}
+
+func TestValidateFileRequiresCanonicalTarTerminator(t *testing.T) {
+	var canonical bytes.Buffer
+	writeTarMembers(t, &canonical, completeMembers(t))
+	contents := canonical.Bytes()
+	prefix := contents[:len(contents)-2*tarBlockSize]
+	for name, archive := range map[string][]byte{
+		"no terminator":        prefix,
+		"one-block terminator": contents[:len(contents)-tarBlockSize],
+		"orphan PAX header":    append(append([]byte(nil), prefix...), orphanExtension(t, tar.TypeXHeader, nil, true)...),
+		"orphan GNU long name": append(append([]byte(nil), prefix...), orphanExtension(t, tar.TypeGNULongName, []byte("orphan\x00"), false)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeGzipBytes(t, archive)
+			assertFailureClass(t, path, recoveryarchive.DefaultLimits(), recoveryarchive.FailureInvalidTar)
+		})
+	}
+}
+
+const tarBlockSize = 512
+
 type testMember struct {
 	name     string
 	body     []byte
@@ -332,6 +389,181 @@ func writeTarMembers(t testing.TB, destination io.Writer, members []testMember) 
 	if err := tarWriter.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func gnuSparseTar(t testing.TB, logicalSize int64) []byte {
+	t.Helper()
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	if err := writer.WriteHeader(&tar.Header{
+		Name:     "postgres.dump",
+		Mode:     0o600,
+		Typeflag: tar.TypeReg,
+		Format:   tar.FormatGNU,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents := archive.Bytes()
+	header := contents[:tarBlockSize]
+	header[156] = tar.TypeGNUSparse
+	writeTarOctal(header[483:495], logicalSize)
+	writeTarChecksum(header)
+	return append([]byte(nil), contents...)
+}
+
+func paxSparseTar(t testing.TB, logicalSize int64) []byte {
+	t.Helper()
+	records := []byte(paxRecord("GNU.sparse.numblocks", "1") + paxRecord("GNU.sparse.map", "0,1") + paxRecord("GNU.sparse.size", fmt.Sprint(logicalSize)))
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	if err := writer.WriteHeader(&tar.Header{
+		Name:     "PaxHeaders/postgres.dump",
+		Mode:     0o600,
+		Size:     int64(len(records)),
+		Typeflag: tar.TypeReg,
+		Format:   tar.FormatUSTAR,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(records); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteHeader(&tar.Header{
+		Name:     "postgres.dump",
+		Mode:     0o600,
+		Size:     1,
+		Typeflag: tar.TypeReg,
+		Format:   tar.FormatUSTAR,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents := archive.Bytes()
+	contents[156] = tar.TypeXHeader
+	writeTarChecksum(contents[:tarBlockSize])
+	return contents
+}
+
+func paxRecord(key, value string) string {
+	body := key + "=" + value + "\n"
+	length := len(body) + 2
+	for {
+		record := fmt.Sprintf("%d %s", length, body)
+		if len(record) == length {
+			return record
+		}
+		length = len(record)
+	}
+}
+
+func writeTarOctal(field []byte, value int64) {
+	for i := range field {
+		field[i] = 0
+	}
+	copy(field, fmt.Sprintf("%0*o", len(field)-1, value))
+}
+
+func writeTarChecksum(header []byte) {
+	for i := 148; i < 156; i++ {
+		header[i] = ' '
+	}
+	var sum int
+	for _, value := range header {
+		sum += int(value)
+	}
+	copy(header[148:156], fmt.Sprintf("%06o\x00 ", sum))
+}
+
+type cancelOnErrCallContext struct {
+	context.Context
+	cancel   context.CancelFunc
+	cancelAt int
+	calls    int
+}
+
+func newCancelOnErrCallContext(cancelAt int) *cancelOnErrCallContext {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &cancelOnErrCallContext{Context: ctx, cancel: cancel, cancelAt: cancelAt}
+}
+
+func (ctx *cancelOnErrCallContext) Err() error {
+	ctx.calls++
+	if ctx.calls == ctx.cancelAt {
+		ctx.cancel()
+	}
+	return ctx.Context.Err()
+}
+
+func bufferedOrphanPAXArchive(t testing.TB) string {
+	t.Helper()
+	var archive bytes.Buffer
+	writeTarMembers(t, &archive, []testMember{{name: "postgres.dump", body: []byte("synthetic postgres dump")}})
+	contents := archive.Bytes()
+	prefix := contents[:len(contents)-2*tarBlockSize]
+	paxBody := []byte(paxRecord("comment", string(bytes.Repeat([]byte("a"), 256<<10))))
+	contents = append(append([]byte(nil), prefix...), orphanExtension(t, tar.TypeXHeader, paxBody, false)...)
+	return writeGzipBytes(t, contents)
+}
+
+func bufferedInvalidManifestArchive(t testing.TB) string {
+	t.Helper()
+	manifest := bytes.Repeat([]byte("x"), 256<<10)
+	return writeArchive(t, []testMember{
+		{name: "postgres.dump", body: []byte("synthetic postgres dump")},
+		{name: "manifest.json", body: manifest},
+	})
+}
+
+func assertFitsDecompressionBuffer(t testing.TB, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() >= 4096 {
+		t.Fatalf("compressed fixture is %d bytes, want less than the 4096-byte buffer", info.Size())
+	}
+}
+
+func orphanExtension(t testing.TB, typeflag byte, body []byte, appendZeroBlock bool) []byte {
+	t.Helper()
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	if err := writer.WriteHeader(&tar.Header{
+		Name:     "orphan-extension",
+		Mode:     0o600,
+		Size:     int64(len(body)),
+		Typeflag: tar.TypeReg,
+		Format:   tar.FormatUSTAR,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	blocks := archive.Bytes()[:tarBlockSize+roundedTarBodyBytes(len(body))]
+	blocks[156] = typeflag
+	writeTarChecksum(blocks[:tarBlockSize])
+	result := append([]byte(nil), blocks...)
+	if appendZeroBlock {
+		result = append(result, make([]byte, tarBlockSize)...)
+	}
+	return result
+}
+
+func roundedTarBodyBytes(size int) int {
+	return (size + tarBlockSize - 1) / tarBlockSize * tarBlockSize
 }
 
 func writeGzipBytes(t testing.TB, contents []byte) string {
