@@ -362,9 +362,8 @@ func hashArchive(ctx context.Context, reader io.Reader) (string, error) {
 // Upload sends a completed archive to an HTTPS collector. Plain HTTP is only
 // accepted for loopback addresses so local integration tests remain practical.
 func Upload(ctx context.Context, archivePath, collectorURL, token string) (UploadResult, error) {
-	parsed, err := url.Parse(collectorURL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && !isLoopbackHTTP(parsed)) {
-		return UploadResult{}, errors.New("export collector must be an HTTPS URL")
+	if err := validateCollectorURL(collectorURL); err != nil {
+		return UploadResult{}, err
 	}
 	file, err := os.Open(archivePath)
 	if err != nil {
@@ -374,6 +373,13 @@ func Upload(ctx context.Context, archivePath, collectorURL, token string) (Uploa
 	info, err := file.Stat()
 	if err != nil {
 		return UploadResult{}, fmt.Errorf("stat export archive: %w", err)
+	}
+	return uploadArchiveFile(ctx, file, info, collectorURL, token)
+}
+
+func uploadArchiveFile(ctx context.Context, file *os.File, info os.FileInfo, collectorURL, token string) (UploadResult, error) {
+	if err := validateCollectorURL(collectorURL); err != nil {
+		return UploadResult{}, err
 	}
 	objectID, err := hashArchive(ctx, file)
 	if err != nil {
@@ -444,6 +450,14 @@ func Upload(ctx context.Context, archivePath, collectorURL, token string) (Uploa
 	return result, nil
 }
 
+func validateCollectorURL(collectorURL string) error {
+	parsed, err := url.Parse(collectorURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && !isLoopbackHTTP(parsed)) {
+		return errors.New("export collector must be an HTTPS URL")
+	}
+	return nil
+}
+
 func isLoopbackHTTP(parsed *url.URL) bool {
 	if parsed.Scheme != "http" {
 		return false
@@ -472,21 +486,36 @@ type pendingArchive struct {
 	Base    string
 	ModTime time.Time
 	Size    int64
+	info    os.FileInfo
 }
 
 const staleExportPartialMaxAge = 24 * time.Hour
 
 var runExport = Run
-var uploadArchive = Upload
+var openPendingArchive = os.Open
+var uploadPendingArchive = uploadArchiveFile
 
 // ValidateSchedulerConfig checks scheduler settings without starting background
 // work. This lets the registry fail startup on partial or unsafe configuration.
 func ValidateSchedulerConfig(cfg SchedulerConfig) error {
-	configured := strings.TrimSpace(cfg.CollectorURL) != "" || strings.TrimSpace(cfg.Token) != "" || cfg.Interval != 0 || strings.TrimSpace(cfg.ArchiveDir) != ""
+	return validateNormalizedSchedulerConfig(normalizeSchedulerConfig(cfg))
+}
+
+func normalizeSchedulerConfig(cfg SchedulerConfig) SchedulerConfig {
+	cfg.ContentDir = strings.TrimSpace(cfg.ContentDir)
+	cfg.DatabaseURL = strings.TrimSpace(cfg.DatabaseURL)
+	cfg.ArchiveDir = strings.TrimSpace(cfg.ArchiveDir)
+	cfg.CollectorURL = strings.TrimSpace(cfg.CollectorURL)
+	cfg.Token = strings.TrimSpace(cfg.Token)
+	return cfg
+}
+
+func validateNormalizedSchedulerConfig(cfg SchedulerConfig) error {
+	configured := cfg.CollectorURL != "" || cfg.Token != "" || cfg.Interval != 0 || cfg.ArchiveDir != ""
 	if !configured {
 		return nil
 	}
-	if strings.TrimSpace(cfg.CollectorURL) == "" || strings.TrimSpace(cfg.Token) == "" || cfg.Interval <= 0 || strings.TrimSpace(cfg.ArchiveDir) == "" {
+	if cfg.CollectorURL == "" || cfg.Token == "" || cfg.Interval <= 0 || cfg.ArchiveDir == "" {
 		return errors.New("export collector URL, token, positive interval, and archive directory must be configured together")
 	}
 	parsed, err := url.Parse(cfg.CollectorURL)
@@ -525,6 +554,7 @@ func discoverPendingArchives(archiveDir string) ([]pendingArchive, error) {
 			Base:    entry.Name(),
 			ModTime: info.ModTime(),
 			Size:    info.Size(),
+			info:    info,
 		})
 	}
 	sort.Slice(archives, func(i, j int) bool {
@@ -571,21 +601,55 @@ func cleanupStaleExportPartials(archiveDir string, now time.Time, maxAge time.Du
 	return removed, nil
 }
 
+const completedArchiveTimestampLayout = "20060102T150405Z"
+
+func completedArchiveBase(created time.Time) string {
+	return fmt.Sprintf("sherpa-%s-%d.tar.gz", created.UTC().Format(completedArchiveTimestampLayout), created.UnixNano())
+}
+
 func completedArchiveName(name string) bool {
 	const prefix = "sherpa-"
 	const suffix = ".tar.gz"
-	return strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix) && len(name) > len(prefix)+len(suffix)
+	body, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return false
+	}
+	body, ok = strings.CutSuffix(body, suffix)
+	if !ok || len(body) <= len(completedArchiveTimestampLayout) || body[len(completedArchiveTimestampLayout)] != '-' {
+		return false
+	}
+	timestampText := body[:len(completedArchiveTimestampLayout)]
+	nanosecondsText := body[len(completedArchiveTimestampLayout)+1:]
+	timestamp, err := time.Parse(completedArchiveTimestampLayout, timestampText)
+	if err != nil || timestamp.Format(completedArchiveTimestampLayout) != timestampText {
+		return false
+	}
+	nanoseconds, err := strconv.ParseInt(nanosecondsText, 10, 64)
+	if err != nil || strconv.FormatInt(nanoseconds, 10) != nanosecondsText {
+		return false
+	}
+	return timestamp.Equal(time.Unix(0, nanoseconds).UTC().Truncate(time.Second))
 }
 
 func generatedPartialArchiveName(name string) bool {
-	const prefix = ".sherpa-export-"
-	const suffix = ".tar.gz"
-	return strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix) && len(name) > len(prefix)+len(suffix)
+	return generatedTempName(name, ".sherpa-export-", ".tar.gz")
 }
 
 func generatedWorkspaceName(name string) bool {
-	const prefix = ".sherpa-export-work-"
-	return strings.HasPrefix(name, prefix) && len(name) > len(prefix)
+	return generatedTempName(name, ".sherpa-export-work-", "")
+}
+
+func generatedTempName(name, prefix, suffix string) bool {
+	random, ok := strings.CutPrefix(name, prefix)
+	if !ok {
+		return false
+	}
+	random, ok = strings.CutSuffix(random, suffix)
+	if !ok || random == "" {
+		return false
+	}
+	value, err := strconv.ParseUint(random, 10, 32)
+	return err == nil && strconv.FormatUint(value, 10) == random
 }
 
 func drainPendingArchives(ctx context.Context, cfg SchedulerConfig) (remaining int, err error) {
@@ -599,28 +663,40 @@ func drainPendingArchives(ctx context.Context, cfg SchedulerConfig) (remaining i
 		if err := ctx.Err(); err != nil {
 			return remaining, err
 		}
-		info, err := os.Lstat(archive.Path)
+		file, err := openPendingArchive(archive.Path)
 		if err != nil {
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "queue")
-			return remaining, errors.New("inspect pending export archive")
+			return remaining, errors.New("pending export archive changed")
 		}
-		if !info.Mode().IsRegular() {
+		openedInfo, err := file.Stat()
+		if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(archive.info, openedInfo) {
+			_ = file.Close()
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "queue")
-			return remaining, errors.New("pending export archive is not a regular file")
+			return remaining, errors.New("pending export archive changed")
 		}
-		result, err := uploadArchive(ctx, archive.Path, cfg.CollectorURL, cfg.Token)
-		if err != nil {
+		result, uploadErr := uploadPendingArchive(ctx, file, openedInfo, cfg.CollectorURL, cfg.Token)
+		closeErr := file.Close()
+		if uploadErr != nil {
 			if ctx.Err() != nil {
 				return remaining, ctx.Err()
 			}
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "upload")
 			return remaining, errors.New("upload pending export archive")
 		}
+		if closeErr != nil {
+			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "queue")
+			return remaining, errors.New("close pending export archive")
+		}
 		if !validatedSchedulerUploadResult(result) {
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "response")
 			return remaining, errors.New("unvalidated export upload result")
 		}
-		if err := os.Remove(archive.Path); err != nil && !os.IsNotExist(err) {
+		currentInfo, err := os.Lstat(archive.Path)
+		if err != nil || !currentInfo.Mode().IsRegular() || !os.SameFile(openedInfo, currentInfo) {
+			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "queue")
+			return remaining, errors.New("pending export archive changed")
+		}
+		if err := os.Remove(archive.Path); err != nil {
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "delete")
 			return remaining, errors.New("remove uploaded export archive")
 		}
@@ -655,7 +731,7 @@ func runSchedulerCycle(ctx context.Context, cfg SchedulerConfig, now time.Time) 
 		_, err := drainPendingArchives(ctx, cfg)
 		return err
 	}
-	archivePath := filepath.Join(cfg.ArchiveDir, fmt.Sprintf("sherpa-%s-%d.tar.gz", now.UTC().Format("20060102T150405Z"), now.UnixNano()))
+	archivePath := filepath.Join(cfg.ArchiveDir, completedArchiveBase(now))
 	if err := runExport(ctx, cfg.ContentDir, cfg.DatabaseURL, archivePath); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -670,7 +746,8 @@ func runSchedulerCycle(ctx context.Context, cfg SchedulerConfig, now time.Time) 
 // StartScheduler blocks until ctx is cancelled. Empty scheduler settings disable
 // it; otherwise URL, token, interval, and persistent archive directory are all required.
 func StartScheduler(ctx context.Context, cfg SchedulerConfig) error {
-	if err := ValidateSchedulerConfig(cfg); err != nil {
+	cfg = normalizeSchedulerConfig(cfg)
+	if err := validateNormalizedSchedulerConfig(cfg); err != nil {
 		return err
 	}
 	if cfg.CollectorURL == "" {
