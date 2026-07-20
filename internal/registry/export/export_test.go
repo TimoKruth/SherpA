@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -20,6 +21,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"sherpa/internal/recoveryarchive"
 )
 
 func TestRunDumpsDatabaseBeforeBundlesAndBuildsVerifiableArchive(t *testing.T) {
@@ -67,7 +70,7 @@ func TestRunDumpsDatabaseBeforeBundlesAndBuildsVerifiableArchive(t *testing.T) {
 	if order[len(order)-1] != "manifest.json" {
 		t.Fatalf("final tar member = %q, want manifest.json", order[len(order)-1])
 	}
-	var got manifest
+	var got recoveryarchive.Manifest
 	if err := json.Unmarshal(files["manifest.json"], &got); err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +99,68 @@ func TestRunDumpsDatabaseBeforeBundlesAndBuildsVerifiableArchive(t *testing.T) {
 	}
 	if err := execCommand(context.Background(), t.TempDir(), "git", []string{"clone", bundlePath, cloneDir}, nil); err != nil {
 		t.Fatalf("clone exported bundle: %v", err)
+	}
+}
+
+func TestRunProducesArchiveAcceptedBySharedValidator(t *testing.T) {
+	contentDir := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "registry.tar.gz")
+	original := runCommand
+	t.Cleanup(func() { runCommand = original })
+	runCommand = func(_ context.Context, _ string, name string, args, _ []string) error {
+		if name != "pg_dump" {
+			return fmt.Errorf("unexpected command %q", name)
+		}
+		return os.WriteFile(args[2], []byte("database dump"), 0o600)
+	}
+
+	if err := Run(context.Background(), contentDir, "postgres://exporter@db.internal/sherpa", archivePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoveryarchive.ValidateFile(context.Background(), archivePath, recoveryarchive.DefaultLimits()); err != nil {
+		t.Fatalf("shared validator rejected Run archive: %v", err)
+	}
+}
+
+func TestRunDoesNotPublishWhenSharedValidationFails(t *testing.T) {
+	contentDir := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "registry.tar.gz")
+	previous := []byte("previous recovery archive")
+	if err := os.WriteFile(archivePath, previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalCommand := runCommand
+	originalValidator := validateRecoveryArchive
+	t.Cleanup(func() {
+		runCommand = originalCommand
+		validateRecoveryArchive = originalValidator
+	})
+	runCommand = func(_ context.Context, _ string, name string, args, _ []string) error {
+		if name != "pg_dump" {
+			return fmt.Errorf("unexpected command %q", name)
+		}
+		return os.WriteFile(args[2], []byte("database dump"), 0o600)
+	}
+	var validated atomic.Bool
+	validateRecoveryArchive = func(context.Context, string, recoveryarchive.Limits) (recoveryarchive.Report, error) {
+		validated.Store(true)
+		return recoveryarchive.Report{}, errors.New("synthetic validation failure")
+	}
+
+	err := Run(context.Background(), contentDir, "postgres://exporter@db.internal/sherpa", archivePath)
+	if err == nil {
+		t.Fatal("Run succeeded after shared validation failed")
+	}
+	if !validated.Load() {
+		t.Fatal("Run did not invoke shared validator")
+	}
+	contents, readErr := os.ReadFile(archivePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(contents, previous) {
+		t.Fatalf("published archive contents = %q, want previous archive", contents)
 	}
 }
 
@@ -155,12 +220,131 @@ func TestDatabaseEnvironmentDefaultsAndRejectsMalformedURLsWithoutSecrets(t *tes
 	}
 }
 
-func TestUploadSendsArchiveWithOnlyConfiguredAuthorization(t *testing.T) {
-	payload := []byte("complete gzip bytes")
-	path := filepath.Join(t.TempDir(), "archive.tar.gz")
-	if err := os.WriteFile(path, payload, 0o600); err != nil {
+func TestUploadAcceptsCreatedStoredResponse(t *testing.T) {
+	path, objectID := writeUploadArchive(t, []byte("complete gzip bytes"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"object_id":%q,"status":"stored"}`, objectID)
+	}))
+	defer server.Close()
+
+	result, err := Upload(context.Background(), path, server.URL, "collector-secret")
+	if err != nil {
 		t.Fatal(err)
 	}
+	if result != (UploadResult{ObjectID: objectID, Status: "stored"}) {
+		t.Fatalf("Upload result = %+v", result)
+	}
+}
+
+func TestUploadAcceptsOKExistingResponse(t *testing.T) {
+	path, objectID := writeUploadArchive(t, []byte("complete gzip bytes"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"object_id":%q,"status":"existing"}`, objectID)
+	}))
+	defer server.Close()
+
+	result, err := Upload(context.Background(), path, server.URL, "collector-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != (UploadResult{ObjectID: objectID, Status: "existing"}) {
+		t.Fatalf("Upload result = %+v", result)
+	}
+}
+
+func TestUploadRejectsMismatchedObjectID(t *testing.T) {
+	path, _ := writeUploadArchive(t, []byte("complete gzip bytes"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"object_id":"sha256:%s","status":"stored"}`, strings.Repeat("0", sha256.Size*2))
+	}))
+	defer server.Close()
+
+	if _, err := Upload(context.Background(), path, server.URL, "collector-secret"); err == nil {
+		t.Fatal("Upload accepted a mismatched object ID")
+	}
+}
+
+func TestUploadRejectsMalformedSuccessfulResponse(t *testing.T) {
+	path, objectID := writeUploadArchive(t, []byte("complete gzip bytes"))
+	for name, body := range map[string]string{
+		"invalid JSON":  `{`,
+		"unknown field": fmt.Sprintf(`{"object_id":%q,"status":"stored","unexpected":true}`, objectID),
+		"trailing JSON": fmt.Sprintf(`{"object_id":%q,"status":"stored"}{}`, objectID),
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+
+			if _, err := Upload(context.Background(), path, server.URL, "collector-secret"); err == nil {
+				t.Fatal("Upload accepted a malformed successful response")
+			}
+		})
+	}
+}
+
+func TestUploadRejectsStatusCodeStatusBodyMismatch(t *testing.T) {
+	path, objectID := writeUploadArchive(t, []byte("complete gzip bytes"))
+	for name, response := range map[string]struct {
+		code   int
+		status string
+	}{
+		"created existing": {code: http.StatusCreated, status: "existing"},
+		"ok stored":        {code: http.StatusOK, status: "stored"},
+		"accepted stored":  {code: http.StatusAccepted, status: "stored"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(response.code)
+				fmt.Fprintf(w, `{"object_id":%q,"status":%q}`, objectID, response.status)
+			}))
+			defer server.Close()
+
+			if _, err := Upload(context.Background(), path, server.URL, "collector-secret"); err == nil {
+				t.Fatal("Upload accepted a status-code/body mismatch")
+			}
+		})
+	}
+}
+
+func TestUploadBoundsCollectorResponseBody(t *testing.T) {
+	path, _ := writeUploadArchive(t, []byte("complete gzip bytes"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, strings.Repeat("{", (64<<10)+1))
+	}))
+	defer server.Close()
+
+	if _, err := Upload(context.Background(), path, server.URL, "collector-secret"); err == nil {
+		t.Fatal("Upload accepted an oversized collector response")
+	}
+}
+
+func TestUploadErrorDoesNotExposeURLTokenOrResponseBody(t *testing.T) {
+	path, _ := writeUploadArchive(t, []byte("archive"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "response-body-secret collector-secret", http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	_, err := Upload(context.Background(), path, server.URL+"/upload?private=query", "collector-secret")
+	if err == nil {
+		t.Fatal("Upload succeeded")
+	}
+	for _, secret := range []string{"collector-secret", "response-body-secret", "private=query", server.URL} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("Upload error %q exposes %q", err, secret)
+		}
+	}
+}
+
+func TestUploadSendsArchiveWithOnlyConfiguredAuthorization(t *testing.T) {
+	payload := []byte("complete gzip bytes")
+	path, objectID := writeUploadArchive(t, payload)
 	var received []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer collector-secret" {
@@ -174,16 +358,17 @@ func TestUploadSendsArchiveWithOnlyConfiguredAuthorization(t *testing.T) {
 		}
 		received, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"object_id":%q,"status":"stored"}`, objectID)
 	}))
 	defer server.Close()
 
-	if err := Upload(context.Background(), path, server.URL+"/ingest?private=query", "collector-secret"); err != nil {
+	if _, err := Upload(context.Background(), path, server.URL+"/ingest?private=query", "collector-secret"); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(received, payload) {
 		t.Fatalf("uploaded payload = %q", received)
 	}
-	if err := Upload(context.Background(), path, "http://example.com/upload?private=query", "collector-secret"); err == nil {
+	if _, err := Upload(context.Background(), path, "http://example.com/upload?private=query", "collector-secret"); err == nil {
 		t.Fatal("Upload accepted non-loopback HTTP collector")
 	}
 }
@@ -197,7 +382,7 @@ func TestUploadErrorDoesNotExposeURLOrToken(t *testing.T) {
 		http.Error(w, "response includes collector-secret", http.StatusBadGateway)
 	}))
 	defer server.Close()
-	err := Upload(context.Background(), path, server.URL+"/upload?private=query", "collector-secret")
+	_, err := Upload(context.Background(), path, server.URL+"/upload?private=query", "collector-secret")
 	if err == nil {
 		t.Fatal("Upload succeeded")
 	}
@@ -224,7 +409,7 @@ func TestUploadDoesNotFollowRedirectsWithCredentials(t *testing.T) {
 	}))
 	defer source.Close()
 
-	err := Upload(context.Background(), path, source.URL, "collector-secret")
+	_, err := Upload(context.Background(), path, source.URL, "collector-secret")
 	if err == nil {
 		t.Fatal("redirect response accepted as a successful upload")
 	}
@@ -243,9 +428,9 @@ func TestStartSchedulerRetriesOnePendingArchiveAndCancelsCleanly(t *testing.T) {
 		runs.Add(1)
 		return os.WriteFile(path, []byte("archive"), 0o600)
 	}
-	uploadArchive = func(context.Context, string, string, string) error {
+	uploadArchive = func(context.Context, string, string, string) (UploadResult, error) {
 		uploads.Add(1)
-		return errors.New("collector returned HTTP 503")
+		return UploadResult{}, errors.New("collector returned HTTP 503")
 	}
 	var logs bytes.Buffer
 	ctx, cancel := context.WithCancel(context.Background())
@@ -317,6 +502,16 @@ func TestValidateSchedulerConfigRejectsTokenOnlyAndInsecureCollector(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
 		t.Fatalf("insecure collector error = %v", err)
 	}
+}
+
+func writeUploadArchive(t *testing.T, contents []byte) (string, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "archive.tar.gz")
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	return path, "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func createBareRepository(t *testing.T, contentDir, owner, name string) {

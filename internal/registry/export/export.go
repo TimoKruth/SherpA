@@ -3,6 +3,7 @@ package export
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -23,27 +24,24 @@ import (
 	"strings"
 	"time"
 
+	"sherpa/internal/recoveryarchive"
 	"sherpa/internal/registry/content"
 )
 
 const (
-	archiveMode         = 0o600
-	exportUploadTimeout = 10 * time.Minute
+	archiveMode                  = 0o600
+	exportUploadTimeout          = 10 * time.Minute
+	maxCollectorResponseBodySize = 64 << 10
 )
-
-type manifest struct {
-	Artifacts []artifact `json:"artifacts"`
-}
-
-type artifact struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
-	Size   int64  `json:"size"`
-}
 
 type commandRunner func(ctx context.Context, dir, name string, args, env []string) error
 
-var runCommand commandRunner = execCommand
+type archiveValidator func(context.Context, string, recoveryarchive.Limits) (recoveryarchive.Report, error)
+
+var (
+	runCommand              commandRunner    = execCommand
+	validateRecoveryArchive archiveValidator = recoveryarchive.ValidateFile
+)
 
 func execCommand(ctx context.Context, dir, name string, args, env []string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
@@ -141,11 +139,11 @@ func Run(ctx context.Context, contentDir, dbURL, archivePath string) (err error)
 		}
 	}
 
-	entries, err := artifactManifest(workspace)
+	archiveManifest, err := recoveryarchive.BuildManifest(workspace)
 	if err != nil {
 		return err
 	}
-	manifestBytes, err := json.MarshalIndent(manifest{Artifacts: entries}, "", "  ")
+	manifestBytes, err := json.MarshalIndent(archiveManifest, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode manifest: %w", err)
 	}
@@ -162,6 +160,9 @@ func Run(ctx context.Context, contentDir, dbURL, archivePath string) (err error)
 	}
 	if err := tempArchive.Close(); err != nil {
 		return fmt.Errorf("close archive: %w", err)
+	}
+	if _, err := validateRecoveryArchive(ctx, tempName, recoveryarchive.DefaultLimits()); err != nil {
+		return fmt.Errorf("validate completed recovery archive: %s", recoveryarchive.Classify(err))
 	}
 	if err := os.Rename(tempName, archivePath); err != nil {
 		return fmt.Errorf("publish archive: %w", err)
@@ -238,47 +239,6 @@ func requireRegularFile(path string) error {
 		return errors.New("artifact is empty or not a regular file")
 	}
 	return nil
-}
-
-func artifactManifest(root string) ([]artifact, error) {
-	var entries []artifact
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		digest, size, err := hashFile(path)
-		if err != nil {
-			return err
-		}
-		entries = append(entries, artifact{Path: filepath.ToSlash(rel), SHA256: digest, Size: size})
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("build artifact manifest: %w", err)
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	return entries, nil
-}
-
-func hashFile(path string) (string, int64, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", 0, err
-	}
-	defer file.Close()
-	hash := sha256.New()
-	size, err := io.Copy(hash, file)
-	if err != nil {
-		return "", 0, err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), size, nil
 }
 
 func writeArchive(ctx context.Context, destination io.Writer, root string) error {
@@ -367,25 +327,39 @@ func syncDirectory(path string) error {
 	return directory.Sync()
 }
 
+type UploadResult struct {
+	ObjectID string `json:"object_id"`
+	Status   string `json:"status"`
+}
+
 // Upload sends a completed archive to an HTTPS collector. Plain HTTP is only
 // accepted for loopback addresses so local integration tests remain practical.
-func Upload(ctx context.Context, archivePath, collectorURL, token string) error {
+func Upload(ctx context.Context, archivePath, collectorURL, token string) (UploadResult, error) {
 	parsed, err := url.Parse(collectorURL)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && !isLoopbackHTTP(parsed)) {
-		return errors.New("export collector must be an HTTPS URL")
+		return UploadResult{}, errors.New("export collector must be an HTTPS URL")
 	}
 	file, err := os.Open(archivePath)
 	if err != nil {
-		return fmt.Errorf("open export archive: %w", err)
+		return UploadResult{}, fmt.Errorf("open export archive: %w", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("stat export archive: %w", err)
+		return UploadResult{}, fmt.Errorf("stat export archive: %w", err)
 	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return UploadResult{}, errors.New("hash export archive")
+	}
+	objectID := "sha256:" + hex.EncodeToString(hash.Sum(nil))
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return UploadResult{}, errors.New("rewind export archive")
+	}
+
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, collectorURL, file)
 	if err != nil {
-		return errors.New("create export upload request")
+		return UploadResult{}, errors.New("create export upload request")
 	}
 	// An *os.File body leaves ContentLength unset (chunked transfer), which a
 	// collector that doesn't validate the manifest could store truncated. Set it
@@ -403,14 +377,42 @@ func Upload(ctx context.Context, archivePath, collectorURL, token string) error 
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return errors.New("export upload request failed")
+		return UploadResult{}, errors.New("export upload request failed")
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("export collector returned HTTP %d", response.StatusCode)
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxCollectorResponseBodySize))
+		return UploadResult{}, fmt.Errorf("export collector returned HTTP %d", response.StatusCode)
 	}
-	return nil
+	if response.ContentLength >= maxCollectorResponseBodySize {
+		return UploadResult{}, errors.New("export collector response is too large")
+	}
+	encoded, err := io.ReadAll(io.LimitReader(response.Body, maxCollectorResponseBodySize))
+	if err != nil {
+		return UploadResult{}, errors.New("read export collector response")
+	}
+	if len(encoded) >= maxCollectorResponseBodySize {
+		return UploadResult{}, errors.New("export collector response is too large")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.DisallowUnknownFields()
+	var result UploadResult
+	if err := decoder.Decode(&result); err != nil {
+		return UploadResult{}, errors.New("export collector returned malformed JSON")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return UploadResult{}, errors.New("export collector returned malformed JSON")
+	}
+	validStatus := (response.StatusCode == http.StatusCreated && result.Status == "stored") ||
+		(response.StatusCode == http.StatusOK && result.Status == "existing")
+	if !validStatus {
+		return UploadResult{}, errors.New("export collector response status mismatch")
+	}
+	if result.ObjectID != objectID {
+		return UploadResult{}, errors.New("export collector object identity mismatch")
+	}
+	return result, nil
 }
 
 func isLoopbackHTTP(parsed *url.URL) bool {
@@ -504,7 +506,7 @@ func StartScheduler(ctx context.Context, cfg SchedulerConfig) error {
 					continue
 				}
 			}
-			if err := uploadArchive(ctx, pendingArchive, cfg.CollectorURL, cfg.Token); err != nil {
+			if _, err := uploadArchive(ctx, pendingArchive, cfg.CollectorURL, cfg.Token); err != nil {
 				if ctx.Err() != nil {
 					return nil
 				}
