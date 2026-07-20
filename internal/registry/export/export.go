@@ -22,7 +22,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"sherpa/internal/recoveryarchive"
@@ -77,7 +76,15 @@ func commandEnvironment(overrides []string) []string {
 // Run creates an atomic archive at archivePath. The database is dumped before
 // repository enumeration so metadata cannot refer to a publish omitted from the
 // repository portion merely because it completed during the dump.
-func Run(ctx context.Context, contentDir, dbURL, archivePath string) (err error) {
+func Run(ctx context.Context, contentDir, dbURL, archivePath string) error {
+	return run(ctx, contentDir, dbURL, archivePath, true)
+}
+
+func runScheduledExport(ctx context.Context, contentDir, dbURL, archivePath string) error {
+	return run(ctx, contentDir, dbURL, archivePath, false)
+}
+
+func run(ctx context.Context, contentDir, dbURL, archivePath string, createParent bool) (err error) {
 	if strings.TrimSpace(dbURL) == "" {
 		return errors.New("database URL is required")
 	}
@@ -86,8 +93,10 @@ func Run(ctx context.Context, contentDir, dbURL, archivePath string) (err error)
 		return fmt.Errorf("resolve archive path: %w", err)
 	}
 	parent := filepath.Dir(archivePath)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return fmt.Errorf("create archive directory: %w", err)
+	if createParent {
+		if err := os.MkdirAll(parent, 0o755); err != nil {
+			return fmt.Errorf("create archive directory: %w", err)
+		}
 	}
 
 	workspace, err := os.MkdirTemp(parent, ".sherpa-export-work-*")
@@ -497,23 +506,35 @@ type archiveQueue struct {
 	directory *os.File
 }
 
-const staleExportPartialMaxAge = 24 * time.Hour
-
-var runExport = Run
-var beforePrepareArchiveDirectory = func(string) {}
-var beforeOpenArchiveQueue = func(string) {}
-var afterArchiveQueueValidated = func() {}
-var beforeOpenPendingArchive = func(string) {}
-var afterOpenPendingArchive = func(string) {}
-var beforeClaimPendingArchive = func(string) {}
-var beforePendingClaimRename = func(string) error { return nil }
-var beforeClaimStaleExportEntry = func(string) {}
-var uploadPendingArchive = uploadArchiveFile
-var removeClaimedPendingArchive = func(queue *archiveQueue, entryBase string) error {
-	return unix.Unlinkat(int(queue.directory.Fd()), entryBase, 0)
+type schedulerOps struct {
+	runExport    func(context.Context, string, string, string) error
+	upload       func(context.Context, *os.File, os.FileInfo, string, string) (UploadResult, error)
+	remove       func(*archiveQueue, string) error
+	syncQueue    func(*archiveQueue) error
+	now          func() time.Time
+	effectiveUID uint32
+	effectiveGID uint32
 }
 
-var queueClaimCounter atomic.Uint64
+func defaultSchedulerOps() schedulerOps {
+	return schedulerOps{
+		runExport: runScheduledExport,
+		upload:    uploadArchiveFile,
+		remove: func(queue *archiveQueue, entryBase string) error {
+			return unix.Unlinkat(int(queue.directory.Fd()), entryBase, 0)
+		},
+		syncQueue: func(queue *archiveQueue) error {
+			return queue.directory.Sync()
+		},
+		now:          time.Now,
+		effectiveUID: uint32(os.Geteuid()),
+		effectiveGID: uint32(os.Getegid()),
+	}
+}
+
+const staleExportPartialMaxAge = 24 * time.Hour
+
+var errSyncExportArchiveDirectory = errors.New("sync export archive directory")
 
 // ValidateSchedulerConfig checks scheduler settings without starting background
 // work. This lets the registry fail startup on partial or unsafe configuration.
@@ -552,52 +573,6 @@ func validateNormalizedSchedulerConfig(cfg SchedulerConfig) error {
 	return nil
 }
 
-func prepareArchiveDirectory(path string, mode os.FileMode) error {
-	path = filepath.Clean(path)
-	if !filepath.IsAbs(path) {
-		return errors.New("export archive directory must be absolute")
-	}
-	current, err := os.Open(string(filepath.Separator))
-	if err != nil {
-		return err
-	}
-	parts := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		fd, openErr := unix.Openat(
-			int(current.Fd()),
-			part,
-			unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_DIRECTORY,
-			0,
-		)
-		if errors.Is(openErr, unix.ENOENT) {
-			if err := unix.Mkdirat(int(current.Fd()), part, uint32(mode.Perm())); err != nil && !errors.Is(err, unix.EEXIST) {
-				_ = current.Close()
-				return err
-			}
-			fd, openErr = unix.Openat(
-				int(current.Fd()),
-				part,
-				unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_DIRECTORY,
-				0,
-			)
-		}
-		if openErr != nil {
-			_ = current.Close()
-			return openErr
-		}
-		next := os.NewFile(uintptr(fd), part)
-		if err := current.Close(); err != nil {
-			_ = next.Close()
-			return err
-		}
-		current = next
-	}
-	return current.Close()
-}
-
 func openDirectoryNoFollow(path string) (*os.File, error) {
 	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
@@ -634,7 +609,39 @@ func openDirectoryNoFollow(path string) (*os.File, error) {
 	return current, nil
 }
 
-func openValidatedArchiveQueue(cfg SchedulerConfig) (*archiveQueue, error) {
+func openArchiveQueue(path string) (*archiveQueue, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	absolute = filepath.Clean(absolute)
+	parentPath, err := filepath.EvalSymlinks(filepath.Dir(absolute))
+	if err != nil {
+		return nil, err
+	}
+	parent, err := openDirectoryNoFollow(parentPath)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.Close()
+	fd, err := unix.Openat(
+		int(parent.Fd()),
+		filepath.Base(absolute),
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_DIRECTORY,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	directory := os.NewFile(uintptr(fd), absolute)
+	if directory == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("open export archive directory")
+	}
+	return &archiveQueue{path: absolute, directory: directory}, nil
+}
+
+func openValidatedArchiveQueue(cfg SchedulerConfig, ops schedulerOps) (*archiveQueue, error) {
 	inside, err := pathWithin(cfg.ContentDir, cfg.ArchiveDir)
 	if err != nil {
 		return nil, errors.New("validate export archive directory")
@@ -644,14 +651,37 @@ func openValidatedArchiveQueue(cfg SchedulerConfig) (*archiveQueue, error) {
 	}
 	queue, err := openArchiveQueue(cfg.ArchiveDir)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("open export archive directory")
 	}
-	if err := validateArchiveQueuePath(cfg, queue); err != nil {
+	if err := validateArchiveQueue(cfg, queue, ops); err != nil {
 		_ = queue.close()
 		return nil, err
 	}
-	afterArchiveQueueValidated()
+	if err := unix.Flock(int(queue.directory.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = queue.close()
+		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+			return nil, errors.New("export archive directory is already in use")
+		}
+		return nil, errors.New("lock export archive directory")
+	}
 	return queue, nil
+}
+
+func validateArchiveQueue(cfg SchedulerConfig, queue *archiveQueue, ops schedulerOps) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(queue.directory.Fd()), &stat); err != nil {
+		return errors.New("stat export archive directory")
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return errors.New("export archive path is not a directory")
+	}
+	if stat.Mode&0o7777 != 0o700 {
+		return errors.New("export archive directory must have mode 0700")
+	}
+	if stat.Uid != ops.effectiveUID || stat.Gid != ops.effectiveGID {
+		return errors.New("export archive directory has wrong ownership")
+	}
+	return validateArchiveQueuePath(cfg, queue)
 }
 
 func validateArchiveQueuePath(cfg SchedulerConfig, queue *archiveQueue) error {
@@ -666,32 +696,11 @@ func validateArchiveQueuePath(cfg SchedulerConfig, queue *archiveQueue) error {
 	if err != nil {
 		return errors.New("stat export archive directory")
 	}
-	pathInfo, err := os.Stat(cfg.ArchiveDir)
-	if err != nil || !os.SameFile(openedInfo, pathInfo) {
+	pathInfo, err := os.Lstat(cfg.ArchiveDir)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
 		return errors.New("export archive directory changed")
 	}
 	return nil
-}
-
-func openArchiveQueue(path string) (*archiveQueue, error) {
-	beforeOpenArchiveQueue(path)
-	resolved, err := resolvePath(path)
-	if err != nil {
-		return nil, err
-	}
-	directory, err := openDirectoryNoFollow(resolved)
-	if err != nil {
-		return nil, err
-	}
-	info, err := directory.Stat()
-	if err != nil || !info.IsDir() {
-		_ = directory.Close()
-		if err != nil {
-			return nil, err
-		}
-		return nil, errors.New("export archive path is not a directory")
-	}
-	return &archiveQueue{path: path, directory: directory}, nil
 }
 
 func (queue *archiveQueue) close() error {
@@ -734,11 +743,13 @@ func discoverPendingArchivesIn(queue *archiveQueue) ([]pendingArchive, error) {
 	}
 	archives := make([]pendingArchive, 0, len(entries))
 	for _, entry := range entries {
-		base, ok := pendingArchiveBase(entry.Name())
-		if !ok || entry.Type()&os.ModeSymlink != 0 {
+		if !completedArchiveName(entry.Name()) || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
 		file, err := queue.openNoFollow(entry.Name())
+		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOENT) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -755,7 +766,7 @@ func discoverPendingArchivesIn(queue *archiveQueue) ([]pendingArchive, error) {
 		}
 		archives = append(archives, pendingArchive{
 			Path:      filepath.Join(queue.path, entry.Name()),
-			Base:      base,
+			Base:      entry.Name(),
 			EntryBase: entry.Name(),
 			ModTime:   info.ModTime(),
 			Size:      info.Size(),
@@ -788,74 +799,53 @@ func cleanupStaleExportPartialsIn(queue *archiveQueue, now time.Time, maxAge tim
 	cutoff := now.Add(-maxAge)
 	removed := 0
 	for _, entry := range entries {
-		originalName, recoveredClaim, ok := cleanupEntryOriginalName(entry.Name())
-		if !ok {
+		if entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
-		expectWorkspace := generatedWorkspaceName(originalName)
-		file, err := queue.openClaimedCleanupEntry(entry.Name(), expectWorkspace)
-		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
+		isPartial := generatedPartialArchiveName(entry.Name())
+		isWorkspace := generatedWorkspaceName(entry.Name())
+		if !isPartial && !isWorkspace {
+			continue
+		}
+		file, err := queue.openCleanupEntry(entry.Name(), isWorkspace)
+		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ENOENT) {
 			continue
 		}
 		if err != nil {
 			return removed, err
 		}
 		info, statErr := file.Stat()
-		closeErr := file.Close()
 		if statErr != nil {
+			_ = file.Close()
 			return removed, statErr
 		}
-		if closeErr != nil {
-			return removed, closeErr
-		}
-		isPartial := info.Mode().IsRegular() && generatedPartialArchiveName(originalName)
-		isWorkspace := info.IsDir() && expectWorkspace
-		if (!isPartial && !isWorkspace) || (!recoveredClaim && !info.ModTime().Before(cutoff)) {
-			continue
-		}
-		beforeClaimStaleExportEntry(filepath.Join(queue.path, entry.Name()))
-		claimBase := fmt.Sprintf(
-			".sherpa-cleanup-claim-%d-%d-%s",
-			os.Getpid(),
-			queueClaimCounter.Add(1),
-			originalName,
-		)
-		if err := renameNoReplace(int(queue.directory.Fd()), entry.Name(), int(queue.directory.Fd()), claimBase); err != nil {
-			return removed, err
-		}
-		claimedFile, err := queue.openClaimedCleanupEntry(claimBase, isWorkspace)
-		if err != nil {
-			_ = renameNoReplace(int(queue.directory.Fd()), claimBase, int(queue.directory.Fd()), entry.Name())
-			return removed, err
-		}
-		claimedInfo, statErr := claimedFile.Stat()
-		unchanged := statErr == nil && os.SameFile(info, claimedInfo) &&
-			(recoveredClaim || claimedInfo.ModTime().Before(cutoff)) &&
-			((isPartial && claimedInfo.Mode().IsRegular()) || (isWorkspace && claimedInfo.IsDir()))
-		if !unchanged {
-			_ = claimedFile.Close()
-			_ = renameNoReplace(int(queue.directory.Fd()), claimBase, int(queue.directory.Fd()), entry.Name())
+		if !info.ModTime().Before(cutoff) || (isPartial && !info.Mode().IsRegular()) || (isWorkspace && !info.IsDir()) {
+			_ = file.Close()
 			continue
 		}
 		if isWorkspace {
-			err = removeClaimedDirectory(queue, claimBase, claimedFile)
+			err = removeDirectoryContents(queue.directory, entry.Name(), file)
 		} else {
-			err = unix.Unlinkat(int(queue.directory.Fd()), claimBase, 0)
-			closeErr := claimedFile.Close()
+			err = unix.Unlinkat(int(queue.directory.Fd()), entry.Name(), 0)
+			closeErr := file.Close()
 			if err == nil {
 				err = closeErr
 			}
 		}
 		if err != nil {
-			_ = renameNoReplace(int(queue.directory.Fd()), claimBase, int(queue.directory.Fd()), entry.Name())
 			return removed, err
 		}
 		removed++
 	}
+	if removed > 0 {
+		if err := queue.directory.Sync(); err != nil {
+			return removed, err
+		}
+	}
 	return removed, nil
 }
 
-func (queue *archiveQueue) openClaimedCleanupEntry(entryBase string, directory bool) (*os.File, error) {
+func (queue *archiveQueue) openCleanupEntry(entryBase string, directory bool) (*os.File, error) {
 	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
 	if directory {
 		flags |= unix.O_DIRECTORY
@@ -865,42 +855,6 @@ func (queue *archiveQueue) openClaimedCleanupEntry(entryBase string, directory b
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), filepath.Join(queue.path, entryBase)), nil
-}
-
-func removeClaimedDirectory(queue *archiveQueue, entryBase string, directory *os.File) error {
-	entries, err := directory.ReadDir(-1)
-	if err != nil {
-		_ = directory.Close()
-		return err
-	}
-	for _, entry := range entries {
-		if entry.Type().IsDir() && entry.Type()&os.ModeSymlink == 0 {
-			childFD, openErr := unix.Openat(
-				int(directory.Fd()),
-				entry.Name(),
-				unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_DIRECTORY,
-				0,
-			)
-			if openErr != nil {
-				_ = directory.Close()
-				return openErr
-			}
-			child := os.NewFile(uintptr(childFD), entry.Name())
-			if err := removeDirectoryContents(directory, entry.Name(), child); err != nil {
-				_ = directory.Close()
-				return err
-			}
-			continue
-		}
-		if err := unix.Unlinkat(int(directory.Fd()), entry.Name(), 0); err != nil {
-			_ = directory.Close()
-			return err
-		}
-	}
-	if err := directory.Close(); err != nil {
-		return err
-	}
-	return unix.Unlinkat(int(queue.directory.Fd()), entryBase, unix.AT_REMOVEDIR)
 }
 
 func removeDirectoryContents(parent *os.File, entryBase string, directory *os.File) error {
@@ -945,39 +899,6 @@ func completedArchiveBase(created time.Time) string {
 	return fmt.Sprintf("sherpa-%s-%d.tar.gz", created.UTC().Format(completedArchiveTimestampLayout), created.UnixNano())
 }
 
-func pendingArchiveBase(name string) (string, bool) {
-	if completedArchiveName(name) {
-		return name, true
-	}
-	const prefix = ".sherpa-queue-claim-"
-	claim, ok := strings.CutPrefix(name, prefix)
-	if !ok {
-		return "", false
-	}
-	firstDash := strings.IndexByte(claim, '-')
-	if firstDash <= 0 {
-		return "", false
-	}
-	if !canonicalPositiveUint(claim[:firstDash]) {
-		return "", false
-	}
-	claim = claim[firstDash+1:]
-	secondDash := strings.Index(claim, "-sherpa-")
-	if secondDash <= 0 {
-		return "", false
-	}
-	if !canonicalPositiveUint(claim[:secondDash]) {
-		return "", false
-	}
-	base := claim[secondDash+1:]
-	return base, completedArchiveName(base)
-}
-
-func canonicalPositiveUint(value string) bool {
-	parsed, err := strconv.ParseUint(value, 10, 64)
-	return err == nil && parsed > 0 && strconv.FormatUint(parsed, 10) == value
-}
-
 func completedArchiveName(name string) bool {
 	const prefix = "sherpa-"
 	const suffix = ".tar.gz"
@@ -1002,29 +923,6 @@ func completedArchiveName(name string) bool {
 	return timestamp.Equal(time.Unix(0, nanoseconds).UTC().Truncate(time.Second))
 }
 
-func cleanupEntryOriginalName(name string) (originalName string, recoveredClaim bool, ok bool) {
-	if generatedPartialArchiveName(name) || generatedWorkspaceName(name) {
-		return name, false, true
-	}
-	const prefix = ".sherpa-cleanup-claim-"
-	claim, ok := strings.CutPrefix(name, prefix)
-	if !ok {
-		return "", false, false
-	}
-	firstDash := strings.IndexByte(claim, '-')
-	if firstDash <= 0 || !canonicalPositiveUint(claim[:firstDash]) {
-		return "", false, false
-	}
-	claim = claim[firstDash+1:]
-	secondDash := strings.IndexByte(claim, '-')
-	if secondDash <= 0 || !canonicalPositiveUint(claim[:secondDash]) {
-		return "", false, false
-	}
-	originalName = claim[secondDash+1:]
-	ok = generatedPartialArchiveName(originalName) || generatedWorkspaceName(originalName)
-	return originalName, true, ok
-}
-
 func generatedPartialArchiveName(name string) bool {
 	return generatedTempName(name, ".sherpa-export-", ".tar.gz")
 }
@@ -1046,56 +944,22 @@ func generatedTempName(name, prefix, suffix string) bool {
 	return err == nil && strconv.FormatUint(value, 10) == random
 }
 
-func (queue *archiveQueue) claimPendingArchive(archive pendingArchive, openedInfo os.FileInfo) (string, *os.File, error) {
-	beforeClaimPendingArchive(archive.Path)
-	var claimBase string
-	for {
-		claimBase = fmt.Sprintf(
-			".sherpa-queue-claim-%d-%d-%s",
-			os.Getpid(),
-			queueClaimCounter.Add(1),
-			archive.Base,
-		)
-		var stat unix.Stat_t
-		err := unix.Fstatat(int(queue.directory.Fd()), claimBase, &stat, unix.AT_SYMLINK_NOFOLLOW)
-		if errors.Is(err, unix.ENOENT) {
-			break
-		}
-		if err != nil {
-			return "", nil, err
-		}
-	}
-	if err := beforePendingClaimRename(filepath.Join(queue.path, claimBase)); err != nil {
-		return "", nil, err
-	}
-	if err := renameNoReplace(int(queue.directory.Fd()), archive.EntryBase, int(queue.directory.Fd()), claimBase); err != nil {
-		return "", nil, err
-	}
-	claimedFile, err := queue.openNoFollow(claimBase)
-	if err != nil {
-		_ = renameNoReplace(int(queue.directory.Fd()), claimBase, int(queue.directory.Fd()), archive.EntryBase)
-		return "", nil, err
-	}
-	claimedInfo, err := claimedFile.Stat()
-	if err != nil || !claimedInfo.Mode().IsRegular() || !os.SameFile(openedInfo, claimedInfo) {
-		_ = claimedFile.Close()
-		_ = renameNoReplace(int(queue.directory.Fd()), claimBase, int(queue.directory.Fd()), archive.EntryBase)
-		return "", nil, errors.New("pending export archive changed")
-	}
-	return claimBase, claimedFile, nil
+func drainPendingArchives(ctx context.Context, cfg SchedulerConfig) (remaining int, err error) {
+	return drainPendingArchivesWithOps(ctx, cfg, defaultSchedulerOps())
 }
 
-func drainPendingArchives(ctx context.Context, cfg SchedulerConfig) (remaining int, err error) {
-	queue, err := openArchiveQueue(cfg.ArchiveDir)
+func drainPendingArchivesWithOps(ctx context.Context, cfg SchedulerConfig, ops schedulerOps) (remaining int, err error) {
+	cfg = normalizeSchedulerConfig(cfg)
+	queue, err := openValidatedArchiveQueue(cfg, ops)
 	if err != nil {
 		logSchedulerRetry(cfg, 0, "-", time.Time{}, "discover")
 		return 0, errors.New("discover pending export archives")
 	}
 	defer queue.close()
-	return drainPendingArchivesIn(ctx, cfg, queue)
+	return drainPendingArchivesIn(ctx, cfg, queue, ops)
 }
 
-func drainPendingArchivesIn(ctx context.Context, cfg SchedulerConfig, queue *archiveQueue) (remaining int, err error) {
+func drainPendingArchivesIn(ctx context.Context, cfg SchedulerConfig, queue *archiveQueue, ops schedulerOps) (remaining int, err error) {
 	archives, err := discoverPendingArchivesIn(queue)
 	if err != nil {
 		logSchedulerRetry(cfg, 0, "-", time.Time{}, "discover")
@@ -1106,20 +970,18 @@ func drainPendingArchivesIn(ctx context.Context, cfg SchedulerConfig, queue *arc
 		if err := ctx.Err(); err != nil {
 			return remaining, err
 		}
-		beforeOpenPendingArchive(archive.Path)
 		file, err := queue.openNoFollow(archive.EntryBase)
 		if err != nil {
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "queue")
 			return remaining, errors.New("pending export archive changed")
 		}
-		afterOpenPendingArchive(archive.Path)
 		openedInfo, err := file.Stat()
 		if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(archive.info, openedInfo) {
 			_ = file.Close()
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "queue")
 			return remaining, errors.New("pending export archive changed")
 		}
-		result, uploadErr := uploadPendingArchive(ctx, file, openedInfo, cfg.CollectorURL, cfg.Token)
+		result, uploadErr := ops.upload(ctx, file, openedInfo, cfg.CollectorURL, cfg.Token)
 		if uploadErr != nil {
 			_ = file.Close()
 			if ctx.Err() != nil {
@@ -1133,20 +995,31 @@ func drainPendingArchivesIn(ctx context.Context, cfg SchedulerConfig, queue *arc
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "response")
 			return remaining, errors.New("unvalidated export upload result")
 		}
-		claimBase, claimedFile, claimErr := queue.claimPendingArchive(archive, openedInfo)
-		if claimErr != nil {
+		current, err := queue.openNoFollow(archive.EntryBase)
+		if err != nil {
 			_ = file.Close()
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "queue")
 			return remaining, errors.New("pending export archive changed")
 		}
-		removeErr := removeClaimedPendingArchive(queue, claimBase)
-		claimedCloseErr := claimedFile.Close()
-		closeErr := file.Close()
+		currentInfo, statErr := current.Stat()
+		currentCloseErr := current.Close()
+		if statErr != nil || currentCloseErr != nil || !currentInfo.Mode().IsRegular() || !os.SameFile(openedInfo, currentInfo) {
+			_ = file.Close()
+			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "queue")
+			return remaining, errors.New("pending export archive changed")
+		}
+		removeErr := ops.remove(queue, archive.EntryBase)
 		if removeErr != nil {
+			_ = file.Close()
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "delete")
 			return remaining, errors.New("remove uploaded export archive")
 		}
-		if claimedCloseErr != nil || closeErr != nil {
+		if err := ops.syncQueue(queue); err != nil {
+			_ = file.Close()
+			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "delete")
+			return remaining, errSyncExportArchiveDirectory
+		}
+		if err := file.Close(); err != nil {
 			logSchedulerRetry(cfg, remaining, archive.Base, archive.ModTime, "queue")
 			return remaining, errors.New("close pending export archive")
 		}
@@ -1168,15 +1041,17 @@ func validatedSchedulerUploadResult(result UploadResult) bool {
 }
 
 func runSchedulerCycle(ctx context.Context, cfg SchedulerConfig, now time.Time) error {
-	queue, err := openValidatedArchiveQueue(cfg)
+	ops := defaultSchedulerOps()
+	cfg = normalizeSchedulerConfig(cfg)
+	queue, err := openValidatedArchiveQueue(cfg, ops)
 	if err != nil {
 		return err
 	}
 	defer queue.close()
-	return runSchedulerCycleIn(ctx, cfg, now, queue)
+	return runSchedulerCycleIn(ctx, cfg, now, queue, ops)
 }
 
-func runSchedulerCycleIn(ctx context.Context, cfg SchedulerConfig, now time.Time, queue *archiveQueue) error {
+func runSchedulerCycleIn(ctx context.Context, cfg SchedulerConfig, now time.Time, queue *archiveQueue, ops schedulerOps) error {
 	if _, err := cleanupStaleExportPartialsIn(queue, now, staleExportPartialMaxAge); err != nil {
 		logSchedulerRetry(cfg, 0, "-", time.Time{}, "cleanup")
 		return errors.New("clean stale export partials")
@@ -1187,70 +1062,104 @@ func runSchedulerCycleIn(ctx context.Context, cfg SchedulerConfig, now time.Time
 		return errors.New("discover pending export archives")
 	}
 	if len(archives) > 0 {
-		_, err := drainPendingArchivesIn(ctx, cfg, queue)
+		_, err := drainPendingArchivesIn(ctx, cfg, queue, ops)
 		return err
 	}
 	if err := validateArchiveQueuePath(cfg, queue); err != nil {
 		return err
 	}
 	archivePath := filepath.Join(cfg.ArchiveDir, completedArchiveBase(now))
-	if err := runExport(ctx, cfg.ContentDir, cfg.DatabaseURL, archivePath); err != nil {
+	if err := ops.runExport(ctx, cfg.ContentDir, cfg.DatabaseURL, archivePath); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		logSchedulerRetry(cfg, 0, filepath.Base(archivePath), now, "create")
 		return errors.New("create export archive")
 	}
-	_, err = drainPendingArchivesIn(ctx, cfg, queue)
+	_, err = drainPendingArchivesIn(ctx, cfg, queue, ops)
 	return err
 }
 
-// StartScheduler blocks until ctx is cancelled. Empty scheduler settings disable
-// it; otherwise URL, token, interval, and persistent archive directory are all required.
-func StartScheduler(ctx context.Context, cfg SchedulerConfig) error {
+// PreparedScheduler owns a validated export queue and its cooperative lifetime
+// lock. Run must be called exactly once so it can release both on return.
+type PreparedScheduler struct {
+	cfg   SchedulerConfig
+	queue *archiveQueue
+	ops   schedulerOps
+}
+
+// PrepareScheduler validates an enabled scheduler's physical queue and acquires
+// its lifetime lock synchronously. Empty scheduler settings return a nil scheduler.
+func PrepareScheduler(cfg SchedulerConfig) (*PreparedScheduler, error) {
+	return prepareScheduler(cfg, defaultSchedulerOps())
+}
+
+func prepareScheduler(cfg SchedulerConfig, ops schedulerOps) (*PreparedScheduler, error) {
 	cfg = normalizeSchedulerConfig(cfg)
 	if err := validateNormalizedSchedulerConfig(cfg); err != nil {
-		return err
+		return nil, err
 	}
 	if cfg.CollectorURL == "" {
-		return nil
+		return nil, nil
 	}
-	preparedPath, err := resolvePath(cfg.ArchiveDir)
+	queue, err := openValidatedArchiveQueue(cfg, ops)
 	if err != nil {
-		return errors.New("prepare export archive directory")
+		return nil, err
 	}
-	beforePrepareArchiveDirectory(cfg.ArchiveDir)
-	if err := prepareArchiveDirectory(preparedPath, 0o700); err != nil {
-		return errors.New("prepare export archive directory")
-	}
-	queue, err := openValidatedArchiveQueue(cfg)
-	if err != nil {
-		return err
-	}
-	defer queue.close()
-	if _, err := cleanupStaleExportPartialsIn(queue, time.Now(), staleExportPartialMaxAge); err != nil {
+	return &PreparedScheduler{cfg: cfg, queue: queue, ops: ops}, nil
+}
+
+// Run blocks until ctx is cancelled and releases the prepared queue lock before
+// returning.
+func (scheduler *PreparedScheduler) Run(ctx context.Context) error {
+	defer scheduler.queue.close()
+	if _, err := cleanupStaleExportPartialsIn(scheduler.queue, scheduler.ops.now(), staleExportPartialMaxAge); err != nil {
 		return errors.New("clean stale export partials")
 	}
-	if archives, err := discoverPendingArchivesIn(queue); err != nil {
+	if archives, err := discoverPendingArchivesIn(scheduler.queue); err != nil {
 		return errors.New("discover pending export archives")
 	} else if len(archives) > 0 {
-		if _, err := drainPendingArchivesIn(ctx, cfg, queue); err != nil && ctx.Err() != nil {
-			return nil
+		if _, err := drainPendingArchivesIn(ctx, scheduler.cfg, scheduler.queue, scheduler.ops); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if errors.Is(err, errSyncExportArchiveDirectory) {
+				return err
+			}
 		}
 	}
 
-	ticker := time.NewTicker(cfg.Interval)
+	ticker := time.NewTicker(scheduler.cfg.Interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case now := <-ticker.C:
-			if err := runSchedulerCycleIn(ctx, cfg, now, queue); err != nil && ctx.Err() != nil {
-				return nil
+			if err := runSchedulerCycleIn(ctx, scheduler.cfg, now, scheduler.queue, scheduler.ops); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				if errors.Is(err, errSyncExportArchiveDirectory) {
+					return err
+				}
 			}
 		}
 	}
+}
+
+// StartScheduler prepares the scheduler synchronously, then runs it until ctx is
+// cancelled. Empty scheduler settings disable it.
+func StartScheduler(ctx context.Context, cfg SchedulerConfig) error {
+	return startScheduler(ctx, cfg, defaultSchedulerOps())
+}
+
+func startScheduler(ctx context.Context, cfg SchedulerConfig, ops schedulerOps) error {
+	scheduler, err := prepareScheduler(cfg, ops)
+	if err != nil || scheduler == nil {
+		return err
+	}
+	return scheduler.Run(ctx)
 }
 
 func logSchedulerRetry(cfg SchedulerConfig, queueCount int, base string, modTime time.Time, retryClass string) {

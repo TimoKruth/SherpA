@@ -37,8 +37,23 @@ const (
 type postgresOpener func(context.Context, string, ...int) (*store.PostgresStore, error)
 type retrySleeper func(context.Context, time.Duration) error
 
-var validateExportScheduler = registryexport.ValidateSchedulerConfig
-var startExportScheduler = registryexport.StartScheduler
+type exportScheduler interface {
+	Run(context.Context) error
+}
+
+type registryRunOps struct {
+	validateExportScheduler func(registryexport.SchedulerConfig) error
+	prepareExportScheduler  func(registryexport.SchedulerConfig) (exportScheduler, error)
+}
+
+func defaultRegistryRunOps() registryRunOps {
+	return registryRunOps{
+		validateExportScheduler: registryexport.ValidateSchedulerConfig,
+		prepareExportScheduler: func(cfg registryexport.SchedulerConfig) (exportScheduler, error) {
+			return registryexport.PrepareScheduler(cfg)
+		},
+	}
+}
 
 func sleepWithContext(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
@@ -83,12 +98,16 @@ func openPostgresWithRetry(ctx context.Context, dsn string, maxConns int, open p
 }
 
 func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {
+	return runWithOps(ctx, cfg, defaultRegistryRunOps())
+}
+
+func runWithOps(ctx context.Context, cfg Config, ops registryRunOps) (*http.Server, func(), error) {
 	exportCfg := registryexport.SchedulerConfig{
 		ContentDir: cfg.ContentDir, DatabaseURL: cfg.DatabaseURL,
 		ArchiveDir: cfg.ExportArchiveDir, CollectorURL: cfg.ExportURL,
 		Token: cfg.ExportToken, Interval: cfg.ExportInterval,
 	}
-	if err := validateExportScheduler(exportCfg); err != nil {
+	if err := ops.validateExportScheduler(exportCfg); err != nil {
 		return nil, nil, fmt.Errorf("configure off-site export: %w", err)
 	}
 	st, err := openPostgresWithRetry(ctx, cfg.DatabaseURL, cfg.DBMaxConns, store.OpenPostgres, sleepWithContext)
@@ -125,10 +144,19 @@ func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {
 		log.Printf("removed %d abandoned content stage directories", removed)
 	}
 	if cfg.ExportURL != "" {
+		scheduler, err := ops.prepareExportScheduler(exportCfg)
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("prepare off-site export scheduler: %w", err)
+		}
+		if scheduler == nil {
+			cleanup()
+			return nil, nil, errors.New("prepare off-site export scheduler")
+		}
 		schedulerDone = make(chan struct{})
 		go func() {
 			defer close(schedulerDone)
-			if err := startExportScheduler(schedulerCtx, exportCfg); err != nil && schedulerCtx.Err() == nil {
+			if err := scheduler.Run(schedulerCtx); err != nil && schedulerCtx.Err() == nil {
 				log.Printf("off-site export scheduler stopped: %v", err)
 			}
 		}()

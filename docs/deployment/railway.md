@@ -109,7 +109,7 @@ Configure variables in Railway's secret/variable UI. Never place secret values i
 | `SHERPA_EXPORT_URL` | Required for DR; external HTTPS collector endpoint |
 | `SHERPA_EXPORT_TOKEN` | Required operationally; collector Bearer secret |
 | `SHERPA_EXPORT_INTERVAL` | Required with export URL; Go duration such as `24h` |
-| `SHERPA_EXPORT_ARCHIVE_DIR` | Optional; use `/tmp/sherpa-exports`, never a child of `/data/git` |
+| `SHERPA_EXPORT_ARCHIVE_DIR` | Required with export URL; use the persistent, entrypoint-prepared `/data/exports` queue, never a child of `/data/git` |
 
 Staging and production values must be independent. Rotate the GitHub client secret, optional
 admin token, and export token through the Railway variable UI and the receiving system. Revoke
@@ -155,7 +155,11 @@ The scheduler deletes a local archive after a successful upload. A failed archiv
 new archive until that pending archive uploads and is deleted. This bounds local accumulation
 to one archive, but a failed upload or missing collector object is still an alert because the
 off-site recovery point is not advancing. Keep the archive directory outside `/data/git` and
-monitor its capacity. Collector retention is the authoritative retention policy.
+monitor its capacity. The root entrypoint must precreate this queue as a real `0700` directory
+owned by the registry UID/GID; the scheduler validates that identity and holds a cooperative
+lock for its lifetime. Keep `numReplicas=1`, and do not run another registry, sidecar, shell, or
+job as the registry UID against the same queue. Collector retention is the authoritative
+retention policy.
 
 For a manual local archive in a container or recovery environment:
 

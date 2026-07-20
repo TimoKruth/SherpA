@@ -17,6 +17,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if ! grep -Eq '"numReplicas"[[:space:]]*:[[:space:]]*1([[:space:]]*,)?[[:space:]]*$' "$root_dir/railway.json"; then
+  echo "Railway registry deployment must keep numReplicas=1" >&2
+  exit 1
+fi
+
 docker build --tag "$image" "$root_dir"
 docker network create "$network" >/dev/null
 docker run --detach --name "$postgres_container" --network "$network" \
@@ -61,12 +66,26 @@ for _ in $(seq 1 60); do
 done
 curl --fail --silent --show-error "http://127.0.0.1:${host_port}/healthz" | grep -qx 'ok'
 
+if ! docker exec "$registry_container" sh -c \
+  'test -d /data && test ! -L /data && mountpoint -q /data'; then
+  echo "export volume root is not a trusted real mountpoint" >&2
+  exit 1
+fi
 sherpa_uid="$(docker exec "$registry_container" getent passwd sherpa | cut -d: -f3)"
 sherpa_gid="$(docker exec "$registry_container" getent group sherpa | cut -d: -f3)"
 pid_one_uid="$(docker exec "$registry_container" awk '/^Uid:/{print $2}' /proc/1/status)"
 pid_one_gid="$(docker exec "$registry_container" awk '/^Gid:/{print $2}' /proc/1/status)"
 if [[ "$sherpa_uid" != "998" || "$sherpa_gid" != "998" || "$pid_one_uid" != "998" || "$pid_one_gid" != "998" ]]; then
   echo "sherpa or PID 1 identity is not UID/GID 998: sherpa=${sherpa_uid:-unknown}:${sherpa_gid:-unknown} pid1=${pid_one_uid:-unknown}:${pid_one_gid:-unknown}" >&2
+  exit 1
+fi
+if ! docker exec "$registry_container" sh -c 'test -d /data/exports && test ! -L /data/exports'; then
+  echo "export queue is not a real directory" >&2
+  exit 1
+fi
+queue_identity="$(docker exec "$registry_container" stat -c '%a:%u:%g' /data/exports)"
+if [[ "$queue_identity" != "700:${sherpa_uid}:${sherpa_gid}" ]]; then
+  echo "export queue is not private or registry-owned: ${queue_identity:-unknown}" >&2
   exit 1
 fi
 docker exec --user 998:998 "$registry_container" sh -c \

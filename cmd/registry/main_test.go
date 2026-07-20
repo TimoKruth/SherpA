@@ -17,6 +17,12 @@ import (
 	"sherpa/internal/registry/store"
 )
 
+type exportSchedulerFunc func(context.Context) error
+
+func (run exportSchedulerFunc) Run(ctx context.Context) error {
+	return run(ctx)
+}
+
 func TestRunBootsRegistryWithPostgres(t *testing.T) {
 	dsn := store.StartPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -252,20 +258,21 @@ func TestDispatchExportUsageAndUnknownCommand(t *testing.T) {
 }
 
 func TestRunWiresPersistentExportArchiveDirectory(t *testing.T) {
-	originalValidate := validateExportScheduler
-	t.Cleanup(func() { validateExportScheduler = originalValidate })
+	t.Parallel()
+
 	stop := errors.New("stop before opening database")
 	var got registryexport.SchedulerConfig
-	validateExportScheduler = func(cfg registryexport.SchedulerConfig) error {
+	ops := defaultRegistryRunOps()
+	ops.validateExportScheduler = func(cfg registryexport.SchedulerConfig) error {
 		got = cfg
 		return stop
 	}
 
-	srv, cleanup, err := run(context.Background(), Config{
+	srv, cleanup, err := runWithOps(context.Background(), Config{
 		DatabaseURL: "postgres://db.internal/sherpa", ContentDir: "/data/git",
 		ExportURL: "https://collector.example/upload", ExportToken: "collector-token",
 		ExportInterval: time.Hour, ExportArchiveDir: "/data/exports",
-	})
+	}, ops)
 	if !errors.Is(err, stop) {
 		t.Fatalf("run error = %v, want validation sentinel", err)
 	}
@@ -280,23 +287,91 @@ func TestRunWiresPersistentExportArchiveDirectory(t *testing.T) {
 	}
 }
 
-func TestRunCleanupStopsExportSchedulerBeforeReturning(t *testing.T) {
+func TestRunRejectsUnsafeExportQueueBeforeReadiness(t *testing.T) {
 	dsn := store.StartPostgres(t)
-	originalStart := startExportScheduler
-	t.Cleanup(func() { startExportScheduler = originalStart })
+	archiveDir := t.TempDir()
+	if err := os.Chmod(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, cleanup, err := run(ctx, Config{
+		DatabaseURL: dsn, ContentDir: t.TempDir(), ExportURL: "https://backups.example/upload",
+		ExportToken: "collector-secret", ExportInterval: time.Hour, ExportArchiveDir: archiveDir,
+	})
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "mode 0700") {
+		t.Fatalf("unsafe queue run error = %v, want synchronous mode rejection", err)
+	}
+	if srv != nil || cleanup != nil {
+		t.Fatal("unsafe queue run returned a ready server or cleanup function")
+	}
+}
+
+func TestRunAcquiresExportQueueLockBeforeReadinessAndReleasesDuringCleanup(t *testing.T) {
+	dsn := store.StartPostgres(t)
+	archiveDir := t.TempDir()
+	if err := os.Chmod(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exportCfg := registryexport.SchedulerConfig{
+		ContentDir: t.TempDir(), DatabaseURL: dsn, ArchiveDir: archiveDir,
+		CollectorURL: "https://backups.example/upload", Token: "collector-secret", Interval: time.Hour,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	srv, cleanup, err := run(ctx, Config{
+		DatabaseURL: dsn, ContentDir: exportCfg.ContentDir, ExportURL: exportCfg.CollectorURL,
+		ExportToken: exportCfg.Token, ExportInterval: exportCfg.Interval, ExportArchiveDir: archiveDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv == nil || cleanup == nil {
+		t.Fatal("run returned no ready server or cleanup function")
+	}
+	if contender, err := registryexport.PrepareScheduler(exportCfg); err == nil || contender != nil || !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("contending scheduler = %v, error = %v, want in-use rejection", contender, err)
+	}
+
+	cleanup()
+	fresh, err := registryexport.PrepareScheduler(exportCfg)
+	if err != nil {
+		t.Fatalf("prepare scheduler after cleanup: %v", err)
+	}
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	if err := fresh.Run(stopped); err != nil {
+		t.Fatalf("run scheduler after cleanup: %v", err)
+	}
+}
+
+func TestRunCleanupStopsExportSchedulerBeforeReturning(t *testing.T) {
+	t.Parallel()
+
+	dsn := store.StartPostgres(t)
 	started := make(chan struct{})
 	stopped := make(chan struct{})
-	startExportScheduler = func(ctx context.Context, _ registryexport.SchedulerConfig) error {
-		close(started)
-		<-ctx.Done()
-		time.Sleep(10 * time.Millisecond)
-		close(stopped)
-		return nil
+	ops := defaultRegistryRunOps()
+	ops.prepareExportScheduler = func(registryexport.SchedulerConfig) (exportScheduler, error) {
+		return exportSchedulerFunc(func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			time.Sleep(10 * time.Millisecond)
+			close(stopped)
+			return nil
+		}), nil
 	}
-	srv, cleanup, err := run(context.Background(), Config{
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	srv, cleanup, err := runWithOps(ctx, Config{
 		DatabaseURL: dsn, ContentDir: t.TempDir(), ExportURL: "https://backups.example/upload",
 		ExportToken: "collector-secret", ExportInterval: time.Hour, ExportArchiveDir: t.TempDir(),
-	})
+	}, ops)
 	if err != nil {
 		t.Fatal(err)
 	}
