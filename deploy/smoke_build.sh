@@ -113,6 +113,8 @@ fi
 docker exec --user 998:998 "$registry_container" sh -c \
   'test -w /data/git && : > /data/git/.smoke-write && rm /data/git/.smoke-write'
 docker exec --user 998:998 "$registry_container" git --version >/dev/null
+docker exec --user 998:998 "$registry_container" sh -c \
+  'umask 077; mkdir /data/git/.stage-smoke-active; printf %s active-publish > /data/git/.stage-smoke-active/sentinel'
 
 docker run --detach --name "$contender_container" --network "$network" \
   --mount "type=volume,src=${volume},dst=/data" \
@@ -149,6 +151,12 @@ if grep -Fq 'smoke-export-token' <<<"$contender_logs" || \
   echo "second scheduler lock error exposed a smoke secret or collector endpoint" >&2
   exit 1
 fi
+if ! docker exec --user 998:998 "$registry_container" sh -c \
+  'test "$(cat /data/git/.stage-smoke-active/sentinel)" = active-publish'; then
+  echo "lock-contending registry removed the primary registry active stage" >&2
+  exit 1
+fi
+docker exec --user 998:998 "$registry_container" rm -rf /data/git/.stage-smoke-active
 
 docker run --rm --entrypoint /bin/sh "$image" -c \
   'test ! -e /src && test ! -e /usr/local/go && ! command -v go >/dev/null 2>&1'

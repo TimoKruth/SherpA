@@ -350,6 +350,53 @@ func TestRunAcquiresExportQueueLockBeforeReadinessAndReleasesDuringCleanup(t *te
 	}
 }
 
+func TestRunLockContenderDoesNotCleanActiveContentStage(t *testing.T) {
+	dsn := store.StartPostgres(t)
+	contentDir := t.TempDir()
+	archiveDir := t.TempDir()
+	if err := os.Chmod(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exportCfg := registryexport.SchedulerConfig{
+		ContentDir: contentDir, DatabaseURL: dsn, ArchiveDir: archiveDir,
+		CollectorURL: "https://backups.example/upload", Token: "collector-secret", Interval: time.Hour,
+	}
+	primary, err := registryexport.PrepareScheduler(exportCfg)
+	if err != nil {
+		t.Fatalf("prepare primary scheduler: %v", err)
+	}
+	defer func() {
+		stopped, stop := context.WithCancel(context.Background())
+		stop()
+		if err := primary.Run(stopped); err != nil {
+			t.Errorf("release primary scheduler: %v", err)
+		}
+	}()
+
+	activeStage := filepath.Join(contentDir, ".stage-active")
+	if err := os.Mkdir(activeStage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(activeStage, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("active publish"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, cleanup, err := run(context.Background(), Config{
+		DatabaseURL: dsn, ContentDir: contentDir, ExportURL: exportCfg.CollectorURL,
+		ExportToken: exportCfg.Token, ExportInterval: exportCfg.Interval, ExportArchiveDir: archiveDir,
+	})
+	if err == nil || !strings.Contains(err.Error(), "export archive directory is already in use") {
+		t.Fatalf("contending run error = %v, want queue lock contention", err)
+	}
+	if srv != nil || cleanup != nil {
+		t.Fatal("contending run returned a server or cleanup function")
+	}
+	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "active publish" {
+		t.Fatalf("active stage sentinel after contention = %q, %v; want preserved", data, err)
+	}
+}
+
 func TestRunCleanupStopsExportSchedulerBeforeReturning(t *testing.T) {
 	t.Parallel()
 

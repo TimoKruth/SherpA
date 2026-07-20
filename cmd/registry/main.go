@@ -110,24 +110,46 @@ func runWithOps(ctx context.Context, cfg Config, ops registryRunOps) (*http.Serv
 	if err := ops.validateExportScheduler(exportCfg); err != nil {
 		return nil, nil, fmt.Errorf("configure off-site export: %w", err)
 	}
-	st, err := openPostgresWithRetry(ctx, cfg.DatabaseURL, cfg.DBMaxConns, store.OpenPostgres, sleepWithContext)
-	if err != nil {
-		return nil, nil, err
+	var scheduler exportScheduler
+	if cfg.ExportURL != "" {
+		var err error
+		scheduler, err = ops.prepareExportScheduler(exportCfg)
+		if err != nil {
+			return nil, nil, fmt.Errorf("prepare off-site export scheduler: %w", err)
+		}
+		if scheduler == nil {
+			return nil, nil, errors.New("prepare off-site export scheduler")
+		}
 	}
 
 	var cleanupOnce sync.Once
 	schedulerCtx, stopScheduler := context.WithCancel(ctx)
 	var schedulerDone chan struct{}
+	var st *store.PostgresStore
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			stopScheduler()
 			if schedulerDone != nil {
 				<-schedulerDone
+			} else if scheduler != nil {
+				// Run owns the prepared queue descriptor and lifetime lock. If
+				// startup fails before its goroutine starts, a cancelled run is
+				// still required to release that ownership.
+				_ = scheduler.Run(schedulerCtx)
 			}
-			if err := st.Close(); err != nil {
-				log.Printf("close registry store: %v", err)
+			if st != nil {
+				if err := st.Close(); err != nil {
+					log.Printf("close registry store: %v", err)
+				}
 			}
 		})
+	}
+
+	var err error
+	st, err = openPostgresWithRetry(ctx, cfg.DatabaseURL, cfg.DBMaxConns, store.OpenPostgres, sleepWithContext)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
 	}
 
 	cs := content.NewBareGit(cfg.ContentDir)
@@ -143,16 +165,7 @@ func runWithOps(ctx context.Context, cfg Config, ops registryRunOps) (*http.Serv
 	if removed > 0 {
 		log.Printf("removed %d abandoned content stage directories", removed)
 	}
-	if cfg.ExportURL != "" {
-		scheduler, err := ops.prepareExportScheduler(exportCfg)
-		if err != nil {
-			cleanup()
-			return nil, nil, fmt.Errorf("prepare off-site export scheduler: %w", err)
-		}
-		if scheduler == nil {
-			cleanup()
-			return nil, nil, errors.New("prepare off-site export scheduler")
-		}
+	if scheduler != nil {
 		schedulerDone = make(chan struct{})
 		go func() {
 			defer close(schedulerDone)
