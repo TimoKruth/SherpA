@@ -124,6 +124,10 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		return Result{}, s.localFailure()
 	}
+	if err := s.spool.SetUploadReceipt(plaintextPath, receivedAt); err != nil {
+		_ = s.spool.ReleasePlaintext(plaintextPath)
+		return Result{}, s.localFailure()
+	}
 	if err := s.crash(crashAfterUploadPartial); err != nil {
 		return Result{}, err
 	}
@@ -157,27 +161,26 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 
 	pending, hasFinal, err := s.findDurableObject(objectID)
 	if err != nil {
-		if s.cleanupOwned(plaintextPath, "", "") != nil {
-			return Result{}, s.localFailure()
-		}
+		_ = s.spool.ReleasePlaintext(plaintextPath)
 		return Result{}, s.localFailure()
 	}
 	record, hasRecord, err := s.ledger.Get(objectID)
 	if err != nil {
-		if s.cleanupOwned(plaintextPath, "", "") != nil {
-			return Result{}, s.localFailure()
-		}
+		_ = s.spool.ReleasePlaintext(plaintextPath)
 		return Result{}, s.localFailure()
 	}
 	bound, hasBound, err := s.findBoundPlaintext(objectID)
 	if err != nil {
-		if s.cleanupOwned(plaintextPath, "", "") != nil {
-			return Result{}, s.localFailure()
-		}
+		_ = s.spool.ReleasePlaintext(plaintextPath)
 		return Result{}, s.localFailure()
 	}
 	if hasBound {
 		if err := s.validateBoundPlaintext(ctx, bound, objectID, compressedSize); err != nil {
+			_ = s.spool.ReleasePlaintext(bound.Path)
+			_ = s.spool.ReleasePlaintext(plaintextPath)
+			return Result{}, s.localFailure()
+		}
+		if err := s.reconcileBoundUploadAliases(bound, plaintextPath); err != nil {
 			_ = s.spool.ReleasePlaintext(bound.Path)
 			_ = s.spool.ReleasePlaintext(plaintextPath)
 			return Result{}, s.localFailure()
@@ -193,10 +196,9 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		outcome, bindErr := s.spool.bindPlaintext(plaintextPath, objectID, receivedAt)
 		if bindErr != nil {
-			if outcome.renamed {
+			_ = s.spool.ReleasePlaintext(outcome.uploadPath)
+			if outcome.linked || outcome.reused {
 				_ = s.spool.ReleasePlaintext(outcome.path)
-			} else {
-				_ = s.spool.RemovePlaintext(plaintextPath)
 			}
 			return bindErr
 		}
@@ -294,12 +296,10 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		pending.ReceivedAt = record.ReceivedAt
 	}
+	s.status.RecordPending(pending.ObjectID, pending.ReceivedAt)
 	s.publishGate.release()
 	publicationHeld = false
 
-	if record.StoredAt == nil {
-		s.status.RecordPending(pending.ObjectID, pending.ReceivedAt)
-	}
 	existing, err := s.CommitPending(ctx, pending)
 	if err != nil {
 		return Result{}, err
@@ -515,11 +515,52 @@ func (s *Service) validateBoundPlaintext(ctx context.Context, object PlainObject
 	return nil
 }
 
+func (s *Service) reconcileBoundUploadAliases(bound PlainObject, excludePath string) error {
+	uploads, err := s.spool.DiscoverUploads()
+	if err != nil {
+		return err
+	}
+	for _, upload := range uploads {
+		if upload.Path == excludePath {
+			continue
+		}
+		objectID, size, hashErr := s.spool.HashUpload(upload.Path)
+		if hashErr != nil {
+			return hashErr
+		}
+		if objectID != bound.ObjectID {
+			continue
+		}
+		if size != bound.CompressedSize {
+			return errors.New("collector plaintext invalid")
+		}
+		same, sameErr := s.spool.SamePlaintextInode(upload.Path, bound.Path)
+		if sameErr != nil || !same {
+			return errors.New("collector plaintext invalid")
+		}
+		if err := s.spool.RemovePlaintext(upload.Path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Service) recoverBoundPlaintexts(ctx context.Context) error {
 	if err := s.publishGate.acquire(ctx); err != nil {
 		return errors.New("collector startup cancelled")
 	}
 	defer s.publishGate.release()
+
+	uploads, err := s.spool.DiscoverUploads()
+	if err != nil {
+		return s.localFailure()
+	}
+	for _, upload := range uploads {
+		if err := s.recoverUploadLocked(ctx, upload); err != nil {
+			return err
+		}
+	}
+
 	objects, err := s.spool.DiscoverPlaintexts()
 	if err != nil {
 		return s.localFailure()
@@ -532,6 +573,86 @@ func (s *Service) recoverBoundPlaintexts(ctx context.Context) error {
 	return nil
 }
 
+func (s *Service) recoverUploadLocked(ctx context.Context, upload PlainObject) error {
+	objectID, compressedSize, err := s.spool.HashUpload(upload.Path)
+	if err != nil || compressedSize != upload.CompressedSize {
+		return s.localFailure()
+	}
+	if _, err := s.ops.validateFile(ctx, upload.Path, s.limits); err != nil {
+		if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return errors.New("collector startup cancelled")
+		}
+		if invalidRecoveryArchive(err) {
+			return nil
+		}
+		return s.localFailure()
+	}
+
+	bound, hasBound, err := s.findBoundPlaintext(objectID)
+	if err != nil {
+		return s.localFailure()
+	}
+	if hasBound {
+		same, sameErr := s.spool.SamePlaintextInode(upload.Path, bound.Path)
+		if sameErr != nil || !same {
+			return s.localFailure()
+		}
+		if err := s.validateBoundPlaintext(ctx, bound, objectID, compressedSize); err != nil {
+			return s.localFailure()
+		}
+		if err := s.spool.RemovePlaintext(upload.Path); err != nil {
+			return s.localFailure()
+		}
+		return nil
+	}
+
+	outcome, bindErr := s.spool.bindPlaintext(upload.Path, objectID, upload.ReceivedAt)
+	if bindErr != nil {
+		_ = s.spool.ReleasePlaintext(outcome.uploadPath)
+		if outcome.linked || outcome.reused {
+			_ = s.spool.ReleasePlaintext(outcome.path)
+		}
+		return s.localFailure()
+	}
+	if outcome.reused {
+		same, sameErr := s.spool.SamePlaintextInode(upload.Path, outcome.path)
+		if sameErr != nil || !same {
+			_ = s.spool.ReleasePlaintext(outcome.uploadPath)
+			_ = s.spool.ReleasePlaintext(outcome.path)
+			return s.localFailure()
+		}
+		if err := s.spool.RemovePlaintext(upload.Path); err != nil {
+			_ = s.spool.ReleasePlaintext(outcome.path)
+			return s.localFailure()
+		}
+	}
+	return nil
+}
+
+func invalidRecoveryArchive(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch recoveryarchive.FailureClass(err.Error()) {
+	case recoveryarchive.FailureInvalidGzip,
+		recoveryarchive.FailureTrailingData,
+		recoveryarchive.FailureInvalidTar,
+		recoveryarchive.FailureUnsafePath,
+		recoveryarchive.FailureDuplicateMember,
+		recoveryarchive.FailureUnsupportedType,
+		recoveryarchive.FailureLimitExceeded,
+		recoveryarchive.FailureMissingPostgres,
+		recoveryarchive.FailureInvalidRepository,
+		recoveryarchive.FailureMissingManifest,
+		recoveryarchive.FailureManifestNotFinal,
+		recoveryarchive.FailureInvalidManifest,
+		recoveryarchive.FailureManifestMismatch:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Service) recoverBoundPlaintextLocked(ctx context.Context, plain PlainObject) error {
 	if err := s.validateBoundPlaintext(ctx, plain, plain.ObjectID, plain.CompressedSize); err != nil {
 		_ = s.spool.ReleasePlaintext(plain.Path)
@@ -542,6 +663,15 @@ func (s *Service) recoverBoundPlaintextLocked(ctx context.Context, plain PlainOb
 		_ = s.spool.ReleasePlaintext(plain.Path)
 		return s.localFailure()
 	}
+	receivedAt := plain.ReceivedAt
+	if hasRecord {
+		receivedAt = record.ReceivedAt
+	}
+	if receivedAt.IsZero() {
+		_ = s.spool.ReleasePlaintext(plain.Path)
+		return s.localFailure()
+	}
+	s.status.RecordPending(plain.ObjectID, receivedAt)
 	final, hasFinal, err := s.findDurableObject(plain.ObjectID)
 	if err != nil {
 		_ = s.spool.ReleasePlaintext(plain.Path)
@@ -571,15 +701,18 @@ func (s *Service) recoverBoundPlaintextLocked(ctx context.Context, plain PlainOb
 		_ = s.spool.ReleasePlaintext(plain.Path)
 		return s.localFailure()
 	}
-	encryptedSize, err := s.ops.encryptFile(ctx, plain.Path, partialPath)
-	if err != nil || encryptedSize <= 0 {
-		_ = s.spool.DiscardEncryptedPartial(partialPath)
-		_ = s.spool.ReleasePlaintext(plain.Path)
+	encryptedSize, encryptErr := s.ops.encryptFile(ctx, plain.Path, partialPath)
+	if encryptErr != nil || encryptedSize <= 0 {
+		cleanupErr := s.spool.DiscardEncryptedPartial(partialPath)
+		releaseErr := s.spool.ReleasePlaintext(plain.Path)
+		if cleanupErr != nil || releaseErr != nil {
+			return s.localFailure()
+		}
+		if encryptErr != nil && ctx.Err() != nil &&
+			(errors.Is(encryptErr, context.Canceled) || errors.Is(encryptErr, context.DeadlineExceeded)) {
+			return errors.New("collector startup cancelled")
+		}
 		return s.localFailure()
-	}
-	receivedAt := plain.ReceivedAt
-	if hasRecord {
-		receivedAt = record.ReceivedAt
 	}
 	digest, ok := canonicalDigest(plain.ObjectID)
 	if !ok || receivedAt.IsZero() {

@@ -644,10 +644,18 @@ func TestIngestCleanupFailureIsTerminalAndRedacted(t *testing.T) {
 
 func TestIngestCleanupFsyncFailureIsTerminal(t *testing.T) {
 	spoolOps := defaultSpoolOps()
+	unlink := spoolOps.unlinkat
 	fsync := spoolOps.fsync
-	var fsyncCalls atomic.Int32
+	var partialRemoved atomic.Bool
+	spoolOps.unlinkat = func(dirFD int, name string, flags int) error {
+		err := unlink(dirFD, name, flags)
+		if err == nil && partialAgePattern.MatchString(name) {
+			partialRemoved.Store(true)
+		}
+		return err
+	}
 	spoolOps.fsync = func(fd int) error {
-		if fsyncCalls.Add(1) == 2 {
+		if partialRemoved.Load() {
 			return errors.New("private cleanup sync failure")
 		}
 		return fsync(fd)
@@ -1118,20 +1126,7 @@ func TestServiceTenCrashBoundariesRestartToExactState(t *testing.T) {
 				t.Fatalf("restart spool entries = %v", entries)
 			}
 			record, found, getErr := restartedLedger.Get(objectID)
-			early := point == crashAfterUploadPartial
 			snapshot := status.Snapshot()
-			if early {
-				if getErr != nil || found {
-					t.Fatalf("early crash ledger found=%v record=%#v err=%v", found, record, getErr)
-				}
-				if backend.existsCalls != 0 || backend.createCalls != 0 {
-					t.Fatalf("early crash backend calls: exists=%d create=%d", backend.existsCalls, backend.createCalls)
-				}
-				if !snapshot.SpoolWritable || snapshot.OldestPendingAt != nil || snapshot.NewestSuccessfulAt != nil || snapshot.TerminalLocalError {
-					t.Fatalf("early crash readiness = %#v", snapshot)
-				}
-				return
-			}
 			if getErr != nil || !found || record.StoredAt == nil {
 				t.Fatalf("recovered record = %#v found=%v err=%v", record, found, getErr)
 			}

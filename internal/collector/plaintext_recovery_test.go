@@ -222,17 +222,17 @@ func TestSpoolStaleCleanupNeverDeletesBoundPlaintext(t *testing.T) {
 	}
 }
 
-func TestSpoolBindPlaintextRenameFailurePreservesUploadReservation(t *testing.T) {
+func TestSpoolBindPlaintextLinkFailurePreservesUploadReservation(t *testing.T) {
 	ops := defaultSpoolOps()
-	ops.renameNoReplace = func(int, string, int, string) error { return unix.EIO }
+	ops.linkat = func(int, string, int, string, int) error { return unix.EIO }
 	spool := openTestSpool(t, ops)
-	archive := validRecoveryArchive(t, "bind-rename-failure")
+	archive := validRecoveryArchive(t, "bind-link-failure")
 	upload, objectID, _, err := spool.Receive(context.Background(), testReadCloser(archive), int64(len(archive)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if bound, reused, err := spool.BindPlaintext(upload, objectID); err == nil || bound != "" || reused {
+	if bound, reused, err := spool.BindPlaintext(upload, objectID); err == nil || !plainPendingPattern.MatchString(filepath.Base(bound)) || reused {
 		t.Fatalf("BindPlaintext bound=%q reused=%v err=%v", bound, reused, err)
 	}
 	if _, err := os.Stat(upload); err != nil {
@@ -248,18 +248,18 @@ func TestSpoolBindPlaintextRenameFailurePreservesUploadReservation(t *testing.T)
 
 func TestSpoolBindPlaintextDirectoryFsyncFailureRetainsBoundReservation(t *testing.T) {
 	ops := defaultSpoolOps()
-	rename := ops.renameNoReplace
+	link := ops.linkat
 	fsync := ops.fsync
-	var renamed atomic.Bool
-	ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
-		err := rename(oldDirFD, oldName, newDirFD, newName)
+	var linked atomic.Bool
+	ops.linkat = func(oldDirFD int, oldName string, newDirFD int, newName string, flags int) error {
+		err := link(oldDirFD, oldName, newDirFD, newName, flags)
 		if err == nil && plainPendingPattern.MatchString(newName) {
-			renamed.Store(true)
+			linked.Store(true)
 		}
 		return err
 	}
 	ops.fsync = func(fd int) error {
-		if renamed.Load() {
+		if linked.Load() {
 			return unix.EIO
 		}
 		return fsync(fd)
@@ -275,18 +275,23 @@ func TestSpoolBindPlaintextDirectoryFsyncFailureRetainsBoundReservation(t *testi
 	if err == nil || reused || !plainPendingPattern.MatchString(filepath.Base(bound)) {
 		t.Fatalf("BindPlaintext bound=%q reused=%v err=%v", bound, reused, err)
 	}
-	if _, err := os.Stat(upload); !os.IsNotExist(err) {
-		t.Fatalf("renamed upload remains: %v", err)
+	uploadInfo, uploadErr := os.Stat(upload)
+	if uploadErr != nil {
+		t.Fatalf("durable upload lost: %v", uploadErr)
 	}
-	if _, err := os.Stat(bound); err != nil {
-		t.Fatalf("uncertain bound plaintext lost: %v", err)
+	boundInfo, boundErr := os.Stat(bound)
+	if boundErr != nil {
+		t.Fatalf("uncertain bound plaintext lost: %v", boundErr)
+	}
+	if !os.SameFile(uploadInfo, boundInfo) {
+		t.Fatal("uncertain bind names do not share an inode")
 	}
 	spool.transition.Lock()
 	_, active := spool.active[filepath.Base(bound)]
 	_, oldActive := spool.active[filepath.Base(upload)]
 	spool.transition.Unlock()
-	if !active || oldActive {
-		t.Fatalf("active reservation not moved: bound=%v upload=%v", active, oldActive)
+	if !active || !oldActive {
+		t.Fatalf("active reservations not retained: bound=%v upload=%v", active, oldActive)
 	}
 }
 
@@ -331,20 +336,20 @@ func TestSpoolBindPlaintextNoReplaceReusesExistingBound(t *testing.T) {
 
 func TestIngestPlaintextBindDirectoryFsyncFailureRetainsRecoverableBound(t *testing.T) {
 	ops := defaultSpoolOps()
-	rename := ops.renameNoReplace
+	link := ops.linkat
 	fsync := ops.fsync
-	var renamed atomic.Bool
+	var linked atomic.Bool
 	var fail atomic.Bool
 	fail.Store(true)
-	ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
-		err := rename(oldDirFD, oldName, newDirFD, newName)
+	ops.linkat = func(oldDirFD int, oldName string, newDirFD int, newName string, flags int) error {
+		err := link(oldDirFD, oldName, newDirFD, newName, flags)
 		if err == nil && plainPendingPattern.MatchString(newName) {
-			renamed.Store(true)
+			linked.Store(true)
 		}
 		return err
 	}
 	ops.fsync = func(fd int) error {
-		if renamed.Load() && fail.Load() {
+		if linked.Load() && fail.Load() {
 			return unix.EIO
 		}
 		return fsync(fd)
@@ -356,10 +361,7 @@ func TestIngestPlaintextBindDirectoryFsyncFailureRetainsRecoverableBound(t *test
 	if _, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive))); err == nil || err.Error() != "collector local state failed" {
 		t.Fatalf("Ingest error = %v", err)
 	}
-	entries := spoolEntryNames(t, fixture.spool.path)
-	if len(entries) != 1 || !plainPendingPattern.MatchString(entries[0]) {
-		t.Fatalf("bind failure entries = %v", entries)
-	}
+	assertPlaintextNamespace(t, fixture.spool.path, 1, 1)
 	if records, err := fixture.ledger.List(); err != nil || len(records) != 0 {
 		t.Fatalf("bind failure ledger = %#v err=%v", records, err)
 	}
