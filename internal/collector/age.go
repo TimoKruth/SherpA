@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"strings"
 
 	"filippo.io/age"
 	"golang.org/x/sys/unix"
@@ -23,14 +24,18 @@ func NewEncryptor(recipient age.Recipient) *Encryptor {
 
 func (e *Encryptor) EncryptFile(ctx context.Context, sourcePath, partialPath string) (int64, error) {
 	return e.encryptFile(ctx, sourcePath, partialPath, encryptionFileFinalizer{
-		sync:  func(file *os.File) error { return file.Sync() },
-		close: func(file *os.File) error { return file.Close() },
+		chmod:    func(fd int, mode uint32) error { return unix.Fchmod(fd, mode) },
+		ageClose: func(writer io.Closer) error { return writer.Close() },
+		sync:     func(file *os.File) error { return file.Sync() },
+		close:    func(file *os.File) error { return file.Close() },
 	})
 }
 
 type encryptionFileFinalizer struct {
-	sync  func(*os.File) error
-	close func(*os.File) error
+	chmod    func(int, uint32) error
+	ageClose func(io.Closer) error
+	sync     func(*os.File) error
+	close    func(*os.File) error
 }
 
 func (e *Encryptor) encryptFile(ctx context.Context, sourcePath, partialPath string, finalizer encryptionFileFinalizer) (encryptedBytes int64, returnErr error) {
@@ -40,9 +45,15 @@ func (e *Encryptor) encryptFile(ctx context.Context, sourcePath, partialPath str
 	if e == nil || e.recipient == nil {
 		return 0, errors.New("collector encryption setup failed")
 	}
+	finalizer = completeEncryptionFileFinalizer(finalizer)
 
-	sourceFD, err := unix.Open(sourcePath, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	sourceFD, err := openPathNoSymlinks(sourcePath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
+		return 0, errors.New("collector encryption source unavailable")
+	}
+	var sourceStat unix.Stat_t
+	if err := unix.Fstat(sourceFD, &sourceStat); err != nil || sourceStat.Mode&unix.S_IFMT != unix.S_IFREG {
+		_ = unix.Close(sourceFD)
 		return 0, errors.New("collector encryption source unavailable")
 	}
 	source := os.NewFile(uintptr(sourceFD), "collector-encryption-source")
@@ -61,8 +72,11 @@ func (e *Encryptor) encryptFile(ctx context.Context, sourcePath, partialPath str
 			returnErr = errors.New("collector encryption source close failed")
 		}
 	}()
+	if ctx.Err() != nil {
+		return 0, errors.New("collector encryption canceled")
+	}
 
-	destinationFD, err := unix.Open(
+	destinationFD, err := openPathNoSymlinks(
 		partialPath,
 		unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
 		0o600,
@@ -87,11 +101,13 @@ func (e *Encryptor) encryptFile(ctx context.Context, sourcePath, partialPath str
 		}
 	}()
 
-	if err := unix.Fchmod(destinationFD, 0o600); err != nil {
+	if err := finalizer.chmod(destinationFD, 0o600); err != nil {
 		return 0, errors.New("collector encryption destination unsafe")
 	}
 	var destinationStat unix.Stat_t
-	if err := unix.Fstat(destinationFD, &destinationStat); err != nil || destinationStat.Mode&unix.S_IFMT != unix.S_IFREG {
+	if err := unix.Fstat(destinationFD, &destinationStat); err != nil ||
+		destinationStat.Mode&unix.S_IFMT != unix.S_IFREG ||
+		destinationStat.Mode&0o7777 != 0o600 {
 		return 0, errors.New("collector encryption destination unsafe")
 	}
 	if ctx.Err() != nil {
@@ -109,7 +125,7 @@ func (e *Encryptor) encryptFile(ctx context.Context, sourcePath, partialPath str
 			return
 		}
 		ageCloseAttempted = true
-		if err := ageWriter.Close(); err != nil && returnErr == nil {
+		if err := finalizer.ageClose(ageWriter); err != nil && returnErr == nil {
 			encryptedBytes = 0
 			returnErr = errors.New("collector encryption finalization failed")
 		}
@@ -128,7 +144,7 @@ func (e *Encryptor) encryptFile(ctx context.Context, sourcePath, partialPath str
 	}
 
 	ageCloseAttempted = true
-	if err := ageWriter.Close(); err != nil {
+	if err := finalizer.ageClose(ageWriter); err != nil {
 		return 0, errors.New("collector encryption finalization failed")
 	}
 	if err := finalizer.sync(destination); err != nil {
@@ -140,6 +156,77 @@ func (e *Encryptor) encryptFile(ctx context.Context, sourcePath, partialPath str
 	}
 
 	return counter.written, nil
+}
+
+func completeEncryptionFileFinalizer(finalizer encryptionFileFinalizer) encryptionFileFinalizer {
+	if finalizer.chmod == nil {
+		finalizer.chmod = func(fd int, mode uint32) error { return unix.Fchmod(fd, mode) }
+	}
+	if finalizer.ageClose == nil {
+		finalizer.ageClose = func(writer io.Closer) error { return writer.Close() }
+	}
+	if finalizer.sync == nil {
+		finalizer.sync = func(file *os.File) error { return file.Sync() }
+	}
+	if finalizer.close == nil {
+		finalizer.close = func(file *os.File) error { return file.Close() }
+	}
+	return finalizer
+}
+
+func openPathNoSymlinks(path string, flags int, mode uint32) (int, error) {
+	startPath, components, err := safePathComponents(path)
+	if err != nil {
+		return -1, err
+	}
+
+	parentFD, err := unix.Open(startPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, errors.New("unsafe path")
+	}
+	for _, component := range components[:len(components)-1] {
+		nextFD, openErr := unix.Openat(parentFD, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		closeErr := unix.Close(parentFD)
+		if openErr != nil || closeErr != nil {
+			if openErr == nil {
+				_ = unix.Close(nextFD)
+			}
+			return -1, errors.New("unsafe path")
+		}
+		parentFD = nextFD
+	}
+
+	fileFD, openErr := unix.Openat(parentFD, components[len(components)-1], flags, mode)
+	closeErr := unix.Close(parentFD)
+	if openErr != nil || closeErr != nil {
+		if openErr == nil {
+			_ = unix.Close(fileFD)
+		}
+		return -1, errors.New("unsafe path")
+	}
+	return fileFD, nil
+}
+
+func safePathComponents(path string) (string, []string, error) {
+	if path == "" {
+		return "", nil, errors.New("unsafe path")
+	}
+	separator := string(os.PathSeparator)
+	components := strings.Split(path, separator)
+	startPath := "."
+	if strings.HasPrefix(path, separator) {
+		startPath = separator
+		components = components[1:]
+	}
+	if len(components) == 0 {
+		return "", nil, errors.New("unsafe path")
+	}
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." {
+			return "", nil, errors.New("unsafe path")
+		}
+	}
+	return startPath, components, nil
 }
 
 type contextReader struct {
