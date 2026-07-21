@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +42,8 @@ type BorgBackend struct {
 	config      BorgConfig
 	environment []string
 	location    *time.Location
+	state       borgStateIdentity
+	system      borgSystem
 }
 
 func NewBorgBackend(config BorgConfig) (*BorgBackend, error) {
@@ -47,31 +51,31 @@ func NewBorgBackend(config BorgConfig) (*BorgBackend, error) {
 }
 
 func newBorgBackend(config BorgConfig, location *time.Location) (*BorgBackend, error) {
-	if !validBorgConfig(config) || location == nil {
+	return newBorgBackendWithSystem(config, location, defaultBorgSystem())
+}
+
+func newBorgBackendWithSystem(config BorgConfig, location *time.Location, system borgSystem) (*BorgBackend, error) {
+	if !validBorgConfig(config) || location == nil || !system.valid() {
 		return nil, errors.New("collector backend unavailable")
 	}
 	workFD, workPath, err := openPrivateDirectory(config.WorkDir)
 	if err != nil || workPath != config.WorkDir {
 		return nil, errors.New("collector backend unavailable")
 	}
-	defer unix.Close(workFD)
-	for _, name := range []string{"cache", "config", "security"} {
-		if err := ensureBorgStateDirectory(workFD, name); err != nil {
-			return nil, errors.New("collector backend unavailable")
-		}
+	state, stateErr := initializeBorgState(workFD, system)
+	closeErr := unix.Close(workFD)
+	if stateErr != nil || closeErr != nil {
+		return nil, errors.New("collector backend unavailable")
 	}
-	cacheDir := filepath.Join(config.WorkDir, "cache")
-	configDir := filepath.Join(config.WorkDir, "config")
-	securityDir := filepath.Join(config.WorkDir, "security")
 	environment := append(nonBorgEnvironment(os.Environ()),
 		"BORG_REPO="+config.Repository,
 		"BORG_RSH="+borgSSHCommand(config.SSHKeyFile, config.KnownHostsFile),
-		"BORG_CACHE_DIR="+cacheDir,
-		"BORG_CONFIG_DIR="+configDir,
-		"BORG_SECURITY_DIR="+securityDir,
+		"BORG_CACHE_DIR="+borgFDPath(3),
+		"BORG_CONFIG_DIR="+borgFDPath(4),
+		"BORG_SECURITY_DIR="+borgFDPath(5),
 		"BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes",
 	)
-	return &BorgBackend{config: config, environment: environment, location: location}, nil
+	return &BorgBackend{config: config, environment: environment, location: location, state: state, system: system}, nil
 }
 
 func (b *BorgBackend) Create(ctx context.Context, object PendingObject) (retErr error) {
@@ -91,8 +95,20 @@ func (b *BorgBackend) Create(ctx context.Context, object PendingObject) (retErr 
 	if !held.valid() {
 		return errors.New("collector backend failed")
 	}
-	_, createErr := b.run(ctx, b.config.CreateTimeout, held.dir, "create", "--compression", "none", "::"+held.archiveName, held.name)
-	if !held.valid() {
+	stage, err := b.stageInput(held)
+	if err != nil {
+		return errors.New("collector backend failed")
+	}
+	defer func() {
+		if stage.cleanup() != nil {
+			retErr = errors.New("collector backend failed")
+		}
+	}()
+	if !held.valid() || !stage.valid() {
+		return errors.New("collector backend failed")
+	}
+	_, createErr := b.run(ctx, b.config.CreateTimeout, stage, "create", "--compression", "none", "::"+held.archiveName, held.name)
+	if !held.valid() || !stage.valid() {
 		return errors.New("collector backend failed")
 	}
 	if contextErr := classifyBorgContext(ctx); contextErr != nil {
@@ -119,7 +135,7 @@ func (b *BorgBackend) Create(ctx context.Context, object PendingObject) (retErr 
 		}
 		return errors.New("collector remote verification failed")
 	}
-	if !held.valid() {
+	if !held.valid() || !stage.valid() {
 		return errors.New("collector backend failed")
 	}
 	return nil
@@ -154,7 +170,7 @@ func (b *BorgBackend) List(ctx context.Context) ([]ArchiveInfo, error) {
 }
 
 func (b *BorgBackend) list(ctx context.Context) ([]ArchiveInfo, error) {
-	output, err := b.run(ctx, b.config.QueryTimeout, "", "list", "--json")
+	output, err := b.run(ctx, b.config.QueryTimeout, nil, "list", "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -165,48 +181,84 @@ func (b *BorgBackend) list(ctx context.Context) ([]ArchiveInfo, error) {
 	return archives, nil
 }
 
-func (b *BorgBackend) run(parent context.Context, timeout time.Duration, dir string, args ...string) ([]byte, error) {
+func (b *BorgBackend) run(parent context.Context, timeout time.Duration, stage *borgStage, args ...string) ([]byte, error) {
 	if parent == nil || b == nil || timeout <= 0 {
 		return nil, errors.New("collector backend failed")
 	}
 	if err := classifyBorgContext(parent); err != nil {
 		return nil, err
 	}
+	binding, err := b.bindCommand(stage)
+	if err != nil {
+		return nil, errors.New("collector backend failed")
+	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, b.config.Binary, args...)
-	cmd.Dir = dir
+	cmd := exec.Command(b.config.Binary, args...)
 	cmd.Env = append([]string(nil), b.environment...)
+	cmd.ExtraFiles = append([]*os.File(nil), binding.files...)
+	if stage != nil {
+		cmd.Dir = borgFDPath(3 + borgStateFileCount)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = borgWaitDelay
-	cmd.Cancel = func() error { return terminateBorgProcessGroup(cmd) }
-	stdout := &boundedBorgBuffer{limit: borgOutputLimit}
-	stderr := &boundedBorgBuffer{limit: borgOutputLimit}
+	overflow := make(chan struct{})
+	stdout := newBoundedBorgBuffer(borgOutputLimit, overflow)
+	stderr := newBoundedBorgBuffer(borgOutputLimit, overflow)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	runErr := cmd.Run()
-	cleanupErr := terminateBorgProcessGroup(cmd)
-	if err := classifyBorgContext(parent); err != nil {
+	if err := b.system.beforeStart(cmd); err != nil {
+		_ = binding.close()
+		return nil, errors.New("collector backend failed")
+	}
+	if err := prepareBorgCommand(cmd, binding, stage); err != nil {
+		_ = binding.close()
+		return nil, errors.New("collector backend failed")
+	}
+	if err := classifyBorgContext(ctx); err != nil {
+		_ = binding.close()
 		return nil, err
+	}
+	if !binding.valid() || (stage != nil && !stage.valid()) {
+		_ = binding.close()
+		return nil, errors.New("collector backend failed")
+	}
+	if err := cmd.Start(); err != nil {
+		_ = binding.close()
+		if contextErr := classifyBorgContext(parent); contextErr != nil {
+			return nil, contextErr
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, errors.New("collector backend timeout")
+		}
+		return nil, errors.New("collector backend failed")
+	}
+	noReap := make(chan error, 1)
+	go func() { noReap <- b.system.waitNoReap(cmd.Process.Pid) }()
+	var noReapErr, killErr error
+	select {
+	case noReapErr = <-noReap:
+		killErr = b.system.killProcessGroup(cmd.Process.Pid)
+	case <-ctx.Done():
+		killErr = b.system.killProcessGroup(cmd.Process.Pid)
+		noReapErr = <-noReap
+	case <-overflow:
+		killErr = b.system.killProcessGroup(cmd.Process.Pid)
+		noReapErr = <-noReap
+	}
+	waitErr := b.system.waitProcess(cmd)
+	bindingValid := binding.valid()
+	closeErr := binding.close()
+	if contextErr := classifyBorgContext(parent); contextErr != nil {
+		return nil, contextErr
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, errors.New("collector backend timeout")
 	}
-	if cleanupErr != nil || runErr != nil || stdout.overflow || stderr.overflow {
+	if noReapErr != nil || killErr != nil || waitErr != nil || closeErr != nil || !bindingValid || stdout.overflow.Load() || stderr.overflow.Load() {
 		return nil, errors.New("collector backend failed")
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
-}
-
-func terminateBorgProcessGroup(cmd *exec.Cmd) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	if err == nil || errors.Is(err, syscall.ESRCH) {
-		return nil
-	}
-	return err
 }
 
 func classifyBorgContext(ctx context.Context) error {
@@ -223,23 +275,38 @@ func classifyBorgContext(ctx context.Context) error {
 }
 
 type boundedBorgBuffer struct {
-	bytes.Buffer
+	buffer   bytes.Buffer
 	limit    int
-	overflow bool
+	signal   chan struct{}
+	once     sync.Once
+	overflow atomic.Bool
+}
+
+func newBoundedBorgBuffer(limit int, signal chan struct{}) *boundedBorgBuffer {
+	return &boundedBorgBuffer{limit: limit, signal: signal}
 }
 
 func (b *boundedBorgBuffer) Write(p []byte) (int, error) {
-	remaining := b.limit - b.Len()
+	remaining := b.limit - b.buffer.Len()
 	if remaining <= 0 {
-		b.overflow = true
+		b.markOverflow()
 		return 0, errBorgOutputLimit
 	}
 	if len(p) > remaining {
-		_, _ = b.Buffer.Write(p[:remaining])
-		b.overflow = true
+		_, _ = b.buffer.Write(p[:remaining])
+		b.markOverflow()
 		return remaining, errBorgOutputLimit
 	}
-	return b.Buffer.Write(p)
+	return b.buffer.Write(p)
+}
+
+func (b *boundedBorgBuffer) Bytes() []byte {
+	return b.buffer.Bytes()
+}
+
+func (b *boundedBorgBuffer) markOverflow() {
+	b.overflow.Store(true)
+	b.once.Do(func() { close(b.signal) })
 }
 
 func parseBorgList(output []byte, location *time.Location) ([]ArchiveInfo, error) {
@@ -392,13 +459,27 @@ func validBorgObject(object PendingObject) (digest, dir, name string, ok bool) {
 }
 
 func validBorgConfig(config BorgConfig) bool {
-	return config.Binary != "" && config.Repository != "" && validAbsoluteCleanPath(config.SSHKeyFile) && validAbsoluteCleanPath(config.KnownHostsFile) &&
+	return config.Binary != "" && config.Repository != "" && validBorgSSHPath(config.SSHKeyFile) && validBorgSSHPath(config.KnownHostsFile) &&
 		validAbsoluteCleanPath(config.WorkDir) && config.CreateTimeout > 0 && config.QueryTimeout > 0 &&
 		!containsNUL(config.Binary) && !containsNUL(config.Repository)
 }
 
 func validAbsoluteCleanPath(path string) bool {
 	return path != "" && filepath.IsAbs(path) && filepath.Clean(path) == path && !containsNUL(path)
+}
+
+func validBorgSSHPath(path string) bool {
+	if !validAbsoluteCleanPath(path) {
+		return false
+	}
+	for i := 0; i < len(path); i++ {
+		value := path[i]
+		if value == '/' || value == '.' || value == '_' || value == '-' || value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func ensureBorgStateDirectory(parentFD int, name string) error {
@@ -410,28 +491,31 @@ func ensureBorgStateDirectory(parentFD int, name string) error {
 			return err
 		}
 		created = true
-	} else if err != nil {
-		return err
+		if unix.Fstatat(parentFD, name, &before, unix.AT_SYMLINK_NOFOLLOW) != nil || !ownedBorgDirectoryMetadata(&before) {
+			return errors.New("unsafe Borg state directory")
+		}
+	} else if err != nil || !safeBorgDirectoryMetadata(&before) {
+		return errors.New("unsafe Borg state directory")
 	}
 	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
 	defer unix.Close(fd)
+	var opened unix.Stat_t
+	if unix.Fstat(fd, &opened) != nil || !ownedBorgDirectoryMetadata(&opened) || !sameInode(&before, &opened) {
+		return errors.New("unsafe Borg state directory")
+	}
 	if created {
 		if err := unix.Fchmod(fd, 0o700); err != nil {
 			return err
 		}
 	}
-	var opened unix.Stat_t
 	if unix.Fstat(fd, &opened) != nil || !safeBorgDirectoryMetadata(&opened) {
 		return errors.New("unsafe Borg state directory")
 	}
 	var current unix.Stat_t
 	if unix.Fstatat(parentFD, name, &current, unix.AT_SYMLINK_NOFOLLOW) != nil || !sameInode(&opened, &current) || !safeBorgDirectoryMetadata(&current) {
-		return errors.New("unsafe Borg state directory")
-	}
-	if !created && !sameInode(&before, &opened) {
 		return errors.New("unsafe Borg state directory")
 	}
 	if created {
@@ -459,18 +543,9 @@ func nonBorgEnvironment(environment []string) []string {
 }
 
 func borgSSHCommand(identity, knownHosts string) string {
-	return "ssh -i " + quoteBorgSSHArgument(identity) +
-		" -o IdentitiesOnly=yes -o UserKnownHostsFile=" + quoteBorgSSHArgument(knownHosts) +
+	return "ssh -i " + identity +
+		" -o IdentitiesOnly=yes -o UserKnownHostsFile=" + knownHosts +
 		" -o StrictHostKeyChecking=yes -p 23"
-}
-
-func quoteBorgSSHArgument(value string) string {
-	if value != "" && strings.IndexFunc(value, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("/_.,:@%+=-", r))
-	}) == -1 {
-		return value
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func containsNUL(value string) bool { return strings.IndexByte(value, 0) >= 0 }

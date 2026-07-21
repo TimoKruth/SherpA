@@ -54,10 +54,11 @@ func TestBorgCreateBuildsFixedArgumentsWithoutShell(t *testing.T) {
 	if want := []string{"list", "--json"}; !reflect.DeepEqual(calls[1].Args, want) {
 		t.Fatalf("list args = %#v, want %#v", calls[1].Args, want)
 	}
-	gotDir, gotErr := os.Stat(calls[0].Dir)
-	wantDir, wantErr := os.Stat(filepath.Dir(object.EncryptedPath))
-	if gotErr != nil || wantErr != nil || !os.SameFile(gotDir, wantDir) {
+	if base := filepath.Base(calls[0].Dir); !borgStageNamePattern.MatchString(base) {
 		t.Fatalf("create directory = %q", calls[0].Dir)
+	}
+	if strings.Contains(calls[0].Dir, filepath.Dir(object.EncryptedPath)) {
+		t.Fatalf("create followed source parent path: %q", calls[0].Dir)
 	}
 	for _, arg := range calls[0].Args {
 		if strings.ContainsAny(arg, ";|&$`\n") {
@@ -418,6 +419,17 @@ func runBorgTestHelper() int {
 	}
 	if action == "create" {
 		switch mode {
+		case "capture-create-exact":
+			data, err := os.ReadFile(os.Args[len(os.Args)-1])
+			if err != nil {
+				return 92
+			}
+			if err := os.WriteFile(os.Getenv("COLLECTOR_BORG_CAPTURE"), data, 0o600); err != nil {
+				return 91
+			}
+			if err := signalBorgTestHelperAndWait(); err != nil {
+				return 90
+			}
 		case "create-failure-exact", "create-failure-absent", "create-failure-list-failure":
 			fmt.Fprintln(os.Stdout, "stdout-private-canary")
 			fmt.Fprintln(os.Stderr, "stderr-private-canary")
@@ -441,8 +453,29 @@ func runBorgTestHelper() int {
 		return 0
 	}
 	switch mode {
-	case "exact", "create-failure-exact", "create-timeout-exact", "create-overflow-exact", "create-waitdelay-exact", "replace-during-create-exact":
+	case "exact", "capture-create-exact", "create-failure-exact", "create-timeout-exact", "create-overflow-exact", "create-waitdelay-exact", "replace-during-create-exact":
 		fmt.Printf(`{"archives":[{"name":"sherpa-%s","start":"2024-01-02T03:04:05.123456Z"}],"repository":{}}`, testDigestHex)
+	case "state-marker":
+		stateEnvironment := map[string]string{
+			"cache":    "BORG_CACHE_DIR",
+			"config":   "BORG_CONFIG_DIR",
+			"security": "BORG_SECURITY_DIR",
+		}
+		stateName := os.Getenv("COLLECTOR_BORG_STATE_NAME")
+		if stateName == "" {
+			stateName = "cache"
+		}
+		stateKey, ok := stateEnvironment[stateName]
+		if !ok {
+			return 87
+		}
+		if err := os.WriteFile(filepath.Join(os.Getenv(stateKey), "binding-marker"), []byte("descriptor-bound"), 0o600); err != nil {
+			return 89
+		}
+		if err := signalBorgTestHelperAndWait(); err != nil {
+			return 88
+		}
+		fmt.Print(`{"archives":[]}`)
 	case "replace-during-list-exact":
 		if err := replaceBorgTestObject(); err != nil {
 			return 93
@@ -459,6 +492,19 @@ func runBorgTestHelper() int {
 	case "overflow":
 		_, _ = os.Stdout.Write([]byte(strings.Repeat("x", 2<<20)))
 	case "sleep":
+		time.Sleep(30 * time.Second)
+	case "timeout-tree":
+		child := exec.Command("sleep", "30")
+		if err := startBorgTestDescendant(child); err != nil {
+			return 96
+		}
+		_ = child.Wait()
+	case "overflow-tree":
+		child := exec.Command("sleep", "30")
+		if err := startBorgTestDescendant(child); err != nil {
+			return 96
+		}
+		_, _ = os.Stdout.Write([]byte(strings.Repeat("x", 2<<20)))
 		time.Sleep(30 * time.Second)
 	case "tree":
 		child := exec.Command("sleep", "30")
@@ -521,6 +567,25 @@ func startBorgTestDescendant(child *exec.Cmd) error {
 		return err
 	}
 	return nil
+}
+
+func signalBorgTestHelperAndWait() error {
+	ready := os.Getenv("COLLECTOR_BORG_READ_READY")
+	if ready == "" {
+		return nil
+	}
+	if err := os.WriteFile(ready, nil, 0o600); err != nil {
+		return err
+	}
+	release := os.Getenv("COLLECTOR_BORG_HELPER_RELEASE")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(release); err == nil {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("helper release timeout")
 }
 
 func replaceBorgTestObject() error {

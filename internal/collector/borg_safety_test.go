@@ -288,9 +288,9 @@ func TestNewBorgBackendCreatesOnlyPrivateDescriptorRelativeState(t *testing.T) {
 		t.Fatalf("NewBorgBackend: %v", err)
 	}
 	wantEnv := map[string]string{
-		"BORG_CACHE_DIR":    filepath.Join(config.WorkDir, "cache"),
-		"BORG_CONFIG_DIR":   filepath.Join(config.WorkDir, "config"),
-		"BORG_SECURITY_DIR": filepath.Join(config.WorkDir, "security"),
+		"BORG_CACHE_DIR":    borgFDPath(3),
+		"BORG_CONFIG_DIR":   borgFDPath(4),
+		"BORG_SECURITY_DIR": borgFDPath(5),
 	}
 	gotEnv := make(map[string]string)
 	for _, item := range backend.environment {
@@ -303,6 +303,9 @@ func TestNewBorgBackendCreatesOnlyPrivateDescriptorRelativeState(t *testing.T) {
 		if gotEnv[key] != path {
 			t.Fatalf("%s = %q, want %q", key, gotEnv[key], path)
 		}
+	}
+	for _, name := range []string{"cache", "config", "security"} {
+		path := filepath.Join(config.WorkDir, name)
 		var stat unix.Stat_t
 		if err := unix.Lstat(path, &stat); err != nil {
 			t.Fatal(err)
