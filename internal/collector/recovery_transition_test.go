@@ -164,8 +164,11 @@ func TestIngestConcurrentDuplicateWaitsForOwnedPartialAndReusesWinner(t *testing
 	spoolOps := defaultSpoolOps()
 	rename := spoolOps.renameNoReplace
 	spoolOps.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
-		renameCalls.Add(1)
-		return rename(oldDirFD, oldName, newDirFD, newName)
+		err := rename(oldDirFD, oldName, newDirFD, newName)
+		if err == nil && completeAgePattern.MatchString(newName) {
+			renameCalls.Add(1)
+		}
+		return err
 	}
 	backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
 	fixture := newTransitionFixture(t, spoolOps, backend, func(encryptor *Encryptor, now func() time.Time) serviceOps {
@@ -237,7 +240,7 @@ func TestIngestConcurrentDuplicateWaitsUntilWinnerFinishesPostRename(t *testing.
 	rename := spoolOps.renameNoReplace
 	spoolOps.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
 		err := rename(oldDirFD, oldName, newDirFD, newName)
-		if err == nil {
+		if err == nil && completeAgePattern.MatchString(newName) {
 			renameCalls.Add(1)
 		}
 		return err
@@ -303,7 +306,7 @@ func TestIngestReconcilesTransientPostRenameFailures(t *testing.T) {
 				var failed atomic.Bool
 				ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
 					err := rename(oldDirFD, oldName, newDirFD, newName)
-					if err == nil {
+					if err == nil && completeAgePattern.MatchString(newName) {
 						renamed.Store(true)
 					}
 					return err
@@ -326,7 +329,7 @@ func TestIngestReconcilesTransientPostRenameFailures(t *testing.T) {
 				var failed atomic.Bool
 				ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
 					err := rename(oldDirFD, oldName, newDirFD, newName)
-					if err == nil {
+					if err == nil && completeAgePattern.MatchString(newName) {
 						renamed.Store(true)
 					}
 					return err
@@ -373,7 +376,7 @@ func TestIngestPersistentPostRenameFsyncFailureRetainsRecoverableCanonicalState(
 	failSync.Store(true)
 	ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
 		err := rename(oldDirFD, oldName, newDirFD, newName)
-		if err == nil {
+		if err == nil && completeAgePattern.MatchString(newName) {
 			renamed.Store(true)
 		}
 		return err
@@ -391,7 +394,16 @@ func TestIngestPersistentPostRenameFsyncFailureRetainsRecoverableCanonicalState(
 		t.Fatalf("Ingest error = %v", err)
 	}
 	entries := spoolEntryNames(t, fixture.spool.path)
-	if len(entries) != 1 || !completeAgePattern.MatchString(entries[0]) {
+	bound, final := 0, 0
+	for _, entry := range entries {
+		if plainPendingPattern.MatchString(entry) {
+			bound++
+		}
+		if completeAgePattern.MatchString(entry) {
+			final++
+		}
+	}
+	if len(entries) != 2 || bound != 1 || final != 1 {
 		t.Fatalf("recoverable canonical entries = %v", entries)
 	}
 	assertNoActiveSpoolReservations(t, fixture.spool)
@@ -896,11 +908,16 @@ func TestIngestPendingLedgerSyncFailureDeletesPublishedPending(t *testing.T) {
 	if err == nil || err.Error() != "collector local state failed" {
 		t.Fatalf("Ingest error = %v", err)
 	}
-	if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 0 {
+	entries := spoolEntryNames(t, fixture.spool.path)
+	if len(entries) != 1 || !plainPendingPattern.MatchString(entries[0]) {
 		t.Fatalf("pending sync failure entries = %v", entries)
 	}
 	if records, err := fixture.ledger.List(); err != nil || len(records) != 0 {
 		t.Fatalf("published pending record remains = %#v err=%v", records, err)
+	}
+	assertNoActiveSpoolReservations(t, fixture.spool)
+	if !fixture.status.Snapshot().TerminalLocalError {
+		t.Fatal("pending sync failure did not fail readiness closed")
 	}
 }
 
@@ -1030,9 +1047,10 @@ func TestWorkerNeverDeletesStoredOrphanLedger(t *testing.T) {
 	}
 }
 
-func TestServiceNineCrashBoundariesRestartToExactState(t *testing.T) {
+func TestServiceTenCrashBoundariesRestartToExactState(t *testing.T) {
 	points := []serviceCrashPoint{
 		crashAfterUploadPartial,
+		crashAfterPlaintextBind,
 		crashAfterAgePartial,
 		crashAfterPendingLedger,
 		crashAfterAgeRename,
@@ -1100,7 +1118,7 @@ func TestServiceNineCrashBoundariesRestartToExactState(t *testing.T) {
 				t.Fatalf("restart spool entries = %v", entries)
 			}
 			record, found, getErr := restartedLedger.Get(objectID)
-			early := point == crashAfterUploadPartial || point == crashAfterAgePartial || point == crashAfterPendingLedger
+			early := point == crashAfterUploadPartial
 			snapshot := status.Snapshot()
 			if early {
 				if getErr != nil || found {

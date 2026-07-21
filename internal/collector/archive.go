@@ -31,6 +31,7 @@ type serviceCrashPoint string
 
 const (
 	crashAfterUploadPartial    serviceCrashPoint = "upload-partial-write"
+	crashAfterPlaintextBind    serviceCrashPoint = "plaintext-bind"
 	crashAfterAgePartial       serviceCrashPoint = "age-partial-write"
 	crashAfterPendingLedger    serviceCrashPoint = "pending-ledger-write"
 	crashAfterAgeRename        serviceCrashPoint = "age-rename"
@@ -168,50 +169,93 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		return Result{}, s.localFailure()
 	}
-	reused := false
-	switch {
-	case hasRecord:
-		if record.CompressedSize != compressedSize {
-			if s.cleanupOwned(plaintextPath, "", "") != nil {
-				return Result{}, s.localFailure()
-			}
-			return Result{}, s.localFailure()
-		}
-		if hasFinal {
-			pending.ReceivedAt = record.ReceivedAt
-			if !recordMatchesPending(record, pending) {
-				if s.cleanupOwned(plaintextPath, "", "") != nil {
-					return Result{}, s.localFailure()
-				}
-				return Result{}, s.localFailure()
-			}
-			reused = true
-		} else if record.StoredAt != nil {
-			pending, err = s.pendingFromRecord(record)
-			if err != nil {
-				if s.cleanupOwned(plaintextPath, "", "") != nil {
-					return Result{}, s.localFailure()
-				}
-				return Result{}, s.localFailure()
-			}
-			reused = true
-		} else {
-			if s.cleanupOwned(plaintextPath, "", "") != nil {
-				return Result{}, s.localFailure()
-			}
-			return Result{}, s.localFailure()
-		}
-	case hasFinal:
+	bound, hasBound, err := s.findBoundPlaintext(objectID)
+	if err != nil {
 		if s.cleanupOwned(plaintextPath, "", "") != nil {
 			return Result{}, s.localFailure()
 		}
 		return Result{}, s.localFailure()
-	default:
-		partialPath, finalPath, pathErr := s.spool.EncryptedPaths(objectID)
-		if pathErr != nil {
-			if s.cleanupOwned(plaintextPath, "", "") != nil {
+	}
+	if hasBound {
+		if err := s.validateBoundPlaintext(ctx, bound, objectID, compressedSize); err != nil {
+			_ = s.spool.ReleasePlaintext(bound.Path)
+			_ = s.spool.ReleasePlaintext(plaintextPath)
+			return Result{}, s.localFailure()
+		}
+		if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
+			return Result{}, s.localFailure()
+		}
+		plaintextPath = bound.Path
+	}
+	bindFresh := func() error {
+		if hasBound {
+			return nil
+		}
+		outcome, bindErr := s.spool.bindPlaintext(plaintextPath, objectID, receivedAt)
+		if bindErr != nil {
+			if outcome.renamed {
+				_ = s.spool.ReleasePlaintext(outcome.path)
+			} else {
+				_ = s.spool.RemovePlaintext(plaintextPath)
+			}
+			return bindErr
+		}
+		if outcome.reused {
+			reusedBound, found, discoverErr := s.findBoundPlaintext(objectID)
+			if discoverErr != nil || !found || s.validateBoundPlaintext(ctx, reusedBound, objectID, compressedSize) != nil {
+				_ = s.spool.ReleasePlaintext(outcome.path)
+				_ = s.spool.ReleasePlaintext(plaintextPath)
+				return errors.New("collector plaintext invalid")
+			}
+			if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
+				return err
+			}
+			bound = reusedBound
+		} else {
+			bound = PlainObject{ObjectID: objectID, DigestHex: objectID[len("sha256:"):], Path: outcome.path, CompressedSize: compressedSize, ReceivedAt: receivedAt}
+		}
+		plaintextPath = bound.Path
+		hasBound = true
+		return nil
+	}
+
+	reused := false
+	if hasRecord && record.CompressedSize == compressedSize && hasFinal {
+		pending.ReceivedAt = record.ReceivedAt
+		if recordMatchesPending(record, pending) {
+			if hasBound {
+				if err := s.spool.syncEncrypted(pending.EncryptedPath, pending.EncryptedSize); err != nil {
+					_ = s.spool.ReleasePlaintext(plaintextPath)
+					return Result{}, s.localFailure()
+				}
+			}
+			if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
 				return Result{}, s.localFailure()
 			}
+			if err := s.crash(crashAfterPlaintextRemoval); err != nil {
+				return Result{}, err
+			}
+			reused = true
+		}
+	}
+	if !reused {
+		if err := bindFresh(); err != nil {
+			return Result{}, s.localFailure()
+		}
+		if err := s.crash(crashAfterPlaintextBind); err != nil {
+			return Result{}, err
+		}
+		if hasRecord && record.CompressedSize != compressedSize {
+			_ = s.spool.ReleasePlaintext(plaintextPath)
+			return Result{}, s.localFailure()
+		}
+		if hasFinal {
+			_ = s.spool.ReleasePlaintext(plaintextPath)
+			return Result{}, s.localFailure()
+		}
+		partialPath, finalPath, pathErr := s.spool.EncryptedPaths(objectID)
+		if pathErr != nil {
+			_ = s.spool.ReleasePlaintext(plaintextPath)
 			return Result{}, s.localFailure()
 		}
 		encryptedSize, encryptErr := s.ops.encryptFile(ctx, plaintextPath, partialPath)
@@ -234,23 +278,21 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 			}
 			return Result{}, s.localFailure()
 		}
+		pendingReceivedAt := receivedAt
+		if hasRecord {
+			pendingReceivedAt = record.ReceivedAt
+		} else if !bound.ReceivedAt.IsZero() {
+			pendingReceivedAt = bound.ReceivedAt
+		}
 		pending = PendingObject{
 			ObjectID: objectID, DigestHex: digest, ArchiveName: "sherpa-" + digest,
-			EncryptedPath: finalPath, EncryptedSize: encryptedSize, ReceivedAt: receivedAt,
+			EncryptedPath: finalPath, EncryptedSize: encryptedSize, ReceivedAt: pendingReceivedAt,
 		}
 		record, err = s.publishEncrypted(plaintextPath, partialPath, finalPath, pending, compressedSize)
 		if err != nil {
 			return Result{}, err
 		}
 		pending.ReceivedAt = record.ReceivedAt
-	}
-	if reused {
-		if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
-			return Result{}, s.localFailure()
-		}
-		if err := s.crash(crashAfterPlaintextRemoval); err != nil {
-			return Result{}, err
-		}
 	}
 	s.publishGate.release()
 	publicationHeld = false
@@ -272,6 +314,19 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 func (s *Service) publishEncrypted(plaintextPath, partialPath, finalPath string, object PendingObject, compressedSize int64) (ObjectRecord, error) {
 	record, cleanupPending, err := s.ensurePendingRecord(object, compressedSize)
 	if err != nil {
+		if plainPendingPattern.MatchString(filepath.Base(plaintextPath)) {
+			failed := s.spool.DiscardEncryptedPartial(partialPath) != nil
+			if cleanupPending && s.ledger.DeletePending(object.ObjectID) != nil {
+				failed = true
+			}
+			if s.spool.ReleasePlaintext(plaintextPath) != nil {
+				failed = true
+			}
+			if failed {
+				return ObjectRecord{}, s.localFailure()
+			}
+			return ObjectRecord{}, err
+		}
 		pendingID := ""
 		if cleanupPending {
 			pendingID = object.ObjectID
@@ -315,13 +370,9 @@ func (s *Service) publishEncrypted(plaintextPath, partialPath, finalPath string,
 		return ObjectRecord{}, s.localFailure()
 	}
 	if commitErr != nil {
-		verified, finalizeErr := s.spool.finalizeEncrypted(finalPath, object.EncryptedSize, outcome.identity)
+		_, finalizeErr := s.spool.finalizeEncrypted(finalPath, object.EncryptedSize, outcome.identity)
 		if finalizeErr != nil {
-			if verified {
-				_ = s.spool.RemovePlaintext(plaintextPath)
-			} else {
-				_ = s.spool.ReleasePlaintext(plaintextPath)
-			}
+			_ = s.spool.ReleasePlaintext(plaintextPath)
 			return ObjectRecord{}, s.localFailure()
 		}
 	}
@@ -437,6 +488,118 @@ func (s *Service) CommitPending(ctx context.Context, object PendingObject) (bool
 	return existing, nil
 }
 
+func (s *Service) findBoundPlaintext(objectID string) (PlainObject, bool, error) {
+	objects, err := s.spool.DiscoverPlaintexts()
+	if err != nil {
+		return PlainObject{}, false, err
+	}
+	for _, object := range objects {
+		if object.ObjectID == objectID {
+			return object, true, nil
+		}
+	}
+	return PlainObject{}, false, nil
+}
+
+func (s *Service) validateBoundPlaintext(ctx context.Context, object PlainObject, objectID string, compressedSize int64) error {
+	if object.ObjectID != objectID || object.CompressedSize != compressedSize || object.Path == "" {
+		return errors.New("collector plaintext invalid")
+	}
+	if _, err := s.ops.validateFile(ctx, object.Path, s.limits); err != nil {
+		return errors.New("collector plaintext invalid")
+	}
+	digestID, size, err := s.spool.HashPlaintext(object.Path)
+	if err != nil || digestID != objectID || size != compressedSize {
+		return errors.New("collector plaintext invalid")
+	}
+	return nil
+}
+
+func (s *Service) recoverBoundPlaintexts(ctx context.Context) error {
+	if err := s.publishGate.acquire(ctx); err != nil {
+		return errors.New("collector startup cancelled")
+	}
+	defer s.publishGate.release()
+	objects, err := s.spool.DiscoverPlaintexts()
+	if err != nil {
+		return s.localFailure()
+	}
+	for _, plain := range objects {
+		if err := s.recoverBoundPlaintextLocked(ctx, plain); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) recoverBoundPlaintextLocked(ctx context.Context, plain PlainObject) error {
+	if err := s.validateBoundPlaintext(ctx, plain, plain.ObjectID, plain.CompressedSize); err != nil {
+		_ = s.spool.ReleasePlaintext(plain.Path)
+		return s.localFailure()
+	}
+	record, hasRecord, err := s.ledger.Get(plain.ObjectID)
+	if err != nil {
+		_ = s.spool.ReleasePlaintext(plain.Path)
+		return s.localFailure()
+	}
+	final, hasFinal, err := s.findDurableObject(plain.ObjectID)
+	if err != nil {
+		_ = s.spool.ReleasePlaintext(plain.Path)
+		return s.localFailure()
+	}
+	if hasRecord && record.CompressedSize != plain.CompressedSize {
+		_ = s.spool.ReleasePlaintext(plain.Path)
+		return s.localFailure()
+	}
+	if hasFinal {
+		if !hasRecord {
+			_ = s.spool.ReleasePlaintext(plain.Path)
+			return s.localFailure()
+		}
+		final.ReceivedAt = record.ReceivedAt
+		if !recordMatchesPending(record, final) || s.spool.syncEncrypted(final.EncryptedPath, final.EncryptedSize) != nil {
+			_ = s.spool.ReleasePlaintext(plain.Path)
+			return s.localFailure()
+		}
+		if err := s.spool.RemovePlaintext(plain.Path); err != nil {
+			return s.localFailure()
+		}
+		return nil
+	}
+	partialPath, finalPath, err := s.spool.EncryptedPaths(plain.ObjectID)
+	if err != nil {
+		_ = s.spool.ReleasePlaintext(plain.Path)
+		return s.localFailure()
+	}
+	encryptedSize, err := s.ops.encryptFile(ctx, plain.Path, partialPath)
+	if err != nil || encryptedSize <= 0 {
+		_ = s.spool.DiscardEncryptedPartial(partialPath)
+		_ = s.spool.ReleasePlaintext(plain.Path)
+		return s.localFailure()
+	}
+	receivedAt := plain.ReceivedAt
+	if hasRecord {
+		receivedAt = record.ReceivedAt
+	}
+	digest, ok := canonicalDigest(plain.ObjectID)
+	if !ok || receivedAt.IsZero() {
+		_ = s.spool.DiscardEncryptedPartial(partialPath)
+		_ = s.spool.ReleasePlaintext(plain.Path)
+		return s.localFailure()
+	}
+	pending := PendingObject{
+		ObjectID: plain.ObjectID, DigestHex: digest, ArchiveName: "sherpa-" + digest,
+		EncryptedPath: finalPath, EncryptedSize: encryptedSize, ReceivedAt: receivedAt,
+	}
+	if hasRecord && !recordMatchesPending(record, pending) {
+		_ = s.spool.DiscardEncryptedPartial(partialPath)
+		_ = s.spool.ReleasePlaintext(plain.Path)
+		return s.localFailure()
+	}
+	_, err = s.publishEncrypted(plain.Path, partialPath, finalPath, pending, plain.CompressedSize)
+	return err
+}
+
 func (s *Service) findDurableObject(objectID string) (PendingObject, bool, error) {
 	objects, err := s.spool.Discover()
 	if err != nil {
@@ -448,18 +611,6 @@ func (s *Service) findDurableObject(objectID string) (PendingObject, bool, error
 		}
 	}
 	return PendingObject{}, false, nil
-}
-
-func (s *Service) pendingFromRecord(record ObjectRecord) (PendingObject, error) {
-	digest, ok := canonicalDigest(record.ObjectID)
-	if !ok || record.ArchiveName != "sherpa-"+digest || record.EncryptedSize <= 0 || record.ReceivedAt.IsZero() {
-		return PendingObject{}, errors.New("collector record invalid")
-	}
-	return PendingObject{
-		ObjectID: record.ObjectID, DigestHex: digest, ArchiveName: record.ArchiveName,
-		EncryptedPath: filepath.Join(s.spool.path, digest+".tar.gz.age"),
-		EncryptedSize: record.EncryptedSize, ReceivedAt: record.ReceivedAt,
-	}, nil
 }
 
 func (s *Service) ensurePendingRecord(object PendingObject, compressedSize int64) (ObjectRecord, bool, error) {

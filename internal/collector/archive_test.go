@@ -64,8 +64,8 @@ func TestIngestRemovesPlaintextOnlyAfterDurableEncryptedRename(t *testing.T) {
 		point serviceCrashPoint
 		want  []string
 	}{
-		{"age partial", crashAfterAgePartial, []string{".upload.partial", ".age.partial"}},
-		{"age rename", crashAfterAgeRename, []string{".upload.partial", ".age"}},
+		{"age partial", crashAfterAgePartial, []string{".plain.pending", ".age.partial"}},
+		{"age rename", crashAfterAgeRename, []string{".plain.pending", ".age"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newServiceFixture(t)

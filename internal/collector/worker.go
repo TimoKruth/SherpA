@@ -184,14 +184,20 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w == nil || w.spool == nil || w.ledger == nil || w.service == nil || w.status == nil || w.retryInterval <= 0 || w.ops.now == nil || w.ops.wait == nil || ctx == nil {
 		return errors.New("collector local state failed")
 	}
-	if _, err := w.spool.CleanupAbandonedPartials(); err != nil {
-		return w.terminalFailure()
-	}
 	if err := w.spool.CheckWritable(); err != nil {
 		w.status.SetSpoolWritable(false)
 		return w.terminalFailure()
 	}
 	w.status.SetSpoolWritable(true)
+	if err := w.service.recoverBoundPlaintexts(ctx); err != nil {
+		if ctx.Err() != nil && !w.status.Snapshot().TerminalLocalError {
+			return nil
+		}
+		return err
+	}
+	if _, err := w.spool.CleanupAbandonedPartials(); err != nil {
+		return w.terminalFailure()
+	}
 
 	queue, err := w.reconcileStartup(ctx)
 	if err != nil {
