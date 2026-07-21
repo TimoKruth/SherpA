@@ -260,30 +260,22 @@ func TestBorgCreateRequiresExactPostCreateVerification(t *testing.T) {
 	}
 }
 
-func TestBorgCreateRejectsNonzeroAndAmbiguousOutcomes(t *testing.T) {
-	backend, logPath := newTestBorgBackend(t, "create-failure")
-	err := backend.Create(context.Background(), testPendingObject(t))
-	if err == nil || err.Error() != "collector backend failed" {
-		t.Fatalf("Create error = %v", err)
-	}
-	if calls := readBorgInvocations(t, logPath); len(calls) != 1 {
-		t.Fatalf("nonzero create triggered verification: %#v", calls)
-	}
-}
-
 func TestBorgListParsesTimestampsAndSortsDeterministically(t *testing.T) {
 	backend, _ := newTestBorgBackend(t, "list")
 	archives, err := backend.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	want := []ArchiveInfo{
-		{Name: "sherpa-a", StartedAt: time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.UTC)},
-		{Name: "sherpa-b", StartedAt: time.Date(2024, 1, 2, 4, 4, 5, 0, time.UTC)},
-		{Name: "sherpa-c", StartedAt: time.Date(2024, 1, 3, 3, 4, 5, 0, time.UTC)},
+	assertArchiveNames(t, archives, []string{"sherpa-a", "sherpa-b", "sherpa-c"})
+	if !archives[0].StartedAt.Equal(time.Date(2024, 1, 2, 3, 4, 5, 123456000, time.Local)) || archives[0].StartedAt.Location() != time.Local {
+		t.Fatalf("zone-less start = %v in %v", archives[0].StartedAt, archives[0].StartedAt.Location())
 	}
-	if !reflect.DeepEqual(archives, want) {
-		t.Fatalf("archives = %#v, want %#v", archives, want)
+	_, offset := archives[1].StartedAt.Zone()
+	if !archives[1].StartedAt.Equal(time.Date(2024, 1, 2, 4, 4, 5, 0, time.UTC)) || offset != 60*60 {
+		t.Fatalf("offset start = %v with offset %d", archives[1].StartedAt, offset)
+	}
+	if !archives[2].StartedAt.Equal(time.Date(2024, 1, 3, 3, 4, 5, 0, time.UTC)) {
+		t.Fatalf("UTC start = %v", archives[2].StartedAt)
 	}
 }
 
@@ -351,10 +343,16 @@ func TestNewBorgBackendRejectsSymlinkWorkDirectoryWithoutChangingTarget(t *testi
 
 func newTestBorgBackend(t testing.TB, mode string) (*BorgBackend, string) {
 	t.Helper()
+	return newTestBorgBackendForObject(t, mode, "")
+}
+
+func newTestBorgBackendForObject(t testing.TB, mode, objectPath string) (*BorgBackend, string) {
+	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "borg-invocations.jsonl")
 	t.Setenv("COLLECTOR_BORG_HELPER", "1")
 	t.Setenv("COLLECTOR_BORG_MODE", mode)
 	t.Setenv("COLLECTOR_BORG_LOG", logPath)
+	t.Setenv("COLLECTOR_BORG_OBJECT_PATH", objectPath)
 	backend, err := NewBorgBackend(testBorgConfig(t))
 	if err != nil {
 		t.Fatalf("NewBorgBackend: %v", err)
@@ -369,7 +367,7 @@ func testBorgConfig(t testing.TB) BorgConfig {
 		Repository:     borgTestRepository,
 		SSHKeyFile:     borgTestSSHKey,
 		KnownHostsFile: borgTestKnownHosts,
-		WorkDir:        filepath.Join(t.TempDir(), "borg-work"),
+		WorkDir:        newPrivateDir(t),
 		CreateTimeout:  2 * time.Second,
 		QueryTimeout:   2 * time.Second,
 	}
@@ -377,7 +375,7 @@ func testBorgConfig(t testing.TB) BorgConfig {
 
 func testPendingObject(t testing.TB) PendingObject {
 	t.Helper()
-	dir := t.TempDir()
+	dir := newPrivateDir(t)
 	path := filepath.Join(dir, testDigestHex+".tar.gz.age")
 	if err := os.WriteFile(path, []byte("encrypted-object-canary"), 0o600); err != nil {
 		t.Fatal(err)
@@ -419,16 +417,43 @@ func runBorgTestHelper() int {
 		action = os.Args[1]
 	}
 	if action == "create" {
-		if mode == "create-failure" {
+		switch mode {
+		case "create-failure-exact", "create-failure-absent", "create-failure-list-failure":
 			fmt.Fprintln(os.Stdout, "stdout-private-canary")
 			fmt.Fprintln(os.Stderr, "stderr-private-canary")
 			return 9
+		case "create-timeout-exact":
+			time.Sleep(30 * time.Second)
+		case "create-overflow-exact":
+			_, _ = os.Stdout.Write([]byte(strings.Repeat("x", 2<<20)))
+		case "create-waitdelay-exact":
+			child := exec.Command("sleep", "30")
+			child.Stdout = os.Stdout
+			child.Stderr = os.Stderr
+			if err := child.Start(); err != nil {
+				return 96
+			}
+		case "replace-during-create-exact":
+			if err := replaceBorgTestObject(); err != nil {
+				return 93
+			}
 		}
 		return 0
 	}
 	switch mode {
-	case "exact", "create-failure":
+	case "exact", "create-failure-exact", "create-timeout-exact", "create-overflow-exact", "create-waitdelay-exact", "replace-during-create-exact":
 		fmt.Printf(`{"archives":[{"name":"sherpa-%s","start":"2024-01-02T03:04:05.123456Z"}],"repository":{}}`, testDigestHex)
+	case "replace-during-list-exact":
+		if err := replaceBorgTestObject(); err != nil {
+			return 93
+		}
+		fmt.Printf(`{"archives":[{"name":"sherpa-%s","start":"2024-01-02T03:04:05.123456Z"}]}`, testDigestHex)
+	case "create-failure-absent":
+		fmt.Print(`{"archives":[]}`)
+	case "create-failure-list-failure":
+		return 8
+	case "create-success-list-sleep":
+		time.Sleep(30 * time.Second)
 	case "nonmatches":
 		fmt.Printf(`{"archives":[{"name":"xsherpa-%[1]s","start":"2024-01-02T03:04:05Z"},{"name":"sherpa-%[1]s-extra","start":"2024-01-02T03:04:05Z"},{"name":"sherpa-*","start":"2024-01-02T03:04:05Z"}]}`, testDigestHex)
 	case "overflow":
@@ -437,20 +462,36 @@ func runBorgTestHelper() int {
 		time.Sleep(30 * time.Second)
 	case "tree":
 		child := exec.Command("sleep", "30")
-		if err := child.Start(); err != nil {
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := startBorgTestDescendant(child); err != nil {
 			return 96
 		}
-		if err := os.WriteFile(os.Getenv("COLLECTOR_BORG_CHILD_PID"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
-			_ = child.Process.Kill()
-			return 95
-		}
 		_ = child.Wait()
+	case "tree-holds-pipe":
+		child := exec.Command("sleep", "30")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := startBorgTestDescendant(child); err != nil {
+			return 96
+		}
+	case "tree-closed-stdio":
+		if err := startBorgTestDescendant(exec.Command("sleep", "30")); err != nil {
+			return 96
+		}
+	case "tree-success":
+		if err := startBorgTestDescendant(exec.Command("sleep", "30")); err != nil {
+			return 96
+		}
+		fmt.Print(`{"archives":[]}`)
 	case "failure":
 		fmt.Fprintln(os.Stdout, "stdout-private-canary", borgTestRepository)
 		fmt.Fprintln(os.Stderr, "stderr-private-canary", borgTestSSHKey, borgTestKnownHosts)
 		return 8
 	case "list":
 		fmt.Print(`{"archives":[{"name":"sherpa-c","start":"2024-01-03T03:04:05Z"},{"name":"sherpa-b","start":"2024-01-02T05:04:05+01:00"},{"name":"sherpa-a","start":"2024-01-02T03:04:05.123456"}],"cache":{},"encryption":{},"repository":{}}`)
+	case "local-list":
+		fmt.Print(`{"archives":[{"name":"sherpa-zoned-one","start":"2024-01-15T13:00:00-08:00"},{"name":"sherpa-local-noon","start":"2024-01-15T12:00:00"}]}`)
 	case "malformed":
 		fmt.Print(`{"archives":[`)
 	case "missing-archives":
@@ -469,6 +510,29 @@ func runBorgTestHelper() int {
 		return 94
 	}
 	return 0
+}
+
+func startBorgTestDescendant(child *exec.Cmd) error {
+	if err := child.Start(); err != nil {
+		return err
+	}
+	if err := os.WriteFile(os.Getenv("COLLECTOR_BORG_CHILD_PID"), []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		_ = child.Process.Kill()
+		return err
+	}
+	return nil
+}
+
+func replaceBorgTestObject() error {
+	path := os.Getenv("COLLECTOR_BORG_OBJECT_PATH")
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(path, path+".original"); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(strings.Repeat("r", int(info.Size()))), 0o600)
 }
 
 func recordBorgInvocation() error {

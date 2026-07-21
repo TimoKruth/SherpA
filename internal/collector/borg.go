@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -37,21 +39,30 @@ type Backend interface {
 type BorgBackend struct {
 	config      BorgConfig
 	environment []string
+	location    *time.Location
 }
 
 func NewBorgBackend(config BorgConfig) (*BorgBackend, error) {
-	if !validBorgConfig(config) {
+	return newBorgBackend(config, time.Local)
+}
+
+func newBorgBackend(config BorgConfig, location *time.Location) (*BorgBackend, error) {
+	if !validBorgConfig(config) || location == nil {
 		return nil, errors.New("collector backend unavailable")
 	}
-	config.WorkDir = filepath.Clean(config.WorkDir)
-	cacheDir := filepath.Join(config.WorkDir, "cache")
-	configDir := filepath.Join(config.WorkDir, "config")
-	securityDir := filepath.Join(config.WorkDir, "security")
-	for _, dir := range []string{config.WorkDir, cacheDir, configDir, securityDir} {
-		if err := ensureBorgDirectory(dir); err != nil {
+	workFD, workPath, err := openPrivateDirectory(config.WorkDir)
+	if err != nil || workPath != config.WorkDir {
+		return nil, errors.New("collector backend unavailable")
+	}
+	defer unix.Close(workFD)
+	for _, name := range []string{"cache", "config", "security"} {
+		if err := ensureBorgStateDirectory(workFD, name); err != nil {
 			return nil, errors.New("collector backend unavailable")
 		}
 	}
+	cacheDir := filepath.Join(config.WorkDir, "cache")
+	configDir := filepath.Join(config.WorkDir, "config")
+	securityDir := filepath.Join(config.WorkDir, "security")
 	environment := append(nonBorgEnvironment(os.Environ()),
 		"BORG_REPO="+config.Repository,
 		"BORG_RSH="+borgSSHCommand(config.SSHKeyFile, config.KnownHostsFile),
@@ -60,28 +71,58 @@ func NewBorgBackend(config BorgConfig) (*BorgBackend, error) {
 		"BORG_SECURITY_DIR="+securityDir,
 		"BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes",
 	)
-	return &BorgBackend{config: config, environment: environment}, nil
+	return &BorgBackend{config: config, environment: environment, location: location}, nil
 }
 
-func (b *BorgBackend) Create(ctx context.Context, object PendingObject) error {
-	digest, dir, name, ok := validBorgObject(object)
-	if !ok || b == nil {
+func (b *BorgBackend) Create(ctx context.Context, object PendingObject) (retErr error) {
+	if b == nil {
 		return errors.New("collector backend failed")
 	}
-	if _, err := b.run(ctx, b.config.CreateTimeout, dir, "create", "--compression", "none", "::sherpa-"+digest, name); err != nil {
-		return err
-	}
-	archives, err := b.list(ctx)
+	held, err := openBorgInput(object)
 	if err != nil {
-		return err
+		return errors.New("collector backend failed")
 	}
-	want := "sherpa-" + digest
+	defer func() {
+		if held.close() != nil && retErr == nil {
+			retErr = errors.New("collector backend failed")
+		}
+	}()
+
+	if !held.valid() {
+		return errors.New("collector backend failed")
+	}
+	_, createErr := b.run(ctx, b.config.CreateTimeout, held.dir, "create", "--compression", "none", "::"+held.archiveName, held.name)
+	if !held.valid() {
+		return errors.New("collector backend failed")
+	}
+	if contextErr := classifyBorgContext(ctx); contextErr != nil {
+		return contextErr
+	}
+
+	archives, listErr := b.list(ctx)
+	if listErr != nil {
+		if contextErr := classifyBorgContext(ctx); contextErr != nil {
+			return contextErr
+		}
+		return errors.New("collector remote verification failed")
+	}
+	found := false
 	for _, archive := range archives {
-		if archive.Name == want {
-			return nil
+		if archive.Name == held.archiveName {
+			found = true
+			break
 		}
 	}
-	return errors.New("collector remote verification failed")
+	if !found {
+		if createErr != nil {
+			return createErr
+		}
+		return errors.New("collector remote verification failed")
+	}
+	if !held.valid() {
+		return errors.New("collector backend failed")
+	}
+	return nil
 }
 
 func (b *BorgBackend) Exists(ctx context.Context, objectID string) (bool, error) {
@@ -117,7 +158,7 @@ func (b *BorgBackend) list(ctx context.Context) ([]ArchiveInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	archives, err := parseBorgList(output)
+	archives, err := parseBorgList(output, b.location)
 	if err != nil {
 		return nil, errors.New("collector backend failed")
 	}
@@ -128,11 +169,8 @@ func (b *BorgBackend) run(parent context.Context, timeout time.Duration, dir str
 	if parent == nil || b == nil || timeout <= 0 {
 		return nil, errors.New("collector backend failed")
 	}
-	if errors.Is(parent.Err(), context.DeadlineExceeded) {
-		return nil, errors.New("collector backend timeout")
-	}
-	if parent.Err() != nil {
-		return nil, errors.New("collector backend cancelled")
+	if err := classifyBorgContext(parent); err != nil {
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -141,34 +179,47 @@ func (b *BorgBackend) run(parent context.Context, timeout time.Duration, dir str
 	cmd.Env = append([]string(nil), b.environment...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = borgWaitDelay
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return os.ErrProcessDone
-		}
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if err == nil || errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		return cmd.Process.Kill()
-	}
+	cmd.Cancel = func() error { return terminateBorgProcessGroup(cmd) }
 	stdout := &boundedBorgBuffer{limit: borgOutputLimit}
 	stderr := &boundedBorgBuffer{limit: borgOutputLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	runErr := cmd.Run()
-	if errors.Is(parent.Err(), context.DeadlineExceeded) {
-		return nil, errors.New("collector backend timeout")
-	}
-	if parent.Err() != nil {
-		return nil, errors.New("collector backend cancelled")
+	cleanupErr := terminateBorgProcessGroup(cmd)
+	if err := classifyBorgContext(parent); err != nil {
+		return nil, err
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, errors.New("collector backend timeout")
 	}
-	if runErr != nil || stdout.overflow || stderr.overflow {
+	if cleanupErr != nil || runErr != nil || stdout.overflow || stderr.overflow {
 		return nil, errors.New("collector backend failed")
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
+}
+
+func terminateBorgProcessGroup(cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	if err == nil || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
+}
+
+func classifyBorgContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("collector backend failed")
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return errors.New("collector backend timeout")
+	}
+	if ctx.Err() != nil {
+		return errors.New("collector backend cancelled")
+	}
+	return nil
 }
 
 type boundedBorgBuffer struct {
@@ -191,7 +242,10 @@ func (b *boundedBorgBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func parseBorgList(output []byte) ([]ArchiveInfo, error) {
+func parseBorgList(output []byte, location *time.Location) ([]ArchiveInfo, error) {
+	if location == nil {
+		return nil, errors.New("invalid Borg list")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(output))
 	var document map[string]json.RawMessage
 	if err := decoder.Decode(&document); err != nil || document == nil {
@@ -222,7 +276,7 @@ func parseBorgList(output []byte) ([]ArchiveInfo, error) {
 		if err := json.Unmarshal(item["start"], &start); err != nil || start == "" {
 			return nil, errors.New("invalid Borg list")
 		}
-		startedAt, err := parseBorgTime(start)
+		startedAt, err := parseBorgTime(start, location)
 		if err != nil {
 			return nil, errors.New("invalid Borg list")
 		}
@@ -237,16 +291,87 @@ func parseBorgList(output []byte) ([]ArchiveInfo, error) {
 	return archives, nil
 }
 
-func parseBorgTime(value string) (time.Time, error) {
+func parseBorgTime(value string, location *time.Location) (time.Time, error) {
 	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
-		return parsed.UTC(), nil
+		return parsed, nil
 	}
 	for _, layout := range []string{"2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05"} {
-		if parsed, err := time.ParseInLocation(layout, value, time.UTC); err == nil {
+		if parsed, err := time.ParseInLocation(layout, value, location); err == nil {
 			return parsed, nil
 		}
 	}
 	return time.Time{}, errors.New("invalid Borg timestamp")
+}
+
+type heldBorgInput struct {
+	dirFD       int
+	fileFD      int
+	dir         string
+	name        string
+	archiveName string
+	size        int64
+	stat        unix.Stat_t
+}
+
+func openBorgInput(object PendingObject) (*heldBorgInput, error) {
+	digest, dir, name, ok := validBorgObject(object)
+	if !ok || object.EncryptedSize < 0 {
+		return nil, errors.New("invalid Borg input")
+	}
+	dirFD, cleanDir, err := openPrivateDirectory(dir)
+	if err != nil || cleanDir != dir {
+		return nil, errors.New("invalid Borg input")
+	}
+	fileFD, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		_ = unix.Close(dirFD)
+		return nil, errors.New("invalid Borg input")
+	}
+	held := &heldBorgInput{dirFD: dirFD, fileFD: fileFD, dir: dir, name: name, archiveName: "sherpa-" + digest, size: object.EncryptedSize}
+	if unix.Fstat(fileFD, &held.stat) != nil || !safeRegularMetadata(&held.stat) || held.stat.Size != held.size || !sameDirectoryEntry(dirFD, name, &held.stat) {
+		_ = held.close()
+		return nil, errors.New("invalid Borg input")
+	}
+	return held, nil
+}
+
+func (h *heldBorgInput) valid() bool {
+	if h == nil || h.dirFD < 0 || h.fileFD < 0 {
+		return false
+	}
+	var dirStat unix.Stat_t
+	if unix.Fstat(h.dirFD, &dirStat) != nil || !safeBorgDirectoryMetadata(&dirStat) {
+		return false
+	}
+	var fileStat unix.Stat_t
+	if unix.Fstat(h.fileFD, &fileStat) != nil || !safeRegularMetadata(&fileStat) || fileStat.Size != h.size || !sameInode(&h.stat, &fileStat) {
+		return false
+	}
+	var entryStat unix.Stat_t
+	if unix.Fstatat(h.dirFD, h.name, &entryStat, unix.AT_SYMLINK_NOFOLLOW) != nil || !safeRegularMetadata(&entryStat) || entryStat.Size != h.size || !sameInode(&h.stat, &entryStat) {
+		return false
+	}
+	return true
+}
+
+func (h *heldBorgInput) close() error {
+	if h == nil {
+		return nil
+	}
+	var closeErr error
+	if h.fileFD >= 0 {
+		if err := unix.Close(h.fileFD); err != nil {
+			closeErr = err
+		}
+		h.fileFD = -1
+	}
+	if h.dirFD >= 0 {
+		if err := unix.Close(h.dirFD); err != nil && closeErr == nil {
+			closeErr = err
+		}
+		h.dirFD = -1
+	}
+	return closeErr
 }
 
 func validBorgObject(object PendingObject) (digest, dir, name string, ok bool) {
@@ -267,32 +392,58 @@ func validBorgObject(object PendingObject) (digest, dir, name string, ok bool) {
 }
 
 func validBorgConfig(config BorgConfig) bool {
-	return config.Binary != "" && config.Repository != "" && config.SSHKeyFile != "" && config.KnownHostsFile != "" &&
-		config.WorkDir != "" && filepath.IsAbs(config.WorkDir) && filepath.Clean(config.WorkDir) == config.WorkDir &&
-		config.CreateTimeout > 0 && config.QueryTimeout > 0 &&
-		!containsNUL(config.Binary) && !containsNUL(config.Repository) && !containsNUL(config.SSHKeyFile) &&
-		!containsNUL(config.KnownHostsFile) && !containsNUL(config.WorkDir)
+	return config.Binary != "" && config.Repository != "" && validAbsoluteCleanPath(config.SSHKeyFile) && validAbsoluteCleanPath(config.KnownHostsFile) &&
+		validAbsoluteCleanPath(config.WorkDir) && config.CreateTimeout > 0 && config.QueryTimeout > 0 &&
+		!containsNUL(config.Binary) && !containsNUL(config.Repository)
 }
 
-func ensureBorgDirectory(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		if err = os.MkdirAll(path, 0o700); err != nil {
+func validAbsoluteCleanPath(path string) bool {
+	return path != "" && filepath.IsAbs(path) && filepath.Clean(path) == path && !containsNUL(path)
+}
+
+func ensureBorgStateDirectory(parentFD int, name string) error {
+	var before unix.Stat_t
+	err := unix.Fstatat(parentFD, name, &before, unix.AT_SYMLINK_NOFOLLOW)
+	created := false
+	if errors.Is(err, unix.ENOENT) {
+		if err := unix.Mkdirat(parentFD, name, 0o700); err != nil {
 			return err
 		}
-		info, err = os.Lstat(path)
-	}
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("unsafe Borg directory")
-	}
-	if err := os.Chmod(path, 0o700); err != nil {
+		created = true
+	} else if err != nil {
 		return err
 	}
-	info, err = os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("unsafe Borg directory")
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	if created {
+		if err := unix.Fchmod(fd, 0o700); err != nil {
+			return err
+		}
+	}
+	var opened unix.Stat_t
+	if unix.Fstat(fd, &opened) != nil || !safeBorgDirectoryMetadata(&opened) {
+		return errors.New("unsafe Borg state directory")
+	}
+	var current unix.Stat_t
+	if unix.Fstatat(parentFD, name, &current, unix.AT_SYMLINK_NOFOLLOW) != nil || !sameInode(&opened, &current) || !safeBorgDirectoryMetadata(&current) {
+		return errors.New("unsafe Borg state directory")
+	}
+	if !created && !sameInode(&before, &opened) {
+		return errors.New("unsafe Borg state directory")
+	}
+	if created {
+		if err := unix.Fsync(parentFD); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func safeBorgDirectoryMetadata(stat *unix.Stat_t) bool {
+	return stat != nil && stat.Mode&unix.S_IFMT == unix.S_IFDIR && stat.Mode&0o7777 == 0o700 && stat.Uid == uint32(os.Geteuid()) && stat.Gid == uint32(os.Getegid())
 }
 
 func nonBorgEnvironment(environment []string) []string {

@@ -33,12 +33,16 @@ func TestBorgLocalRepositoryCreateAndExactPresence(t *testing.T) {
 	if err := os.WriteFile(objectPath, []byte("local-integration-encrypted-object"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	workDir := filepath.Join(root, "work")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	backend, err := NewBorgBackend(BorgConfig{
 		Binary:         binary,
 		Repository:     repository,
 		SSHKeyFile:     filepath.Join(root, "unused-key"),
 		KnownHostsFile: filepath.Join(root, "unused-known-hosts"),
-		WorkDir:        filepath.Join(root, "work"),
+		WorkDir:        workDir,
 		CreateTimeout:  time.Minute,
 		QueryTimeout:   time.Minute,
 	})
@@ -55,6 +59,13 @@ func TestBorgLocalRepositoryCreateAndExactPresence(t *testing.T) {
 	}
 	if err := backend.Create(context.Background(), object); err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	archives, err := backend.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(archives) != 1 || archives[0].Name != object.ArchiveName || archives[0].StartedAt.IsZero() || archives[0].StartedAt.Before(time.Now().Add(-5*time.Minute)) || archives[0].StartedAt.After(time.Now().Add(time.Minute)) {
+		t.Fatalf("archive metadata = %#v", archives)
 	}
 	exists, err := backend.Exists(context.Background(), object.ObjectID)
 	if err != nil || !exists {
