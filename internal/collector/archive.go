@@ -5,7 +5,7 @@ import (
 	"errors"
 	"io"
 	"math"
-	"sync"
+	"path/filepath"
 	"time"
 
 	"sherpa/internal/recoveryarchive"
@@ -48,16 +48,38 @@ type serviceOps struct {
 	crash        func(serviceCrashPoint) error
 }
 
+type serviceGate chan struct{}
+
+func newServiceGate() serviceGate {
+	gate := make(serviceGate, 1)
+	gate <- struct{}{}
+	return gate
+}
+
+func (g serviceGate) acquire(ctx context.Context) error {
+	if g == nil || ctx == nil {
+		return context.Canceled
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g:
+		return nil
+	}
+}
+
+func (g serviceGate) release() { g <- struct{}{} }
+
 type Service struct {
-	spool     *Spool
-	ledger    *Ledger
-	encryptor *Encryptor
-	backend   Backend
-	status    *StatusTracker
-	limits    recoveryarchive.Limits
-	ops       serviceOps
-	publishMu sync.Mutex
-	commitMu  sync.Mutex
+	spool       *Spool
+	ledger      *Ledger
+	encryptor   *Encryptor
+	backend     Backend
+	status      *StatusTracker
+	limits      recoveryarchive.Limits
+	ops         serviceOps
+	publishGate serviceGate
+	commitGate  serviceGate
 }
 
 func NewService(spool *Spool, ledger *Ledger, encryptor *Encryptor, backend Backend, status *StatusTracker, limits recoveryarchive.Limits) *Service {
@@ -77,11 +99,14 @@ func newService(spool *Spool, ledger *Ledger, encryptor *Encryptor, backend Back
 	if ops.crash == nil {
 		ops.crash = func(serviceCrashPoint) error { return nil }
 	}
-	return &Service{spool: spool, ledger: ledger, encryptor: encryptor, backend: backend, status: status, limits: limits, ops: ops}
+	return &Service{
+		spool: spool, ledger: ledger, encryptor: encryptor, backend: backend, status: status,
+		limits: limits, ops: ops, publishGate: newServiceGate(), commitGate: newServiceGate(),
+	}
 }
 
 func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (Result, error) {
-	if s == nil || s.spool == nil || s.ledger == nil || s.backend == nil || s.status == nil || s.ops.now == nil || s.ops.validateFile == nil || s.ops.encryptFile == nil || ctx == nil {
+	if s == nil || s.spool == nil || s.ledger == nil || s.backend == nil || s.status == nil || s.ops.now == nil || s.ops.validateFile == nil || s.ops.encryptFile == nil || s.publishGate == nil || s.commitGate == nil || ctx == nil {
 		return Result{}, errors.New("collector service unavailable")
 	}
 	if ctx.Err() != nil {
@@ -110,32 +135,78 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		return Result{}, errors.New("collector archive invalid")
 	}
+	if err := s.publishGate.acquire(ctx); err != nil {
+		if s.cleanupOwned(plaintextPath, "", "") != nil {
+			return Result{}, s.localFailure()
+		}
+		return Result{}, errors.New("collector ingestion canceled")
+	}
+	publicationHeld := true
+	defer func() {
+		if publicationHeld {
+			s.publishGate.release()
+		}
+	}()
+	if ctx.Err() != nil {
+		if s.cleanupOwned(plaintextPath, "", "") != nil {
+			return Result{}, s.localFailure()
+		}
+		return Result{}, errors.New("collector ingestion canceled")
+	}
 
-	pending, reused, err := s.findDurableObject(objectID)
+	pending, hasFinal, err := s.findDurableObject(objectID)
 	if err != nil {
 		if s.cleanupOwned(plaintextPath, "", "") != nil {
 			return Result{}, s.localFailure()
 		}
 		return Result{}, s.localFailure()
 	}
-	var record ObjectRecord
-	if reused {
-		var found bool
-		record, found, err = s.ledger.Get(objectID)
-		if err != nil || !found || record.CompressedSize != compressedSize {
+	record, hasRecord, err := s.ledger.Get(objectID)
+	if err != nil {
+		if s.cleanupOwned(plaintextPath, "", "") != nil {
+			return Result{}, s.localFailure()
+		}
+		return Result{}, s.localFailure()
+	}
+	reused := false
+	switch {
+	case hasRecord:
+		if record.CompressedSize != compressedSize {
 			if s.cleanupOwned(plaintextPath, "", "") != nil {
 				return Result{}, s.localFailure()
 			}
 			return Result{}, s.localFailure()
 		}
-		pending.ReceivedAt = record.ReceivedAt
-		if !recordMatchesPending(record, pending) {
+		if hasFinal {
+			pending.ReceivedAt = record.ReceivedAt
+			if !recordMatchesPending(record, pending) {
+				if s.cleanupOwned(plaintextPath, "", "") != nil {
+					return Result{}, s.localFailure()
+				}
+				return Result{}, s.localFailure()
+			}
+			reused = true
+		} else if record.StoredAt != nil {
+			pending, err = s.pendingFromRecord(record)
+			if err != nil {
+				if s.cleanupOwned(plaintextPath, "", "") != nil {
+					return Result{}, s.localFailure()
+				}
+				return Result{}, s.localFailure()
+			}
+			reused = true
+		} else {
 			if s.cleanupOwned(plaintextPath, "", "") != nil {
 				return Result{}, s.localFailure()
 			}
 			return Result{}, s.localFailure()
 		}
-	} else {
+	case hasFinal:
+		if s.cleanupOwned(plaintextPath, "", "") != nil {
+			return Result{}, s.localFailure()
+		}
+		return Result{}, s.localFailure()
+	default:
 		partialPath, finalPath, pathErr := s.spool.EncryptedPaths(objectID)
 		if pathErr != nil {
 			if s.cleanupOwned(plaintextPath, "", "") != nil {
@@ -164,12 +235,8 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 			return Result{}, s.localFailure()
 		}
 		pending = PendingObject{
-			ObjectID:      objectID,
-			DigestHex:     digest,
-			ArchiveName:   "sherpa-" + digest,
-			EncryptedPath: finalPath,
-			EncryptedSize: encryptedSize,
-			ReceivedAt:    receivedAt,
+			ObjectID: objectID, DigestHex: digest, ArchiveName: "sherpa-" + digest,
+			EncryptedPath: finalPath, EncryptedSize: encryptedSize, ReceivedAt: receivedAt,
 		}
 		record, err = s.publishEncrypted(plaintextPath, partialPath, finalPath, pending, compressedSize)
 		if err != nil {
@@ -177,7 +244,6 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		pending.ReceivedAt = record.ReceivedAt
 	}
-
 	if reused {
 		if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
 			return Result{}, s.localFailure()
@@ -186,6 +252,9 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 			return Result{}, err
 		}
 	}
+	s.publishGate.release()
+	publicationHeld = false
+
 	if record.StoredAt == nil {
 		s.status.RecordPending(pending.ObjectID, pending.ReceivedAt)
 	}
@@ -201,9 +270,6 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 }
 
 func (s *Service) publishEncrypted(plaintextPath, partialPath, finalPath string, object PendingObject, compressedSize int64) (ObjectRecord, error) {
-	s.publishMu.Lock()
-	defer s.publishMu.Unlock()
-
 	record, cleanupPending, err := s.ensurePendingRecord(object, compressedSize)
 	if err != nil {
 		pendingID := ""
@@ -219,15 +285,45 @@ func (s *Service) publishEncrypted(plaintextPath, partialPath, finalPath string,
 	if err := s.crash(crashAfterPendingLedger); err != nil {
 		return ObjectRecord{}, err
 	}
-	if err := s.spool.CommitEncrypted(partialPath, finalPath); err != nil {
+	outcome, commitErr := s.spool.commitEncrypted(partialPath, finalPath)
+	if commitErr != nil && !outcome.renamed {
 		published, foundPublished, discoverErr := s.findDurableObject(object.ObjectID)
-		if discoverErr != nil || foundPublished || published.ObjectID != "" {
+		if discoverErr != nil {
+			_ = s.spool.ReleaseEncryptedPartial(partialPath)
+			_ = s.spool.ReleasePlaintext(plaintextPath)
 			return ObjectRecord{}, s.localFailure()
 		}
-		if s.cleanupOwned(plaintextPath, partialPath, object.ObjectID) != nil {
+		if foundPublished {
+			published.ReceivedAt = record.ReceivedAt
+			if recordMatchesPending(record, published) && record.CompressedSize == compressedSize {
+				if s.cleanupOwned(plaintextPath, partialPath, "") != nil {
+					return ObjectRecord{}, s.localFailure()
+				}
+				return record, nil
+			}
+			_ = s.spool.DiscardEncryptedPartial(partialPath)
+			_ = s.spool.ReleasePlaintext(plaintextPath)
+			return ObjectRecord{}, s.localFailure()
+		}
+		pendingID := ""
+		if cleanupPending && !foundPublished {
+			pendingID = object.ObjectID
+		}
+		if s.cleanupOwned(plaintextPath, partialPath, pendingID) != nil {
 			return ObjectRecord{}, s.localFailure()
 		}
 		return ObjectRecord{}, s.localFailure()
+	}
+	if commitErr != nil {
+		verified, finalizeErr := s.spool.finalizeEncrypted(finalPath, object.EncryptedSize, outcome.identity)
+		if finalizeErr != nil {
+			if verified {
+				_ = s.spool.RemovePlaintext(plaintextPath)
+			} else {
+				_ = s.spool.ReleasePlaintext(plaintextPath)
+			}
+			return ObjectRecord{}, s.localFailure()
+		}
 	}
 	if err := s.crash(crashAfterAgeRename); err != nil {
 		return ObjectRecord{}, err
@@ -242,14 +338,16 @@ func (s *Service) publishEncrypted(plaintextPath, partialPath, finalPath string,
 }
 
 func (s *Service) CommitPending(ctx context.Context, object PendingObject) (bool, error) {
-	if s == nil || s.ledger == nil || s.spool == nil || s.backend == nil || s.status == nil || s.ops.now == nil || ctx == nil {
+	if s == nil || s.ledger == nil || s.spool == nil || s.backend == nil || s.status == nil || s.ops.now == nil || s.commitGate == nil || ctx == nil {
 		return false, errors.New("collector service unavailable")
 	}
 	if ctx.Err() != nil {
 		return false, errors.New("collector backend cancelled")
 	}
-	s.commitMu.Lock()
-	defer s.commitMu.Unlock()
+	if err := s.commitGate.acquire(ctx); err != nil {
+		return false, errors.New("collector backend cancelled")
+	}
+	defer s.commitGate.release()
 	if ctx.Err() != nil {
 		return false, errors.New("collector backend cancelled")
 	}
@@ -350,6 +448,18 @@ func (s *Service) findDurableObject(objectID string) (PendingObject, bool, error
 		}
 	}
 	return PendingObject{}, false, nil
+}
+
+func (s *Service) pendingFromRecord(record ObjectRecord) (PendingObject, error) {
+	digest, ok := canonicalDigest(record.ObjectID)
+	if !ok || record.ArchiveName != "sherpa-"+digest || record.EncryptedSize <= 0 || record.ReceivedAt.IsZero() {
+		return PendingObject{}, errors.New("collector record invalid")
+	}
+	return PendingObject{
+		ObjectID: record.ObjectID, DigestHex: digest, ArchiveName: record.ArchiveName,
+		EncryptedPath: filepath.Join(s.spool.path, digest+".tar.gz.age"),
+		EncryptedSize: record.EncryptedSize, ReceivedAt: record.ReceivedAt,
+	}, nil
 }
 
 func (s *Service) ensurePendingRecord(object PendingObject, compressedSize int64) (ObjectRecord, bool, error) {

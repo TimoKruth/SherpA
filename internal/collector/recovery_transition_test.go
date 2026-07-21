@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"sherpa/internal/recoveryarchive"
 )
 
@@ -68,12 +70,22 @@ func TestCommitPendingCancellationWhileWaitingMakesNoBackendCall(t *testing.T) {
 	<-secondStarted
 	time.Sleep(40 * time.Millisecond)
 	cancel()
+	select {
+	case err := <-secondDone:
+		if err == nil || err.Error() != "collector backend cancelled" {
+			t.Fatalf("canceled CommitPending error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled commit waiter remained blocked behind holder")
+	}
+	select {
+	case err := <-firstDone:
+		t.Fatalf("commit holder returned before release: %v", err)
+	default:
+	}
 	close(backend.release)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first CommitPending: %v", err)
-	}
-	if err := <-secondDone; err == nil || err.Error() != "collector backend cancelled" {
-		t.Fatalf("canceled CommitPending error = %v", err)
 	}
 	backend.mu.Lock()
 	existsCalls := backend.existsCalls
@@ -81,6 +93,325 @@ func TestCommitPendingCancellationWhileWaitingMakesNoBackendCall(t *testing.T) {
 	if existsCalls != 2 {
 		t.Fatalf("Exists calls = %d, canceled waiter reached backend", existsCalls)
 	}
+}
+
+func TestIngestPublicationWaiterCancellationReturnsBeforeHolderRelease(t *testing.T) {
+	partialReady := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	var encryptCalls atomic.Int32
+	backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+	fixture := newTransitionFixture(t, defaultSpoolOps(), backend, func(encryptor *Encryptor, now func() time.Time) serviceOps {
+		return serviceOps{
+			now: now,
+			encryptFile: func(ctx context.Context, sourcePath, partialPath string) (int64, error) {
+				size, err := encryptor.EncryptFile(ctx, sourcePath, partialPath)
+				if err == nil && encryptCalls.Add(1) == 1 {
+					close(partialReady)
+					<-releaseHolder
+				}
+				return size, err
+			},
+		}
+	})
+	archive := validRecoveryArchive(t, "cancel-publication-waiter")
+	holderDone := make(chan error, 1)
+	go func() {
+		_, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+		holderDone <- err
+	}()
+	<-partialReady
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, err := fixture.service.Ingest(ctx, testReadCloser(archive), int64(len(archive)))
+		waiterDone <- err
+	}()
+	select {
+	case err := <-waiterDone:
+		t.Fatalf("publication waiter returned before cancellation: %v", err)
+	case <-time.After(40 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-waiterDone:
+		if err == nil || err.Error() != "collector ingestion canceled" {
+			t.Fatalf("publication waiter error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled publication waiter remained blocked behind holder")
+	}
+	select {
+	case err := <-holderDone:
+		t.Fatalf("publication holder returned before release: %v", err)
+	default:
+	}
+	close(releaseHolder)
+	if err := <-holderDone; err != nil {
+		t.Fatalf("publication holder: %v", err)
+	}
+	assertNoActiveSpoolReservations(t, fixture.spool)
+	if fixture.status.Snapshot().TerminalLocalError {
+		t.Fatal("publication gate cancellation set terminal readiness")
+	}
+}
+
+func TestIngestConcurrentDuplicateWaitsForOwnedPartialAndReusesWinner(t *testing.T) {
+	partialReady := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var encryptCalls atomic.Int32
+	var renameCalls atomic.Int32
+	spoolOps := defaultSpoolOps()
+	rename := spoolOps.renameNoReplace
+	spoolOps.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+		renameCalls.Add(1)
+		return rename(oldDirFD, oldName, newDirFD, newName)
+	}
+	backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+	fixture := newTransitionFixture(t, spoolOps, backend, func(encryptor *Encryptor, now func() time.Time) serviceOps {
+		return serviceOps{
+			now: now,
+			encryptFile: func(ctx context.Context, sourcePath, partialPath string) (int64, error) {
+				size, err := encryptor.EncryptFile(ctx, sourcePath, partialPath)
+				if err == nil && encryptCalls.Add(1) == 1 {
+					close(partialReady)
+					<-releaseFirst
+				}
+				return size, err
+			},
+		}
+	})
+	archive := validRecoveryArchive(t, "duplicate-owned-partial")
+	results := make(chan Result, 2)
+	errs := make(chan error, 2)
+	go func() {
+		result, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+		results <- result
+		errs <- err
+	}()
+	<-partialReady
+	go func() {
+		result, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+		results <- result
+		errs <- err
+	}()
+	select {
+	case err := <-errs:
+		t.Fatalf("duplicate returned while winner owned partial: %v", err)
+	case <-time.After(40 * time.Millisecond):
+	}
+	close(releaseFirst)
+	statuses := make(map[ResultStatus]int)
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("Ingest caller %d: %v", i, err)
+		}
+		statuses[(<-results).Status]++
+	}
+	if renameCalls.Load() != 1 {
+		t.Fatalf("canonical publication count = %d", renameCalls.Load())
+	}
+	if statuses[ResultStored]+statuses[ResultExisting] != 2 {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 0 {
+		t.Fatalf("duplicate publication entries = %v", entries)
+	}
+	assertNoActiveSpoolReservations(t, fixture.spool)
+	objectID := "sha256:" + digestHex(archive)
+	record, found, err := fixture.ledger.Get(objectID)
+	if err != nil || !found || record.StoredAt == nil {
+		t.Fatalf("stored ledger = %#v found=%v err=%v", record, found, err)
+	}
+	if fixture.status.Snapshot().TerminalLocalError {
+		t.Fatal("normal duplicate publication set terminal readiness")
+	}
+}
+
+func TestIngestConcurrentDuplicateWaitsUntilWinnerFinishesPostRename(t *testing.T) {
+	renamed := make(chan struct{})
+	releaseWinner := make(chan struct{})
+	var once sync.Once
+	var renameCalls atomic.Int32
+	spoolOps := defaultSpoolOps()
+	rename := spoolOps.renameNoReplace
+	spoolOps.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+		err := rename(oldDirFD, oldName, newDirFD, newName)
+		if err == nil {
+			renameCalls.Add(1)
+		}
+		return err
+	}
+	fixture := newTransitionFixture(t, spoolOps, &fakeBackend{objects: make(map[string]bool), createVisible: true}, func(encryptor *Encryptor, now func() time.Time) serviceOps {
+		return serviceOps{
+			now:         now,
+			encryptFile: encryptor.EncryptFile,
+			crash: func(point serviceCrashPoint) error {
+				if point == crashAfterAgeRename {
+					once.Do(func() { close(renamed) })
+					<-releaseWinner
+				}
+				return nil
+			},
+		}
+	})
+	archive := validRecoveryArchive(t, "duplicate-after-rename")
+	done := make(chan error, 2)
+	go func() {
+		_, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+		done <- err
+	}()
+	<-renamed
+	go func() {
+		_, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("duplicate escaped publication transaction after rename: %v", err)
+	case <-time.After(40 * time.Millisecond):
+	}
+	close(releaseWinner)
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("Ingest caller %d: %v", i, err)
+		}
+	}
+	if renameCalls.Load() != 1 {
+		t.Fatalf("canonical publication count = %d", renameCalls.Load())
+	}
+	if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 0 {
+		t.Fatalf("post-rename duplicate entries = %v", entries)
+	}
+	assertNoActiveSpoolReservations(t, fixture.spool)
+	if fixture.status.Snapshot().TerminalLocalError {
+		t.Fatal("post-rename duplicate set terminal readiness")
+	}
+}
+
+func TestIngestReconcilesTransientPostRenameFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		ops  func(*atomic.Bool) spoolOps
+	}{
+		{
+			name: "final identity check",
+			ops: func(renamed *atomic.Bool) spoolOps {
+				ops := defaultSpoolOps()
+				rename := ops.renameNoReplace
+				fstatat := ops.fstatat
+				var failed atomic.Bool
+				ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+					err := rename(oldDirFD, oldName, newDirFD, newName)
+					if err == nil {
+						renamed.Store(true)
+					}
+					return err
+				}
+				ops.fstatat = func(dirFD int, name string, stat *unix.Stat_t, flags int) error {
+					if renamed.Load() && completeAgePattern.MatchString(name) && failed.CompareAndSwap(false, true) {
+						return unix.EIO
+					}
+					return fstatat(dirFD, name, stat, flags)
+				}
+				return ops
+			},
+		},
+		{
+			name: "directory fsync",
+			ops: func(renamed *atomic.Bool) spoolOps {
+				ops := defaultSpoolOps()
+				rename := ops.renameNoReplace
+				fsync := ops.fsync
+				var failed atomic.Bool
+				ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+					err := rename(oldDirFD, oldName, newDirFD, newName)
+					if err == nil {
+						renamed.Store(true)
+					}
+					return err
+				}
+				ops.fsync = func(fd int) error {
+					if renamed.Load() && failed.CompareAndSwap(false, true) {
+						return unix.EIO
+					}
+					return fsync(fd)
+				}
+				return ops
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var renamed atomic.Bool
+			fixture := newTransitionFixture(t, test.ops(&renamed), &fakeBackend{objects: make(map[string]bool), createVisible: true}, nil)
+			archive := validRecoveryArchive(t, "post-rename-"+test.name)
+			result, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+			if err != nil {
+				t.Fatalf("Ingest: %v", err)
+			}
+			if result.Status != ResultStored {
+				t.Fatalf("status = %q", result.Status)
+			}
+			if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 0 {
+				t.Fatalf("post-rename entries = %v", entries)
+			}
+			assertNoActiveSpoolReservations(t, fixture.spool)
+			if fixture.status.Snapshot().TerminalLocalError {
+				t.Fatal("reconciled post-rename failure set terminal readiness")
+			}
+		})
+	}
+}
+
+func TestIngestPersistentPostRenameFsyncFailureRetainsRecoverableCanonicalState(t *testing.T) {
+	ops := defaultSpoolOps()
+	rename := ops.renameNoReplace
+	fsync := ops.fsync
+	var renamed atomic.Bool
+	var failSync atomic.Bool
+	failSync.Store(true)
+	ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+		err := rename(oldDirFD, oldName, newDirFD, newName)
+		if err == nil {
+			renamed.Store(true)
+		}
+		return err
+	}
+	ops.fsync = func(fd int) error {
+		if renamed.Load() && failSync.Load() {
+			return unix.EIO
+		}
+		return fsync(fd)
+	}
+	fixture := newTransitionFixture(t, ops, &fakeBackend{objects: make(map[string]bool), createVisible: true}, nil)
+	archive := validRecoveryArchive(t, "persistent-post-rename-fsync")
+	_, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+	if err == nil || err.Error() != "collector local state failed" {
+		t.Fatalf("Ingest error = %v", err)
+	}
+	entries := spoolEntryNames(t, fixture.spool.path)
+	if len(entries) != 1 || !completeAgePattern.MatchString(entries[0]) {
+		t.Fatalf("recoverable canonical entries = %v", entries)
+	}
+	assertNoActiveSpoolReservations(t, fixture.spool)
+	objectID := "sha256:" + digestHex(archive)
+	record, found, getErr := fixture.ledger.Get(objectID)
+	if getErr != nil || !found || record.StoredAt != nil {
+		t.Fatalf("recoverable pending ledger = %#v found=%v err=%v", record, found, getErr)
+	}
+	failSync.Store(false)
+	result, retryErr := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+	if retryErr != nil {
+		t.Fatalf("same-process retry: %v", retryErr)
+	}
+	if result.Status != ResultStored {
+		t.Fatalf("retry status = %q", result.Status)
+	}
+	if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 0 {
+		t.Fatalf("retry entries = %v", entries)
+	}
+	assertNoActiveSpoolReservations(t, fixture.spool)
 }
 
 func TestCommitPendingStoredMissingLocalIsIdempotent(t *testing.T) {
@@ -770,6 +1101,7 @@ func TestServiceNineCrashBoundariesRestartToExactState(t *testing.T) {
 			}
 			record, found, getErr := restartedLedger.Get(objectID)
 			early := point == crashAfterUploadPartial || point == crashAfterAgePartial || point == crashAfterPendingLedger
+			snapshot := status.Snapshot()
 			if early {
 				if getErr != nil || found {
 					t.Fatalf("early crash ledger found=%v record=%#v err=%v", found, record, getErr)
@@ -777,13 +1109,22 @@ func TestServiceNineCrashBoundariesRestartToExactState(t *testing.T) {
 				if backend.existsCalls != 0 || backend.createCalls != 0 {
 					t.Fatalf("early crash backend calls: exists=%d create=%d", backend.existsCalls, backend.createCalls)
 				}
+				if !snapshot.SpoolWritable || snapshot.OldestPendingAt != nil || snapshot.NewestSuccessfulAt != nil || snapshot.TerminalLocalError {
+					t.Fatalf("early crash readiness = %#v", snapshot)
+				}
 				return
 			}
 			if getErr != nil || !found || record.StoredAt == nil {
 				t.Fatalf("recovered record = %#v found=%v err=%v", record, found, getErr)
 			}
-			if record.CompressedSize != int64(len(archive)) || record.EncryptedSize <= 0 {
-				t.Fatalf("recovered exact sizes = %#v", record)
+			if record.CompressedSize != int64(len(archive)) || record.EncryptedSize <= 0 ||
+				record.RetryCount != 0 || record.LastAttemptAt != nil || record.LatestRetryClass != "" ||
+				!record.ReceivedAt.Equal(fixture.now) || !record.StoredAt.Equal(fixture.now) {
+				t.Fatalf("recovered exact record = %#v", record)
+			}
+			if !snapshot.SpoolWritable || snapshot.OldestPendingAt != nil || snapshot.NewestSuccessfulAt == nil ||
+				!snapshot.NewestSuccessfulAt.Equal(*record.StoredAt) || snapshot.TerminalLocalError {
+				t.Fatalf("recovered readiness = %#v", snapshot)
 			}
 			if !backend.has(objectID) {
 				t.Fatal("remote object absent after recovery")
@@ -792,6 +1133,15 @@ func TestServiceNineCrashBoundariesRestartToExactState(t *testing.T) {
 				t.Fatalf("Create calls = %d", backend.createCalls)
 			}
 		})
+	}
+}
+
+func assertNoActiveSpoolReservations(t testing.TB, spool *Spool) {
+	t.Helper()
+	spool.transition.Lock()
+	defer spool.transition.Unlock()
+	if len(spool.active) != 0 {
+		t.Fatalf("active spool reservations = %#v", spool.active)
 	}
 }
 

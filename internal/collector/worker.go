@@ -253,11 +253,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Worker) reconcileStartup(context.Context) ([]PendingObject, error) {
-	w.service.publishMu.Lock()
-	defer w.service.publishMu.Unlock()
-	w.service.commitMu.Lock()
-	defer w.service.commitMu.Unlock()
+func (w *Worker) reconcileStartup(ctx context.Context) ([]PendingObject, error) {
+	if err := w.service.publishGate.acquire(ctx); err != nil {
+		return nil, errors.New("collector startup cancelled")
+	}
+	defer w.service.publishGate.release()
+	if err := w.service.commitGate.acquire(ctx); err != nil {
+		return nil, errors.New("collector startup cancelled")
+	}
+	defer w.service.commitGate.release()
 
 	records, err := w.ledger.List()
 	if err != nil {

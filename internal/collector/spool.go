@@ -408,52 +408,125 @@ func (s *Spool) discardPartialLocked(name string) error {
 	}
 	return s.ops.fsync(s.dirFD)
 }
+
+type encryptedCommitOutcome struct {
+	renamed  bool
+	identity unix.Stat_t
+}
+
 func (s *Spool) CommitEncrypted(partial, final string) error {
+	_, err := s.commitEncrypted(partial, final)
+	return err
+}
+
+func (s *Spool) commitEncrypted(partial, final string) (encryptedCommitOutcome, error) {
 	if !s.begin() {
-		return errors.New("collector spool unavailable")
+		return encryptedCommitOutcome{}, errors.New("collector spool unavailable")
 	}
 	defer s.end()
 	s.transition.Lock()
 	defer s.transition.Unlock()
 	pn, fn, ok := s.validEncryptedPair(partial, final)
 	if !ok {
-		return errors.New("collector encrypted path invalid")
+		return encryptedCommitOutcome{}, errors.New("collector encrypted path invalid")
 	}
 	defer delete(s.active, pn)
 	st, regular, err := s.entryMetadata(pn)
 	if err != nil || !regular {
-		return errors.New("collector encrypted partial unsafe")
+		return encryptedCommitOutcome{}, errors.New("collector encrypted partial unsafe")
 	}
 	fd, err := s.ops.openat(s.dirFD, pn, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return errors.New("collector encrypted partial unavailable")
+		return encryptedCommitOutcome{}, errors.New("collector encrypted partial unavailable")
 	}
 	var opened unix.Stat_t
-	if unix.Fstat(fd, &opened) != nil || !sameInode(&st, &opened) {
+	if unix.Fstat(fd, &opened) != nil || !safeRegularMetadata(&opened) || !sameInode(&st, &opened) {
 		_ = s.ops.close(fd)
-		return errors.New("collector encrypted partial unsafe")
+		return encryptedCommitOutcome{}, errors.New("collector encrypted partial unsafe")
 	}
 	if err = s.ops.fsync(fd); err != nil {
 		_ = s.ops.close(fd)
-		return classifyStorage(err, "collector encrypted synchronization failed")
+		return encryptedCommitOutcome{}, classifyStorage(err, "collector encrypted synchronization failed")
 	}
 	if err = s.ops.close(fd); err != nil {
-		return classifyStorage(err, "collector encrypted close failed")
+		return encryptedCommitOutcome{}, classifyStorage(err, "collector encrypted close failed")
 	}
 	if !s.sameEntry(pn, &opened) {
-		return errors.New("collector encrypted partial unsafe")
+		return encryptedCommitOutcome{}, errors.New("collector encrypted partial unsafe")
 	}
 	if err = s.ops.renameNoReplace(s.dirFD, pn, s.dirFD, fn); err != nil {
-		return classifyStorage(err, "collector encrypted commit failed")
+		return encryptedCommitOutcome{}, classifyStorage(err, "collector encrypted commit failed")
 	}
+	outcome := encryptedCommitOutcome{renamed: true, identity: opened}
 	if !s.sameEntry(fn, &opened) {
-		return errors.New("collector encrypted commit unsafe")
+		return outcome, errors.New("collector encrypted commit unsafe")
 	}
 	if err = s.ops.fsync(s.dirFD); err != nil {
-		return classifyStorage(err, "collector spool synchronization failed")
+		return outcome, classifyStorage(err, "collector spool synchronization failed")
 	}
+	return outcome, nil
+}
+
+func (s *Spool) finalizeEncrypted(final string, encryptedSize int64, identity unix.Stat_t) (bool, error) {
+	if !s.begin() {
+		return false, errors.New("collector spool unavailable")
+	}
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	name, ok := s.exactChild(final)
+	if !ok || !completeAgePattern.MatchString(name) || encryptedSize <= 0 {
+		return false, errors.New("collector encrypted path invalid")
+	}
+	st, regular, err := s.entryMetadata(name)
+	if err != nil || !regular || st.Size != encryptedSize || !sameInode(&st, &identity) {
+		return false, errors.New("collector encrypted commit unsafe")
+	}
+	fd, err := s.ops.openat(s.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return false, errors.New("collector encrypted object unavailable")
+	}
+	var opened unix.Stat_t
+	valid := unix.Fstat(fd, &opened) == nil && safeRegularMetadata(&opened) && opened.Size == encryptedSize && sameInode(&st, &opened) && sameInode(&identity, &opened)
+	closeErr := s.ops.close(fd)
+	if !valid || closeErr != nil || !s.sameEntry(name, &opened) {
+		return false, errors.New("collector encrypted commit unsafe")
+	}
+	if err := s.ops.fsync(s.dirFD); err != nil {
+		return true, classifyStorage(err, "collector spool synchronization failed")
+	}
+	return true, nil
+}
+func (s *Spool) ReleaseEncryptedPartial(path string) error {
+	if !s.begin() {
+		return errors.New("collector spool unavailable")
+	}
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	name, ok := s.exactChild(path)
+	if !ok || !partialAgePattern.MatchString(name) {
+		return errors.New("collector encrypted path invalid")
+	}
+	delete(s.active, name)
 	return nil
 }
+
+func (s *Spool) ReleasePlaintext(path string) error {
+	if !s.begin() {
+		return errors.New("collector spool unavailable")
+	}
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	name, ok := s.exactChild(path)
+	if !ok || !validUploadPartialName(name) {
+		return errors.New("collector removal path invalid")
+	}
+	delete(s.active, name)
+	return nil
+}
+
 func (s *Spool) RemovePlaintext(path string) error { return s.remove(path, true) }
 func (s *Spool) RemoveEncrypted(path string) error { return s.remove(path, false) }
 func (s *Spool) remove(path string, plain bool) error {
