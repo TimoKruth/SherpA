@@ -261,13 +261,20 @@ func TestLoadConfigRejectsInvalidSizesCountsAndDurations(t *testing.T) {
 			assertSafeSettingError(t, err, test.key)
 		})
 	}
+}
 
-	t.Run("recovery age exceeds startup grace", func(t *testing.T) {
-		env, _ := completeConfigEnv(t)
-		env["SHERPA_COLLECTOR_MAX_RECOVERY_AGE"] = "27h"
-		_, err := LoadConfig(mapGetenv(env))
-		assertSafeSettingError(t, err, "SHERPA_COLLECTOR_MAX_RECOVERY_AGE")
-	})
+func TestLoadConfigAllowsIndependentStartupGraceAndMaxRecoveryAge(t *testing.T) {
+	env, _ := completeConfigEnv(t)
+	env["SHERPA_COLLECTOR_STARTUP_GRACE"] = "1h"
+	env["SHERPA_COLLECTOR_MAX_RECOVERY_AGE"] = "24h"
+
+	cfg, err := LoadConfig(mapGetenv(env))
+	if err != nil {
+		t.Fatalf("LoadConfig rejected independently positive readiness durations: %v", err)
+	}
+	if cfg.StartupGrace != time.Hour || cfg.MaxRecoveryAge != 24*time.Hour {
+		t.Fatalf("readiness durations = grace %v recovery %v, want 1h and 24h", cfg.StartupGrace, cfg.MaxRecoveryAge)
+	}
 }
 
 func TestLoadConfigDoesNotInventUnrelatedDurationPolicy(t *testing.T) {

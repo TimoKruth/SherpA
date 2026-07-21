@@ -165,10 +165,6 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if maxRecoveryAge > startupGrace {
-		return Config{}, settingError(envMaxRecoveryAge, "must not exceed startup grace")
-	}
-
 	return Config{
 		ListenAddr:     envOrDefault(getenv, envListenAddr, defaultListenAddr),
 		TokenDigest:    tokenDigest,
