@@ -82,6 +82,9 @@ func (b *BorgBackend) Create(ctx context.Context, object PendingObject) (retErr 
 	if b == nil {
 		return errors.New("collector backend failed")
 	}
+	if err := classifyBorgContext(ctx); err != nil {
+		return err
+	}
 	held, err := openBorgInput(object)
 	if err != nil {
 		return errors.New("collector backend failed")
@@ -95,8 +98,13 @@ func (b *BorgBackend) Create(ctx context.Context, object PendingObject) (retErr 
 	if !held.valid() {
 		return errors.New("collector backend failed")
 	}
-	stage, err := b.stageInput(held)
+	createCtx, cancel := context.WithTimeout(ctx, b.config.CreateTimeout)
+	defer cancel()
+	stage, err := b.stageInput(createCtx, held)
 	if err != nil {
+		if contextErr := classifyBorgRunContext(ctx, createCtx); contextErr != nil {
+			return contextErr
+		}
 		return errors.New("collector backend failed")
 	}
 	defer func() {
@@ -107,7 +115,7 @@ func (b *BorgBackend) Create(ctx context.Context, object PendingObject) (retErr 
 	if !held.valid() || !stage.valid() {
 		return errors.New("collector backend failed")
 	}
-	_, createErr := b.run(ctx, b.config.CreateTimeout, stage, "create", "--compression", "none", "::"+held.archiveName, held.name)
+	_, createErr := b.run(createCtx, b.config.CreateTimeout, stage, "create", "--compression", "none", "::"+held.archiveName, held.name)
 	if !held.valid() || !stage.valid() {
 		return errors.New("collector backend failed")
 	}
@@ -202,7 +210,7 @@ func (b *BorgBackend) run(parent context.Context, timeout time.Duration, stage *
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = borgWaitDelay
-	overflow := make(chan struct{})
+	overflow := newBorgOverflowSignal()
 	stdout := newBoundedBorgBuffer(borgOutputLimit, overflow)
 	stderr := newBoundedBorgBuffer(borgOutputLimit, overflow)
 	cmd.Stdout = stdout
@@ -211,7 +219,12 @@ func (b *BorgBackend) run(parent context.Context, timeout time.Duration, stage *
 		_ = binding.close()
 		return nil, errors.New("collector backend failed")
 	}
-	if err := prepareBorgCommand(cmd, binding, stage); err != nil {
+	prepared, err := prepareBorgCommand(cmd, binding, stage)
+	if err != nil {
+		_ = binding.close()
+		return nil, errors.New("collector backend failed")
+	}
+	if err := b.system.beforeExecStart(cmd); err != nil {
 		_ = binding.close()
 		return nil, errors.New("collector backend failed")
 	}
@@ -220,6 +233,10 @@ func (b *BorgBackend) run(parent context.Context, timeout time.Duration, stage *
 		return nil, err
 	}
 	if !binding.valid() || (stage != nil && !stage.valid()) {
+		_ = binding.close()
+		return nil, errors.New("collector backend failed")
+	}
+	if !prepared.valid() {
 		_ = binding.close()
 		return nil, errors.New("collector backend failed")
 	}
@@ -233,21 +250,29 @@ func (b *BorgBackend) run(parent context.Context, timeout time.Duration, stage *
 		}
 		return nil, errors.New("collector backend failed")
 	}
+	postStartErr := b.system.afterStart(cmd)
+	postStartValid := prepared.valid()
 	noReap := make(chan error, 1)
 	go func() { noReap <- b.system.waitNoReap(cmd.Process.Pid) }()
 	var noReapErr, killErr error
-	select {
-	case noReapErr = <-noReap:
-		killErr = b.system.killProcessGroup(cmd.Process.Pid)
-	case <-ctx.Done():
+	if postStartErr != nil || !postStartValid {
 		killErr = b.system.killProcessGroup(cmd.Process.Pid)
 		noReapErr = <-noReap
-	case <-overflow:
-		killErr = b.system.killProcessGroup(cmd.Process.Pid)
-		noReapErr = <-noReap
+	} else {
+		select {
+		case noReapErr = <-noReap:
+			killErr = b.system.killProcessGroup(cmd.Process.Pid)
+		case <-ctx.Done():
+			killErr = b.system.killProcessGroup(cmd.Process.Pid)
+			noReapErr = <-noReap
+		case <-overflow.channel:
+			killErr = b.system.killProcessGroup(cmd.Process.Pid)
+			noReapErr = <-noReap
+		}
 	}
 	waitErr := b.system.waitProcess(cmd)
 	bindingValid := binding.valid()
+	preparedValid := prepared.valid()
 	closeErr := binding.close()
 	if contextErr := classifyBorgContext(parent); contextErr != nil {
 		return nil, contextErr
@@ -255,7 +280,7 @@ func (b *BorgBackend) run(parent context.Context, timeout time.Duration, stage *
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return nil, errors.New("collector backend timeout")
 	}
-	if noReapErr != nil || killErr != nil || waitErr != nil || closeErr != nil || !bindingValid || stdout.overflow.Load() || stderr.overflow.Load() {
+	if postStartErr != nil || !postStartValid || noReapErr != nil || killErr != nil || waitErr != nil || closeErr != nil || !bindingValid || !preparedValid || stdout.overflow.Load() || stderr.overflow.Load() {
 		return nil, errors.New("collector backend failed")
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
@@ -274,15 +299,40 @@ func classifyBorgContext(ctx context.Context) error {
 	return nil
 }
 
+func classifyBorgRunContext(parent, run context.Context) error {
+	if err := classifyBorgContext(parent); err != nil {
+		return err
+	}
+	if errors.Is(run.Err(), context.DeadlineExceeded) {
+		return errors.New("collector backend timeout")
+	}
+	if run.Err() != nil {
+		return errors.New("collector backend cancelled")
+	}
+	return nil
+}
+
+type borgOverflowSignal struct {
+	channel chan struct{}
+	once    sync.Once
+}
+
+func newBorgOverflowSignal() *borgOverflowSignal {
+	return &borgOverflowSignal{channel: make(chan struct{})}
+}
+
+func (s *borgOverflowSignal) notify() {
+	s.once.Do(func() { close(s.channel) })
+}
+
 type boundedBorgBuffer struct {
 	buffer   bytes.Buffer
 	limit    int
-	signal   chan struct{}
-	once     sync.Once
+	signal   *borgOverflowSignal
 	overflow atomic.Bool
 }
 
-func newBoundedBorgBuffer(limit int, signal chan struct{}) *boundedBorgBuffer {
+func newBoundedBorgBuffer(limit int, signal *borgOverflowSignal) *boundedBorgBuffer {
 	return &boundedBorgBuffer{limit: limit, signal: signal}
 }
 
@@ -306,7 +356,7 @@ func (b *boundedBorgBuffer) Bytes() []byte {
 
 func (b *boundedBorgBuffer) markOverflow() {
 	b.overflow.Store(true)
-	b.once.Do(func() { close(b.signal) })
+	b.signal.notify()
 }
 
 func parseBorgList(output []byte, location *time.Location) ([]ArchiveInfo, error) {

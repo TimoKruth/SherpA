@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -155,6 +156,38 @@ func TestBorgRunnerBoundsOutput(t *testing.T) {
 	}
 	if time.Since(started) > 5*time.Second {
 		t.Fatal("bounded output failure hung")
+	}
+}
+
+func TestBorgRunnerConcurrentDualOutputOverflow(t *testing.T) {
+	signal := newBorgOverflowSignal()
+	stdout := newBoundedBorgBuffer(1, signal)
+	stderr := newBoundedBorgBuffer(1, signal)
+	start := make(chan struct{})
+	panics := make(chan any, 2)
+	var writers sync.WaitGroup
+	for _, output := range []*boundedBorgBuffer{stdout, stderr} {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			defer func() { panics <- recover() }()
+			<-start
+			_, _ = output.Write([]byte("overflow"))
+		}()
+	}
+	close(start)
+	writers.Wait()
+	close(panics)
+	for panicValue := range panics {
+		if panicValue != nil {
+			t.Fatalf("concurrent output overflow panicked: %v", panicValue)
+		}
+	}
+
+	backend, _ := newTestBorgBackend(t, "dual-overflow")
+	_, err := backend.List(context.Background())
+	if err == nil || err.Error() != "collector backend failed" {
+		t.Fatalf("List error = %v", err)
 	}
 }
 
@@ -491,6 +524,19 @@ func runBorgTestHelper() int {
 		fmt.Printf(`{"archives":[{"name":"xsherpa-%[1]s","start":"2024-01-02T03:04:05Z"},{"name":"sherpa-%[1]s-extra","start":"2024-01-02T03:04:05Z"},{"name":"sherpa-*","start":"2024-01-02T03:04:05Z"}]}`, testDigestHex)
 	case "overflow":
 		_, _ = os.Stdout.Write([]byte(strings.Repeat("x", 2<<20)))
+	case "dual-overflow":
+		start := make(chan struct{})
+		var writers sync.WaitGroup
+		for _, output := range []*os.File{os.Stdout, os.Stderr} {
+			writers.Add(1)
+			go func() {
+				defer writers.Done()
+				<-start
+				_, _ = output.Write([]byte(strings.Repeat("x", 2<<20)))
+			}()
+		}
+		close(start)
+		writers.Wait()
 	case "sleep":
 		time.Sleep(30 * time.Second)
 	case "timeout-tree":

@@ -112,46 +112,205 @@ func TestBorgCreateReadsDescriptorPinnedStagingEntryAcrossSourceABA(t *testing.T
 	}
 }
 
-func TestBorgCreateMaterializesHardLinkAndEXDEVCopyFromHeldDescriptor(t *testing.T) {
+func TestBorgCreateMaterializesHardLinkFromHeldDescriptor(t *testing.T) {
+	object := testPendingObject(t)
+	config := testBorgConfig(t)
+	capturePath := filepath.Join(t.TempDir(), "captured-input")
+	t.Setenv("COLLECTOR_BORG_CAPTURE", capturePath)
+	system := defaultBorgSystem()
+	baseLinkat := system.linkat
+	linkCalls := 0
+	system.linkat = func(oldDirFD int, oldPath string, newDirFD int, newPath string, flags int) error {
+		linkCalls++
+		return baseLinkat(oldDirFD, oldPath, newDirFD, newPath, flags)
+	}
+	backend, _ := newTestBorgBackendWithSystem(t, config, "capture-create-exact", system)
+	if err := backend.Create(context.Background(), object); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if linkCalls != 1 {
+		t.Fatalf("link calls = %d", linkCalls)
+	}
+	captured, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(captured) != "encrypted-object-canary" {
+		t.Fatalf("Borg read %q", captured)
+	}
+	assertNoBorgStages(t, config.WorkDir)
+}
+
+func TestBorgCreateRejectsEXDEVWithoutExecutingOrCopying(t *testing.T) {
+	object := testPendingObject(t)
+	config := testBorgConfig(t)
+	system := defaultBorgSystem()
+	system.linkat = func(int, string, int, string, int) error {
+		return unix.EXDEV
+	}
+	backend, logPath := newTestBorgBackendWithSystem(t, config, "capture-create-exact", system)
+	started := time.Now()
+	err := backend.Create(context.Background(), object)
+	if err == nil || err.Error() != "collector backend failed" {
+		t.Fatalf("Create error = %v", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("EXDEV staging failure did not return promptly")
+	}
+	if _, statErr := os.Stat(logPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("EXDEV staging executed Borg: %v", statErr)
+	}
+	assertNoBorgStages(t, config.WorkDir)
+}
+
+func TestBorgStageEXDEVDoesNotInspectSourceFileDescriptor(t *testing.T) {
+	stagePath := newPrivateDir(t)
+	stageFD, err := unix.Open(stagePath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(stageFD)
+	stage := &borgStage{
+		system: defaultBorgSystem(),
+		dirFD:  stageFD,
+		fileFD: -1,
+	}
+	stage.system.linkat = func(int, string, int, string, int) error {
+		return unix.EXDEV
+	}
+	source := &heldBorgInput{
+		dirFD:  -1,
+		fileFD: -1,
+		name:   testDigestHex + ".tar.gz.age",
+		size:   23,
+	}
+	started := time.Now()
+	err = stage.materialize(context.Background(), source)
+	if !errors.Is(err, unix.EXDEV) {
+		t.Fatalf("materialize error = %v", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("EXDEV materialization did not return promptly")
+	}
+	entries, readErr := os.ReadDir(stagePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("EXDEV materialization created %d entries", len(entries))
+	}
+}
+
+func TestBorgCreateDoesNotStageCancelledOrExpiredRequests(t *testing.T) {
 	tests := []struct {
-		name      string
-		forceCopy bool
+		name    string
+		context func() context.Context
+		want    string
 	}{
-		{name: "hard link"},
-		{name: "EXDEV copy", forceCopy: true},
+		{
+			name: "already cancelled",
+			context: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			want: "collector backend cancelled",
+		},
+		{
+			name: "already expired",
+			context: func() context.Context {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				cancel()
+				return ctx
+			},
+			want: "collector backend timeout",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			object := testPendingObject(t)
 			config := testBorgConfig(t)
-			capturePath := filepath.Join(t.TempDir(), "captured-input")
-			t.Setenv("COLLECTOR_BORG_CAPTURE", capturePath)
 			system := defaultBorgSystem()
-			baseLinkat := system.linkat
 			linkCalls := 0
-			system.linkat = func(oldDirFD int, oldPath string, newDirFD int, newPath string, flags int) error {
+			system.linkat = func(int, string, int, string, int) error {
 				linkCalls++
-				if test.forceCopy {
-					return unix.EXDEV
-				}
-				return baseLinkat(oldDirFD, oldPath, newDirFD, newPath, flags)
+				return errors.New("unexpected staging")
 			}
-			backend, _ := newTestBorgBackendWithSystem(t, config, "capture-create-exact", system)
-			if err := backend.Create(context.Background(), object); err != nil {
-				t.Fatalf("Create: %v", err)
+			backend, logPath := newTestBorgBackendWithSystem(t, config, "exact", system)
+			err := backend.Create(test.context(), object)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("Create error = %v, want %q", err, test.want)
 			}
-			if linkCalls != 1 {
-				t.Fatalf("link calls = %d", linkCalls)
+			if linkCalls != 0 {
+				t.Fatalf("cancelled create made %d staging link calls", linkCalls)
 			}
-			captured, err := os.ReadFile(capturePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(captured) != "encrypted-object-canary" {
-				t.Fatalf("Borg read %q", captured)
+			if _, statErr := os.Stat(logPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("cancelled create executed Borg: %v", statErr)
 			}
 			assertNoBorgStages(t, config.WorkDir)
 		})
+	}
+}
+
+func TestBorgCreateTimeoutIncludesStagingLifecycle(t *testing.T) {
+	object := testPendingObject(t)
+	config := testBorgConfig(t)
+	config.CreateTimeout = 100 * time.Millisecond
+	system := defaultBorgSystem()
+	baseLinkat := system.linkat
+	system.linkat = func(oldDirFD int, oldPath string, newDirFD int, newPath string, flags int) error {
+		time.Sleep(250 * time.Millisecond)
+		return baseLinkat(oldDirFD, oldPath, newDirFD, newPath, flags)
+	}
+	backend, logPath := newTestBorgBackendWithSystem(t, config, "exact", system)
+	err := backend.Create(context.Background(), object)
+	if err == nil || err.Error() != "collector backend timeout" {
+		t.Fatalf("Create error = %v", err)
+	}
+	if _, statErr := os.Stat(logPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expired staging executed Borg: %v", statErr)
+	}
+	assertNoBorgStages(t, config.WorkDir)
+}
+
+func TestBorgStageCancellationAfterLinkCleansDurably(t *testing.T) {
+	object := testPendingObject(t)
+	held, err := openBorgInput(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.close()
+	config := testBorgConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	system := defaultBorgSystem()
+	baseLinkat := system.linkat
+	linked := false
+	system.linkat = func(oldDirFD int, oldPath string, newDirFD int, newPath string, flags int) error {
+		err := baseLinkat(oldDirFD, oldPath, newDirFD, newPath, flags)
+		if err == nil {
+			linked = true
+			cancel()
+		}
+		return err
+	}
+	backend, _ := newTestBorgBackendWithSystem(t, config, "exact", system)
+	stage, err := backend.stageInput(ctx, held)
+	if stage != nil {
+		t.Fatal("cancelled staging returned a stage")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("stageInput error = %v", err)
+	}
+	if !linked {
+		t.Fatal("test did not cancel after a successful link")
+	}
+	assertNoBorgStages(t, config.WorkDir)
+	var stat unix.Stat_t
+	if err := unix.Stat(object.EncryptedPath, &stat); err != nil {
+		t.Fatal(err)
+	}
+	if stat.Nlink != 1 {
+		t.Fatalf("source link count = %d", stat.Nlink)
 	}
 }
 
@@ -459,9 +618,15 @@ func TestBorgStateDescriptorsSurviveRootAndChildABA(t *testing.T) {
 			}()
 			<-bound
 			restore := test.swap(t, config.WorkDir)
+			if runtime.GOOS == "darwin" {
+				restore()
+				restore = nil
+			}
 			close(start)
 			waitForFile(t, markerReady)
-			restore()
+			if restore != nil {
+				restore()
+			}
 			if err := os.WriteFile(helperRelease, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}

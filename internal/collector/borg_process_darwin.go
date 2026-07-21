@@ -58,34 +58,57 @@ func killBorgProcessGroup(pid int) error {
 	return err
 }
 
-func prepareBorgCommand(cmd *exec.Cmd, binding *borgCommandBinding, stage *borgStage) error {
-	if cmd == nil || binding == nil || len(binding.files) != len(binding.stats) || len(binding.files) < borgStateFileCount {
-		return errors.New("invalid Borg command binding")
+type borgPreparedPath struct {
+	fd       int
+	path     string
+	expected unix.Stat_t
+}
+
+type borgPreparedCommand struct {
+	paths []borgPreparedPath
+}
+
+func (p *borgPreparedCommand) valid() bool {
+	if p == nil || len(p.paths) < borgStateFileCount {
+		return false
 	}
-	paths := make([]string, borgStateFileCount)
-	for i := range paths {
+	for _, binding := range p.paths {
+		path, err := darwinBorgDescriptorPath(binding.fd, &binding.expected)
+		if err != nil || path != binding.path {
+			return false
+		}
+	}
+	return true
+}
+
+func prepareBorgCommand(cmd *exec.Cmd, binding *borgCommandBinding, stage *borgStage) (*borgPreparedCommand, error) {
+	if cmd == nil || binding == nil || len(binding.files) != len(binding.stats) || len(binding.files) < borgStateFileCount {
+		return nil, errors.New("invalid Borg command binding")
+	}
+	prepared := &borgPreparedCommand{paths: make([]borgPreparedPath, len(binding.files))}
+	for i := range prepared.paths {
 		path, err := darwinBorgDescriptorPath(int(binding.files[i].Fd()), &binding.stats[i])
 		if err != nil {
-			return err
+			return nil, err
 		}
-		paths[i] = path
+		prepared.paths[i] = borgPreparedPath{
+			fd:       int(binding.files[i].Fd()),
+			path:     path,
+			expected: binding.stats[i],
+		}
 	}
 	for i, key := range []string{"BORG_CACHE_DIR", "BORG_CONFIG_DIR", "BORG_SECURITY_DIR"} {
-		if !replaceBorgCommandEnvironment(cmd.Env, key, paths[i]) {
-			return errors.New("invalid Borg command environment")
+		if !replaceBorgCommandEnvironment(cmd.Env, key, prepared.paths[i].path) {
+			return nil, errors.New("invalid Borg command environment")
 		}
 	}
 	if stage != nil {
 		if len(binding.files) != borgStateFileCount+1 {
-			return errors.New("invalid Borg stage binding")
+			return nil, errors.New("invalid Borg stage binding")
 		}
-		path, err := darwinBorgDescriptorPath(int(binding.files[borgStateFileCount].Fd()), &binding.stats[borgStateFileCount])
-		if err != nil {
-			return err
-		}
-		cmd.Dir = path
+		cmd.Dir = prepared.paths[borgStateFileCount].path
 	}
-	return nil
+	return prepared, nil
 }
 
 func darwinBorgDescriptorPath(fd int, expected *unix.Stat_t) (string, error) {

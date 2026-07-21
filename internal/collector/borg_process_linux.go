@@ -30,15 +30,21 @@ func killBorgProcessGroup(pid int) error {
 	return err
 }
 
-func prepareBorgCommand(cmd *exec.Cmd, binding *borgCommandBinding, stage *borgStage) error {
+type borgPreparedCommand struct{}
+
+func (*borgPreparedCommand) valid() bool {
+	return true
+}
+
+func prepareBorgCommand(cmd *exec.Cmd, binding *borgCommandBinding, stage *borgStage) (*borgPreparedCommand, error) {
 	if stage == nil {
-		return nil
+		return &borgPreparedCommand{}, nil
 	}
 	if cmd == nil || binding == nil || len(binding.files) != borgStateFileCount+1 {
-		return errors.New("invalid Borg stage binding")
+		return nil, errors.New("invalid Borg stage binding")
 	}
 	cmd.Dir = borgFDPath(int(binding.files[borgStateFileCount].Fd()))
-	return nil
+	return &borgPreparedCommand{}, nil
 }
 
 func borgFDPath(fd int) string {

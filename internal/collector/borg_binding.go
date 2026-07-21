@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -27,6 +28,8 @@ type borgSystem struct {
 	linkat           func(int, string, int, string, int) error
 	unlinkat         func(int, string, int) error
 	beforeStart      func(*exec.Cmd) error
+	beforeExecStart  func(*exec.Cmd) error
+	afterStart       func(*exec.Cmd) error
 	waitNoReap       func(int) error
 	killProcessGroup func(int) error
 	waitProcess      func(*exec.Cmd) error
@@ -37,6 +40,8 @@ func defaultBorgSystem() borgSystem {
 		linkat:           unix.Linkat,
 		unlinkat:         unix.Unlinkat,
 		beforeStart:      func(*exec.Cmd) error { return nil },
+		beforeExecStart:  func(*exec.Cmd) error { return nil },
+		afterStart:       func(*exec.Cmd) error { return nil },
 		waitNoReap:       waitBorgProcessNoReap,
 		killProcessGroup: killBorgProcessGroup,
 		waitProcess:      func(cmd *exec.Cmd) error { return cmd.Wait() },
@@ -44,7 +49,7 @@ func defaultBorgSystem() borgSystem {
 }
 
 func (s borgSystem) valid() bool {
-	return s.linkat != nil && s.unlinkat != nil && s.beforeStart != nil && s.waitNoReap != nil && s.killProcessGroup != nil && s.waitProcess != nil
+	return s.linkat != nil && s.unlinkat != nil && s.beforeStart != nil && s.beforeExecStart != nil && s.afterStart != nil && s.waitNoReap != nil && s.killProcessGroup != nil && s.waitProcess != nil
 }
 
 type borgStateIdentity struct {
@@ -186,84 +191,151 @@ func openVerifiedBorgDirectory(parentFD int, name string, expected *unix.Stat_t)
 }
 
 type borgStage struct {
-	system   borgSystem
-	workFD   int
-	dirFD    int
-	fileFD   int
-	name     string
-	fileName string
-	workStat unix.Stat_t
-	dirStat  unix.Stat_t
-	fileStat unix.Stat_t
+	system     borgSystem
+	workFD     int
+	dirFD      int
+	fileFD     int
+	name       string
+	fileName   string
+	dirCreated bool
+	fileLinked bool
+	workStat   unix.Stat_t
+	dirStat    unix.Stat_t
+	fileStat   unix.Stat_t
 }
 
-func (b *BorgBackend) stageInput(source *heldBorgInput) (*borgStage, error) {
+func (b *BorgBackend) stageInput(ctx context.Context, source *heldBorgInput) (_ *borgStage, retErr error) {
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
+	}
 	if source == nil || !source.valid() {
 		return nil, errors.New("unsafe Borg input")
+	}
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
 	}
 	workFD, clean, err := openPrivateDirectory(b.config.WorkDir)
 	if err != nil || clean != b.config.WorkDir {
 		return nil, errors.New("unsafe Borg work root")
 	}
-	var workStat unix.Stat_t
-	if unix.Fstat(workFD, &workStat) != nil || !safeBorgDirectoryMetadata(&workStat) || !sameInode(&b.state.root, &workStat) {
+	if err := borgStageContextError(ctx); err != nil {
 		_ = unix.Close(workFD)
-		return nil, errors.New("unsafe Borg work root")
+		return nil, err
 	}
-	stage := &borgStage{system: b.system, workFD: workFD, dirFD: -1, fileFD: -1, fileName: source.name, workStat: workStat}
-	created := false
+	stage := &borgStage{system: b.system, workFD: workFD, dirFD: -1, fileFD: -1, fileName: source.name}
 	defer func() {
-		if !created {
-			_ = stage.cleanup()
+		if retErr != nil {
+			if cleanupErr := stage.cleanup(); cleanupErr != nil {
+				retErr = cleanupErr
+			}
 		}
 	}()
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
+	}
+	if err := unix.Fstat(workFD, &stage.workStat); err != nil || !safeBorgDirectoryMetadata(&stage.workStat) || !sameInode(&b.state.root, &stage.workStat) {
+		return nil, errors.New("unsafe Borg work root")
+	}
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
+	}
 	for attempt := 0; attempt < borgStageCreateAttempts; attempt++ {
+		if err := borgStageContextError(ctx); err != nil {
+			return nil, err
+		}
 		name, nameErr := randomBorgStageName()
 		if nameErr != nil {
 			return nil, nameErr
 		}
-		if err := unix.Mkdirat(workFD, name, 0o700); errors.Is(err, unix.EEXIST) {
+		if err := borgStageContextError(ctx); err != nil {
+			return nil, err
+		}
+		err := unix.Mkdirat(workFD, name, 0o700)
+		if errors.Is(err, unix.EEXIST) {
 			continue
-		} else if err != nil {
+		}
+		if err != nil {
 			return nil, err
 		}
 		stage.name = name
-		created = true
+		stage.dirCreated = true
+		if err := borgStageContextError(ctx); err != nil {
+			return nil, err
+		}
 		break
 	}
-	if !created {
+	if !stage.dirCreated {
 		return nil, errors.New("Borg stage unavailable")
 	}
-	created = false
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
+	}
 	var entry unix.Stat_t
 	if unix.Fstatat(workFD, stage.name, &entry, unix.AT_SYMLINK_NOFOLLOW) != nil || !ownedBorgDirectoryMetadata(&entry) {
 		return nil, errors.New("unsafe Borg stage")
+	}
+	stage.dirStat = entry
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
 	}
 	dirFD, err := unix.Openat(workFD, stage.name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
 	stage.dirFD = dirFD
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
+	}
 	if unix.Fstat(dirFD, &stage.dirStat) != nil || !ownedBorgDirectoryMetadata(&stage.dirStat) || !sameInode(&entry, &stage.dirStat) {
 		return nil, errors.New("unsafe Borg stage")
+	}
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
 	}
 	if err := unix.Fchmod(dirFD, 0o700); err != nil {
 		return nil, err
 	}
-	if unix.Fstat(dirFD, &stage.dirStat) != nil || !safeBorgDirectoryMetadata(&stage.dirStat) || !sameDirectoryEntry(workFD, stage.name, &stage.dirStat) {
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
+	}
+	if unix.Fstat(dirFD, &stage.dirStat) != nil || !safeBorgDirectoryMetadata(&stage.dirStat) {
 		return nil, errors.New("unsafe Borg stage")
+	}
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
+	}
+	if !sameDirectoryEntry(workFD, stage.name, &stage.dirStat) {
+		return nil, errors.New("unsafe Borg stage")
+	}
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
 	}
 	if err := unix.Fsync(workFD); err != nil {
 		return nil, err
 	}
-	if err := stage.materialize(source); err != nil {
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
+	}
+	if err := stage.materialize(ctx, source); err != nil {
+		return nil, err
+	}
+	if err := borgStageContextError(ctx); err != nil {
 		return nil, err
 	}
 	if !stage.valid() {
 		return nil, errors.New("unsafe Borg stage")
 	}
-	created = true
+	if err := borgStageContextError(ctx); err != nil {
+		return nil, err
+	}
 	return stage, nil
+}
+
+func borgStageContextError(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("invalid Borg stage context")
+	}
+	return ctx.Err()
 }
 
 func randomBorgStageName() (string, error) {
@@ -274,93 +346,32 @@ func randomBorgStageName() (string, error) {
 	return ".sherpa-borg-" + hex.EncodeToString(value[:]) + ".tmp", nil
 }
 
-func (s *borgStage) materialize(source *heldBorgInput) error {
+func (s *borgStage) materialize(ctx context.Context, source *heldBorgInput) error {
+	if err := borgStageContextError(ctx); err != nil {
+		return err
+	}
 	err := s.system.linkat(source.dirFD, source.name, s.dirFD, source.name, 0)
-	if err == nil {
-		fd, stat, openErr := openVerifiedBorgStageFile(s.dirFD, source.name, source.size, &source.stat)
-		if openErr != nil {
-			return openErr
-		}
-		s.fileFD = fd
-		s.fileStat = stat
-		return unix.Fsync(s.dirFD)
-	}
-	if !errors.Is(err, unix.EXDEV) {
-		return err
-	}
-	fd, err := unix.Openat(s.dirFD, source.name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
 	if err != nil {
 		return err
 	}
-	copyOK := false
-	defer func() {
-		if !copyOK {
-			_ = unix.Close(fd)
-		}
-	}()
-	if err := unix.Fchmod(fd, 0o600); err != nil {
+	s.fileLinked = true
+	s.fileStat = source.stat
+	if err := borgStageContextError(ctx); err != nil {
 		return err
 	}
-	if err := copyBorgInput(fd, source.fileFD, source.size); err != nil {
-		return err
-	}
-	if err := unix.Fsync(fd); err != nil {
-		return err
-	}
-	var copied unix.Stat_t
-	if unix.Fstat(fd, &copied) != nil || !safeRegularMetadata(&copied) || copied.Size != source.size {
-		return errors.New("unsafe Borg stage copy")
-	}
-	if err := unix.Close(fd); err != nil {
-		return err
-	}
-	copyOK = true
-	readFD, stat, err := openVerifiedBorgStageFile(s.dirFD, source.name, source.size, nil)
+	fd, stat, err := openVerifiedBorgStageFile(s.dirFD, source.name, source.size, &source.stat)
 	if err != nil {
 		return err
 	}
-	s.fileFD = readFD
+	s.fileFD = fd
 	s.fileStat = stat
-	return unix.Fsync(s.dirFD)
-}
-
-func copyBorgInput(destinationFD, sourceFD int, size int64) error {
-	buffer := make([]byte, 128*1024)
-	var offset int64
-	for offset < size {
-		want := int64(len(buffer))
-		if remaining := size - offset; remaining < want {
-			want = remaining
-		}
-		n, err := unix.Pread(sourceFD, buffer[:want], offset)
-		if err != nil {
-			return err
-		}
-		if n <= 0 {
-			return errors.New("short Borg stage input")
-		}
-		written := 0
-		for written < n {
-			count, writeErr := unix.Write(destinationFD, buffer[written:n])
-			if writeErr != nil {
-				return writeErr
-			}
-			if count <= 0 {
-				return errors.New("short Borg stage write")
-			}
-			written += count
-		}
-		offset += int64(n)
-	}
-	var extra [1]byte
-	n, err := unix.Pread(sourceFD, extra[:], size)
-	if err != nil {
+	if err := borgStageContextError(ctx); err != nil {
 		return err
 	}
-	if n != 0 {
-		return errors.New("long Borg stage input")
+	if err := unix.Fsync(s.dirFD); err != nil {
+		return err
 	}
-	return nil
+	return borgStageContextError(ctx)
 }
 
 func openVerifiedBorgStageFile(dirFD int, name string, size int64, expected *unix.Stat_t) (int, unix.Stat_t, error) {
@@ -377,7 +388,7 @@ func openVerifiedBorgStageFile(dirFD int, name string, size int64, expected *uni
 }
 
 func (s *borgStage) valid() bool {
-	if s == nil || s.workFD < 0 || s.dirFD < 0 || s.fileFD < 0 || !borgStageNamePattern.MatchString(s.name) || !borgStageFilePattern.MatchString(s.fileName) {
+	if s == nil || s.workFD < 0 || s.dirFD < 0 || s.fileFD < 0 || !s.dirCreated || !s.fileLinked || !borgStageNamePattern.MatchString(s.name) || !borgStageFilePattern.MatchString(s.fileName) {
 		return false
 	}
 	var work unix.Stat_t
@@ -397,7 +408,7 @@ func (s *borgStage) cleanup() error {
 		return nil
 	}
 	var cleanupErr error
-	if s.fileFD >= 0 {
+	if s.fileLinked {
 		var current unix.Stat_t
 		if s.dirFD < 0 || unix.Fstatat(s.dirFD, s.fileName, &current, unix.AT_SYMLINK_NOFOLLOW) != nil || !safeRegularMetadata(&current) || !sameInode(&s.fileStat, &current) {
 			cleanupErr = errors.New("unsafe Borg stage cleanup")
@@ -405,7 +416,11 @@ func (s *borgStage) cleanup() error {
 			cleanupErr = err
 		} else if err := unix.Fsync(s.dirFD); err != nil {
 			cleanupErr = err
+		} else {
+			s.fileLinked = false
 		}
+	}
+	if s.fileFD >= 0 {
 		if err := unix.Close(s.fileFD); err != nil && cleanupErr == nil {
 			cleanupErr = err
 		}
@@ -417,18 +432,24 @@ func (s *borgStage) cleanup() error {
 		}
 		s.dirFD = -1
 	}
-	if s.workFD >= 0 {
+	if s.workFD >= 0 && s.dirCreated {
 		var current unix.Stat_t
-		if cleanupErr == nil && (unix.Fstatat(s.workFD, s.name, &current, unix.AT_SYMLINK_NOFOLLOW) != nil || !safeBorgDirectoryMetadata(&current) || !sameInode(&s.dirStat, &current)) {
-			cleanupErr = errors.New("unsafe Borg stage cleanup")
+		if cleanupErr == nil {
+			if unix.Fstatat(s.workFD, s.name, &current, unix.AT_SYMLINK_NOFOLLOW) != nil || !ownedBorgDirectoryMetadata(&current) || s.dirStat.Mode != 0 && !sameInode(&s.dirStat, &current) {
+				cleanupErr = errors.New("unsafe Borg stage cleanup")
+			}
 		}
 		if cleanupErr == nil {
 			if err := s.system.unlinkat(s.workFD, s.name, unix.AT_REMOVEDIR); err != nil {
 				cleanupErr = err
 			} else if err := unix.Fsync(s.workFD); err != nil {
 				cleanupErr = err
+			} else {
+				s.dirCreated = false
 			}
 		}
+	}
+	if s.workFD >= 0 {
 		if err := unix.Close(s.workFD); err != nil && cleanupErr == nil {
 			cleanupErr = err
 		}
