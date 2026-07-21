@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -305,29 +306,34 @@ func decodeObjectRecord(reader io.Reader) (ObjectRecord, error) {
 			return ObjectRecord{}, errors.New("duplicate ledger key")
 		}
 		seen[key] = struct{}{}
+		var target any
 		switch key {
 		case "object_id":
-			err = dec.Decode(&record.ObjectID)
+			target = &record.ObjectID
 		case "archive_name":
-			err = dec.Decode(&record.ArchiveName)
+			target = &record.ArchiveName
 		case "compressed_size":
-			err = dec.Decode(&record.CompressedSize)
+			target = &record.CompressedSize
 		case "encrypted_size":
-			err = dec.Decode(&record.EncryptedSize)
+			target = &record.EncryptedSize
 		case "received_at":
-			err = dec.Decode(&record.ReceivedAt)
+			target = &record.ReceivedAt
 		case "stored_at":
-			err = dec.Decode(&record.StoredAt)
+			target = &record.StoredAt
 		case "last_attempt_at":
-			err = dec.Decode(&record.LastAttemptAt)
+			target = &record.LastAttemptAt
 		case "latest_retry_class":
-			err = dec.Decode(&record.LatestRetryClass)
+			target = &record.LatestRetryClass
 		case "retry_count":
-			err = dec.Decode(&record.RetryCount)
+			target = &record.RetryCount
 		default:
 			return ObjectRecord{}, errors.New("unknown ledger key")
 		}
-		if err != nil {
+		var raw json.RawMessage
+		if err = dec.Decode(&raw); err != nil || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return ObjectRecord{}, errors.New("invalid ledger value")
+		}
+		if err = json.Unmarshal(raw, target); err != nil {
 			return ObjectRecord{}, errors.New("invalid ledger value")
 		}
 	}
@@ -337,6 +343,18 @@ func decodeObjectRecord(reader io.Reader) (ObjectRecord, error) {
 	}
 	if _, err = dec.Token(); !errors.Is(err, io.EOF) {
 		return ObjectRecord{}, errors.New("trailing ledger data")
+	}
+	for _, required := range [...]string{
+		"object_id",
+		"archive_name",
+		"compressed_size",
+		"encrypted_size",
+		"received_at",
+		"retry_count",
+	} {
+		if _, ok := seen[required]; !ok {
+			return ObjectRecord{}, errors.New("missing ledger key")
+		}
 	}
 	return record, nil
 }

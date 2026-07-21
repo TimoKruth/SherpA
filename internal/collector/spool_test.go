@@ -456,6 +456,93 @@ func TestSpoolCheckWritableReportsCleanupFailures(t *testing.T) {
 	})
 }
 
+func TestSpoolCleanupRejectsOperationalOpenFailure(t *testing.T) {
+	spool := openTestSpoolWithAge(t, defaultSpoolOps(), time.Hour)
+	now := time.Now()
+	name := ".sherpa-upload-0123456789abcdef0123456789abcdef.upload.partial"
+	path := filepath.Join(spool.path, name)
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	baseOpen := spool.ops.openat
+	spool.ops.openat = func(fd int, got string, flags int, mode uint32) (int, error) {
+		if got == name {
+			return -1, unix.EIO
+		}
+		return baseOpen(fd, got, flags, mode)
+	}
+	removed, err := spool.cleanupStalePartialsAt(now)
+	if err == nil || err.Error() != "collector spool cleanup failed" || removed != 0 {
+		t.Fatalf("removed=%d error=%v", removed, err)
+	}
+}
+
+func TestSpoolCleanupSkipsConfirmedDisappearanceRace(t *testing.T) {
+	spool := openTestSpoolWithAge(t, defaultSpoolOps(), time.Hour)
+	now := time.Now()
+	name := ".sherpa-upload-0123456789abcdef0123456789abcdef.upload.partial"
+	path := filepath.Join(spool.path, name)
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	baseOpen := spool.ops.openat
+	baseUnlink := spool.ops.unlinkat
+	spool.ops.openat = func(fd int, got string, flags int, mode uint32) (int, error) {
+		if got == name {
+			if err := baseUnlink(fd, got, 0); err != nil {
+				return -1, err
+			}
+			return -1, unix.ENOENT
+		}
+		return baseOpen(fd, got, flags, mode)
+	}
+	removed, err := spool.cleanupStalePartialsAt(now)
+	if err != nil || removed != 0 {
+		t.Fatalf("removed=%d error=%v", removed, err)
+	}
+}
+
+func TestSpoolCleanupPreservesDurableCountBeforeLaterOpenFailure(t *testing.T) {
+	spool := openTestSpoolWithAge(t, defaultSpoolOps(), time.Hour)
+	now := time.Now()
+	for _, token := range []string{"0123456789abcdef0123456789abcdef", "1123456789abcdef0123456789abcdef"} {
+		path := filepath.Join(spool.path, ".sherpa-upload-"+token+".upload.partial")
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseOpen := spool.ops.openat
+	opens := 0
+	syncs := 0
+	spool.ops.openat = func(fd int, name string, flags int, mode uint32) (int, error) {
+		opens++
+		if opens == 2 {
+			return -1, unix.EIO
+		}
+		return baseOpen(fd, name, flags, mode)
+	}
+	spool.ops.fsync = func(fd int) error {
+		syncs++
+		return unix.Fsync(fd)
+	}
+	removed, err := spool.cleanupStalePartialsAt(now)
+	if err == nil || err.Error() != "collector spool cleanup failed" {
+		t.Fatalf("removed=%d error=%v", removed, err)
+	}
+	if removed != 1 || opens != 2 || syncs != 1 {
+		t.Fatalf("removed=%d opens=%d syncs=%d", removed, opens, syncs)
+	}
+}
+
 func TestSpoolCleanupSyncsEachRemovalBeforeLaterFailure(t *testing.T) {
 	spool := openTestSpoolWithAge(t, defaultSpoolOps(), time.Hour)
 	now := time.Now()

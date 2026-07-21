@@ -295,6 +295,87 @@ func TestLedgerStrictJSONAcceptsVariedFieldOrder(t *testing.T) {
 	}
 }
 
+func TestLedgerStrictJSONRequiresEveryMandatoryField(t *testing.T) {
+	ledger := openTestLedger(t, defaultLedgerOps())
+	record := validTestRecord(time.Now().UTC().Truncate(time.Second))
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, omitted := range []string{
+		"object_id",
+		"archive_name",
+		"compressed_size",
+		"encrypted_size",
+		"received_at",
+		"retry_count",
+	} {
+		t.Run(omitted, func(t *testing.T) {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			delete(fields, omitted)
+			body, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ledger.path, testDigestHex+".json"), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = ledger.Get(record.ObjectID)
+			if err == nil || err.Error() != "collector ledger record invalid" {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLedgerStrictJSONRejectsNullForEveryApprovedField(t *testing.T) {
+	ledger := openTestLedger(t, defaultLedgerOps())
+	record := validTestRecord(time.Now().UTC().Truncate(time.Second))
+	stored := record.ReceivedAt.Add(time.Minute)
+	attempted := record.ReceivedAt.Add(30 * time.Second)
+	record.StoredAt = &stored
+	record.LastAttemptAt = &attempted
+	record.LatestRetryClass = "temporary"
+	record.RetryCount = 1
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		"object_id",
+		"archive_name",
+		"compressed_size",
+		"encrypted_size",
+		"received_at",
+		"stored_at",
+		"last_attempt_at",
+		"latest_retry_class",
+		"retry_count",
+	} {
+		t.Run(field, func(t *testing.T) {
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				t.Fatal(err)
+			}
+			fields[field] = json.RawMessage("null")
+			body, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ledger.path, testDigestHex+".json"), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = ledger.Get(record.ObjectID)
+			if err == nil || err.Error() != "collector ledger record invalid" {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
 func TestOpenLedgerRecoversExactTemporaryFilesDurably(t *testing.T) {
 	dir := newPrivateDir(t)
 	temp := ".sherpa-ledger-0123456789abcdef0123456789abcdef.tmp"

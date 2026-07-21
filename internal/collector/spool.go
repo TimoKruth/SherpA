@@ -526,8 +526,11 @@ func (s *Spool) cleanupStalePartialsAt(now time.Time) (int, error) {
 			continue
 		}
 		fd, e := s.ops.openat(s.dirFD, n, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-		if e != nil {
+		if errors.Is(e, unix.ENOENT) {
 			continue
+		}
+		if e != nil {
+			return removed, errors.New("collector spool cleanup failed")
 		}
 		var opened unix.Stat_t
 		if unix.Fstat(fd, &opened) != nil || !sameInode(&st, &opened) {
