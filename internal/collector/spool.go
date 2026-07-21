@@ -356,8 +356,57 @@ func (s *Spool) EncryptedPaths(id string) (string, string, error) {
 	if _, exists := s.active[n]; exists {
 		return "", "", errors.New("collector encrypted path active")
 	}
+	if err := s.discardPartialLocked(n); err != nil {
+		return "", "", errors.New("collector encrypted partial cleanup failed")
+	}
 	s.active[n] = struct{}{}
 	return filepath.Join(s.path, n), filepath.Join(s.path, d+".tar.gz.age"), nil
+}
+
+func (s *Spool) DiscardEncryptedPartial(path string) error {
+	if !s.begin() {
+		return errors.New("collector spool unavailable")
+	}
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	name, ok := s.exactChild(path)
+	if !ok || !partialAgePattern.MatchString(name) {
+		return errors.New("collector encrypted path invalid")
+	}
+	delete(s.active, name)
+	if err := s.discardPartialLocked(name); err != nil {
+		return errors.New("collector encrypted partial cleanup failed")
+	}
+	return nil
+}
+
+func (s *Spool) discardPartialLocked(name string) error {
+	var metadata unix.Stat_t
+	err := s.ops.fstatat(s.dirFD, name, &metadata, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil || !safeRegularMetadata(&metadata) {
+		return errors.New("unsafe partial")
+	}
+	fd, err := s.ops.openat(s.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var opened unix.Stat_t
+	valid := unix.Fstat(fd, &opened) == nil && safeRegularMetadata(&opened) && sameInode(&metadata, &opened)
+	closeErr := s.ops.close(fd)
+	if !valid || closeErr != nil || !s.sameEntry(name, &opened) {
+		return errors.New("unsafe partial")
+	}
+	if err := s.ops.unlinkat(s.dirFD, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+	return s.ops.fsync(s.dirFD)
 }
 func (s *Spool) CommitEncrypted(partial, final string) error {
 	if !s.begin() {
@@ -497,6 +546,33 @@ func (s *Spool) Discover() ([]PendingObject, error) {
 	})
 	return out, nil
 }
+func (s *Spool) CleanupAbandonedPartials() (int, error) {
+	if !s.begin() {
+		return 0, errors.New("collector spool unavailable")
+	}
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	names, err := readDirectoryNames(s.dirFD)
+	if err != nil {
+		return 0, errors.New("collector spool cleanup failed")
+	}
+	removed := 0
+	for _, name := range names {
+		if !validUploadPartialName(name) && !partialAgePattern.MatchString(name) {
+			continue
+		}
+		if _, active := s.active[name]; active {
+			continue
+		}
+		if err := s.discardPartialLocked(name); err != nil {
+			return removed, errors.New("collector spool cleanup failed")
+		}
+		removed++
+	}
+	return removed, nil
+}
+
 func (s *Spool) CleanupStalePartials() (int, error) { return s.cleanupStalePartialsAt(s.ops.now()) }
 func (s *Spool) cleanupStalePartialsAt(now time.Time) (int, error) {
 	if !s.begin() {

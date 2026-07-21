@@ -288,11 +288,13 @@ func TestWorkerRetriesStoredLedgerCleanupAfterBackendOutage(t *testing.T) {
 		}
 		return nil
 	}
+	workerNow := fixture.now
 	worker := newWorker(fixture.spool, fixture.ledger, fixture.service, fixture.status, time.Minute, workerOps{
-		now: fixture.clock,
+		now: func() time.Time { return workerNow },
 		wait: func(context.Context, time.Duration) error {
 			fixture.backend.existsErr = nil
 			fixture.backend.set(pending.ObjectID, true)
+			workerNow = workerNow.Add(time.Minute)
 			return nil
 		},
 	})

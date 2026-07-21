@@ -198,6 +198,51 @@ func (l *Ledger) Put(r ObjectRecord) error {
 	}
 	return nil
 }
+func (l *Ledger) DeletePending(id string) error {
+	if !l.begin() {
+		return errors.New("collector ledger unavailable")
+	}
+	defer l.end()
+	l.transition.Lock()
+	defer l.transition.Unlock()
+	digest, ok := canonicalDigest(id)
+	if !ok {
+		return errors.New("collector object ID invalid")
+	}
+	name := digest + ".json"
+	record, found, err := l.readRecord(name, false)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	if record.StoredAt != nil {
+		return errors.New("collector stored ledger record protected")
+	}
+	var metadata unix.Stat_t
+	if l.ops.fstatat(l.dirFD, name, &metadata, unix.AT_SYMLINK_NOFOLLOW) != nil || !safeRegularMetadata(&metadata) {
+		return errors.New("collector ledger record unsafe")
+	}
+	fd, err := l.ops.openat(l.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return errors.New("collector ledger record unavailable")
+	}
+	var opened unix.Stat_t
+	valid := unix.Fstat(fd, &opened) == nil && safeRegularMetadata(&opened) && sameInode(&metadata, &opened)
+	closeErr := l.ops.close(fd)
+	if !valid || closeErr != nil || !l.sameEntry(name, &opened) {
+		return errors.New("collector ledger record unsafe")
+	}
+	if err := l.ops.unlinkat(l.dirFD, name, 0); err != nil {
+		return errors.New("collector ledger removal failed")
+	}
+	if err := l.ops.fsync(l.dirFD); err != nil {
+		return errors.New("collector ledger synchronization failed")
+	}
+	return nil
+}
+
 func (l *Ledger) List() ([]ObjectRecord, error) {
 	if !l.begin() {
 		return nil, errors.New("collector ledger unavailable")

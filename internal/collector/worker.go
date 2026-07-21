@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -183,7 +184,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	if w == nil || w.spool == nil || w.ledger == nil || w.service == nil || w.status == nil || w.retryInterval <= 0 || w.ops.now == nil || w.ops.wait == nil || ctx == nil {
 		return errors.New("collector local state failed")
 	}
-	if _, err := w.spool.CleanupStalePartials(); err != nil {
+	if _, err := w.spool.CleanupAbandonedPartials(); err != nil {
 		return w.terminalFailure()
 	}
 	if err := w.spool.CheckWritable(); err != nil {
@@ -221,7 +222,6 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 
 		object := queue[0]
-		queue = queue[1:]
 		record, found, getErr := w.ledger.Get(object.ObjectID)
 		if getErr != nil || !found || !recordMatchesPending(record, object) {
 			return w.terminalFailure()
@@ -230,17 +230,18 @@ func (w *Worker) Run(ctx context.Context) error {
 		if delayErr != nil {
 			return w.terminalFailure()
 		}
-		if err := w.ops.wait(ctx, delay); err != nil {
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil
+		if delay > 0 {
+			if err := w.ops.wait(ctx, delay); err != nil {
+				if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil
+				}
+				return w.terminalFailure()
 			}
-			return w.terminalFailure()
-		}
-		if ctx.Err() != nil {
-			return nil
+			continue
 		}
 		_, commitErr := w.service.CommitPending(ctx, object)
 		if commitErr == nil {
+			queue = queue[1:]
 			continue
 		}
 		if w.status.Snapshot().TerminalLocalError {
@@ -249,119 +250,75 @@ func (w *Worker) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		queue = append(queue, object)
-		w.sortQueue(queue)
 	}
 }
 
-func (w *Worker) reconcileStartup(ctx context.Context) ([]PendingObject, error) {
-	objects, err := w.spool.Discover()
+func (w *Worker) reconcileStartup(context.Context) ([]PendingObject, error) {
+	w.service.publishMu.Lock()
+	defer w.service.publishMu.Unlock()
+	w.service.commitMu.Lock()
+	defer w.service.commitMu.Unlock()
+
+	records, err := w.ledger.List()
 	if err != nil {
 		return nil, w.terminalFailure()
 	}
-	records, err := w.ledger.List()
+	objects, err := w.spool.Discover()
 	if err != nil {
 		return nil, w.terminalFailure()
 	}
 	byID := make(map[string]ObjectRecord, len(records))
 	objectByID := make(map[string]PendingObject, len(objects))
-	for _, object := range objects {
-		objectByID[object.ObjectID] = object
-	}
 	for _, record := range records {
 		if _, duplicate := byID[record.ObjectID]; duplicate {
 			return nil, w.terminalFailure()
 		}
 		byID[record.ObjectID] = record
-		_, hasObject := objectByID[record.ObjectID]
-		if record.StoredAt != nil {
-			if !hasObject {
-				if err := w.verifyStoredRecord(ctx, record); err != nil {
-					return nil, err
-				}
-			}
-			continue
-		}
-		if !hasObject {
+	}
+	for _, object := range objects {
+		if _, duplicate := objectByID[object.ObjectID]; duplicate {
 			return nil, w.terminalFailure()
 		}
+		objectByID[object.ObjectID] = object
 	}
 
-	queue := make([]PendingObject, 0, len(objects))
-	for _, object := range objects {
-		record, found := byID[object.ObjectID]
-		if !found {
-			record = ObjectRecord{
-				ObjectID: object.ObjectID, ArchiveName: object.ArchiveName,
-				CompressedSize: object.EncryptedSize, EncryptedSize: object.EncryptedSize,
-				ReceivedAt: object.ReceivedAt, RetryCount: 0,
+	queue := make([]PendingObject, 0, len(records))
+	for _, record := range records {
+		object, hasObject := objectByID[record.ObjectID]
+		if !hasObject {
+			if record.StoredAt == nil {
+				if err := w.ledger.DeletePending(record.ObjectID); err != nil {
+					return nil, w.terminalFailure()
+				}
+				w.status.RemovePending(record.ObjectID)
+				continue
 			}
-			if err := w.ledger.Put(record); err != nil {
+			digest, ok := canonicalDigest(record.ObjectID)
+			if !ok {
 				return nil, w.terminalFailure()
 			}
-			byID[object.ObjectID] = record
-		}
-		object.ReceivedAt = record.ReceivedAt
-		if !recordMatchesPending(record, object) {
-			return nil, w.terminalFailure()
-		}
-		w.status.RecordPending(object.ObjectID, record.ReceivedAt)
-		present, queryErr := w.service.queryRemotePresence(ctx, record, object.ObjectID)
-		if queryErr != nil {
-			if w.status.Snapshot().TerminalLocalError {
-				return nil, errors.New("collector local state failed")
+			object = PendingObject{
+				ObjectID: record.ObjectID, DigestHex: digest, ArchiveName: record.ArchiveName,
+				EncryptedPath: filepath.Join(w.spool.path, digest+".tar.gz.age"),
+				EncryptedSize: record.EncryptedSize, ReceivedAt: record.ReceivedAt,
 			}
-			queue = append(queue, object)
-			continue
-		}
-		if present {
-			if err := w.service.finishVerified(object, record); err != nil {
-				return nil, err
+		} else {
+			object.ReceivedAt = record.ReceivedAt
+			if !recordMatchesPending(record, object) {
+				return nil, w.terminalFailure()
 			}
-			continue
+			delete(objectByID, record.ObjectID)
+		}
+		if record.StoredAt == nil {
+			w.status.RecordPending(record.ObjectID, record.ReceivedAt)
 		}
 		queue = append(queue, object)
 	}
+	if len(objectByID) != 0 {
+		return nil, w.terminalFailure()
+	}
 	w.sortQueue(queue)
 	return queue, nil
-}
-
-func (w *Worker) verifyStoredRecord(ctx context.Context, record ObjectRecord) error {
-	for {
-		present, err := w.service.queryRemotePresence(ctx, record, record.ObjectID)
-		if err == nil {
-			if !present {
-				return w.terminalFailure()
-			}
-			w.status.RemovePending(record.ObjectID)
-			w.status.RecordSuccess(*record.StoredAt)
-			return nil
-		}
-		if w.status.Snapshot().TerminalLocalError {
-			return errors.New("collector local state failed")
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		updated, found, getErr := w.ledger.Get(record.ObjectID)
-		if getErr != nil || !found || updated.StoredAt == nil {
-			return w.terminalFailure()
-		}
-		delay, delayErr := w.retryDelay(updated)
-		if delayErr != nil {
-			return w.terminalFailure()
-		}
-		if waitErr := w.ops.wait(ctx, delay); waitErr != nil {
-			if ctx.Err() != nil || errors.Is(waitErr, context.Canceled) || errors.Is(waitErr, context.DeadlineExceeded) {
-				return ctx.Err()
-			}
-			return w.terminalFailure()
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		record = updated
-	}
 }
 
 func (w *Worker) retryDelay(record ObjectRecord) (time.Duration, error) {
@@ -391,25 +348,11 @@ func (w *Worker) retryDelay(record ObjectRecord) (time.Duration, error) {
 
 func (w *Worker) sortQueue(queue []PendingObject) {
 	sort.SliceStable(queue, func(i, j int) bool {
-		left, _, _ := w.ledger.Get(queue[i].ObjectID)
-		right, _, _ := w.ledger.Get(queue[j].ObjectID)
-		leftDue := retryDue(left, w.retryInterval)
-		rightDue := retryDue(right, w.retryInterval)
-		if leftDue.Equal(rightDue) {
-			if left.ReceivedAt.Equal(right.ReceivedAt) {
-				return left.ObjectID < right.ObjectID
-			}
-			return left.ReceivedAt.Before(right.ReceivedAt)
+		if queue[i].ReceivedAt.Equal(queue[j].ReceivedAt) {
+			return queue[i].ObjectID < queue[j].ObjectID
 		}
-		return leftDue.Before(rightDue)
+		return queue[i].ReceivedAt.Before(queue[j].ReceivedAt)
 	})
-}
-
-func retryDue(record ObjectRecord, base time.Duration) time.Time {
-	if record.RetryCount == 0 || record.LastAttemptAt == nil {
-		return time.Time{}
-	}
-	return record.LastAttemptAt.Add(RetryDelay(base, record.RetryCount))
 }
 
 func RetryDelay(base time.Duration, retryCount int) time.Duration {

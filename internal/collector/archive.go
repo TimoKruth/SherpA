@@ -32,11 +32,12 @@ type serviceCrashPoint string
 const (
 	crashAfterUploadPartial    serviceCrashPoint = "upload-partial-write"
 	crashAfterAgePartial       serviceCrashPoint = "age-partial-write"
+	crashAfterPendingLedger    serviceCrashPoint = "pending-ledger-write"
 	crashAfterAgeRename        serviceCrashPoint = "age-rename"
 	crashAfterPlaintextRemoval serviceCrashPoint = "plaintext-removal"
 	crashAfterRemoteCreate     serviceCrashPoint = "remote-create"
 	crashAfterRemotePresence   serviceCrashPoint = "remote-presence-query"
-	crashAfterLedgerUpdate     serviceCrashPoint = "ledger-update"
+	crashAfterLedgerUpdate     serviceCrashPoint = "stored-ledger-write"
 	crashAfterAgeRemoval       serviceCrashPoint = "age-removal"
 )
 
@@ -55,7 +56,8 @@ type Service struct {
 	status    *StatusTracker
 	limits    recoveryarchive.Limits
 	ops       serviceOps
-	backendMu sync.Mutex
+	publishMu sync.Mutex
+	commitMu  sync.Mutex
 }
 
 func NewService(spool *Spool, ledger *Ledger, encryptor *Encryptor, backend Backend, status *StatusTracker, limits recoveryarchive.Limits) *Service {
@@ -89,14 +91,21 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 	if err != nil {
 		return Result{}, fixedIngestError(err)
 	}
+	receivedAt := s.ops.now()
+	if receivedAt.IsZero() {
+		if s.cleanupOwned(plaintextPath, "", "") != nil {
+			return Result{}, s.localFailure()
+		}
+		return Result{}, s.localFailure()
+	}
 	if err := s.crash(crashAfterUploadPartial); err != nil {
 		return Result{}, err
 	}
 	if _, err := s.ops.validateFile(ctx, plaintextPath, s.limits); err != nil {
-		if removeErr := s.spool.RemovePlaintext(plaintextPath); removeErr != nil {
+		if s.cleanupOwned(plaintextPath, "", "") != nil {
 			return Result{}, s.localFailure()
 		}
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return Result{}, errors.New("collector ingestion canceled")
 		}
 		return Result{}, errors.New("collector archive invalid")
@@ -104,16 +113,42 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 
 	pending, reused, err := s.findDurableObject(objectID)
 	if err != nil {
+		if s.cleanupOwned(plaintextPath, "", "") != nil {
+			return Result{}, s.localFailure()
+		}
 		return Result{}, s.localFailure()
 	}
-	if !reused {
+	var record ObjectRecord
+	if reused {
+		var found bool
+		record, found, err = s.ledger.Get(objectID)
+		if err != nil || !found || record.CompressedSize != compressedSize {
+			if s.cleanupOwned(plaintextPath, "", "") != nil {
+				return Result{}, s.localFailure()
+			}
+			return Result{}, s.localFailure()
+		}
+		pending.ReceivedAt = record.ReceivedAt
+		if !recordMatchesPending(record, pending) {
+			if s.cleanupOwned(plaintextPath, "", "") != nil {
+				return Result{}, s.localFailure()
+			}
+			return Result{}, s.localFailure()
+		}
+	} else {
 		partialPath, finalPath, pathErr := s.spool.EncryptedPaths(objectID)
 		if pathErr != nil {
+			if s.cleanupOwned(plaintextPath, "", "") != nil {
+				return Result{}, s.localFailure()
+			}
 			return Result{}, s.localFailure()
 		}
 		encryptedSize, encryptErr := s.ops.encryptFile(ctx, plaintextPath, partialPath)
 		if encryptErr != nil {
-			if ctx.Err() != nil {
+			if s.cleanupOwned(plaintextPath, partialPath, "") != nil {
+				return Result{}, s.localFailure()
+			}
+			if ctx.Err() != nil || errors.Is(encryptErr, context.Canceled) || errors.Is(encryptErr, context.DeadlineExceeded) {
 				return Result{}, errors.New("collector ingestion canceled")
 			}
 			return Result{}, errors.New("collector encryption failed")
@@ -121,11 +156,11 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		if err := s.crash(crashAfterAgePartial); err != nil {
 			return Result{}, err
 		}
-		if err := s.spool.CommitEncrypted(partialPath, finalPath); err != nil {
-			return Result{}, s.localFailure()
-		}
 		digest, ok := canonicalDigest(objectID)
 		if !ok || encryptedSize <= 0 {
+			if s.cleanupOwned(plaintextPath, partialPath, "") != nil {
+				return Result{}, s.localFailure()
+			}
 			return Result{}, s.localFailure()
 		}
 		pending = PendingObject{
@@ -134,23 +169,22 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 			ArchiveName:   "sherpa-" + digest,
 			EncryptedPath: finalPath,
 			EncryptedSize: encryptedSize,
-			ReceivedAt:    s.ops.now(),
+			ReceivedAt:    receivedAt,
 		}
+		record, err = s.publishEncrypted(plaintextPath, partialPath, finalPath, pending, compressedSize)
+		if err != nil {
+			return Result{}, err
+		}
+		pending.ReceivedAt = record.ReceivedAt
 	}
 
-	record, err := s.ensurePendingRecord(pending, compressedSize)
-	if err != nil {
-		return Result{}, err
-	}
-	pending.ReceivedAt = record.ReceivedAt
-	if err := s.crash(crashAfterAgeRename); err != nil {
-		return Result{}, err
-	}
-	if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
-		return Result{}, s.localFailure()
-	}
-	if err := s.crash(crashAfterPlaintextRemoval); err != nil {
-		return Result{}, err
+	if reused {
+		if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
+			return Result{}, s.localFailure()
+		}
+		if err := s.crash(crashAfterPlaintextRemoval); err != nil {
+			return Result{}, err
+		}
 	}
 	if record.StoredAt == nil {
 		s.status.RecordPending(pending.ObjectID, pending.ReceivedAt)
@@ -166,99 +200,143 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 	return Result{ObjectID: objectID, Status: status}, nil
 }
 
+func (s *Service) publishEncrypted(plaintextPath, partialPath, finalPath string, object PendingObject, compressedSize int64) (ObjectRecord, error) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+
+	record, cleanupPending, err := s.ensurePendingRecord(object, compressedSize)
+	if err != nil {
+		pendingID := ""
+		if cleanupPending {
+			pendingID = object.ObjectID
+		}
+		if s.cleanupOwned(plaintextPath, partialPath, pendingID) != nil {
+			return ObjectRecord{}, s.localFailure()
+		}
+		return ObjectRecord{}, err
+	}
+	object.ReceivedAt = record.ReceivedAt
+	if err := s.crash(crashAfterPendingLedger); err != nil {
+		return ObjectRecord{}, err
+	}
+	if err := s.spool.CommitEncrypted(partialPath, finalPath); err != nil {
+		published, foundPublished, discoverErr := s.findDurableObject(object.ObjectID)
+		if discoverErr != nil || foundPublished || published.ObjectID != "" {
+			return ObjectRecord{}, s.localFailure()
+		}
+		if s.cleanupOwned(plaintextPath, partialPath, object.ObjectID) != nil {
+			return ObjectRecord{}, s.localFailure()
+		}
+		return ObjectRecord{}, s.localFailure()
+	}
+	if err := s.crash(crashAfterAgeRename); err != nil {
+		return ObjectRecord{}, err
+	}
+	if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
+		return ObjectRecord{}, s.localFailure()
+	}
+	if err := s.crash(crashAfterPlaintextRemoval); err != nil {
+		return ObjectRecord{}, err
+	}
+	return record, nil
+}
+
 func (s *Service) CommitPending(ctx context.Context, object PendingObject) (bool, error) {
-	if s == nil || s.ledger == nil || s.spool == nil || s.backend == nil || s.status == nil || ctx == nil {
+	if s == nil || s.ledger == nil || s.spool == nil || s.backend == nil || s.status == nil || s.ops.now == nil || ctx == nil {
 		return false, errors.New("collector service unavailable")
 	}
+	if ctx.Err() != nil {
+		return false, errors.New("collector backend cancelled")
+	}
+	s.commitMu.Lock()
+	defer s.commitMu.Unlock()
+	if ctx.Err() != nil {
+		return false, errors.New("collector backend cancelled")
+	}
+
 	record, found, err := s.ledger.Get(object.ObjectID)
 	if err != nil || !found || !recordMatchesPending(record, object) {
 		return false, s.localFailure()
 	}
+	local, hasLocal, err := s.findDurableObject(object.ObjectID)
+	if err != nil {
+		return false, s.localFailure()
+	}
+	if hasLocal {
+		local.ReceivedAt = record.ReceivedAt
+		if !recordMatchesPending(record, local) {
+			return false, s.localFailure()
+		}
+		object = local
+	} else {
+		if record.StoredAt == nil {
+			return false, s.localFailure()
+		}
+		digest, ok := canonicalDigest(record.ObjectID)
+		if !ok {
+			return false, s.localFailure()
+		}
+		object = PendingObject{
+			ObjectID: record.ObjectID, DigestHex: digest, ArchiveName: record.ArchiveName,
+			EncryptedSize: record.EncryptedSize, ReceivedAt: record.ReceivedAt,
+		}
+	}
 
-	existing := false
-	s.backendMu.Lock()
-	present, existsErr := s.backend.Exists(ctx, object.ObjectID)
+	present, existsErr := s.backend.Exists(ctx, record.ObjectID)
 	if existsErr != nil {
-		s.backendMu.Unlock()
-		return false, s.backendFailure(record, existsErr)
+		return false, s.backendFailureLocked(record, existsErr)
 	}
 	if err := s.crash(crashAfterRemotePresence); err != nil {
-		s.backendMu.Unlock()
 		return false, err
 	}
-	if present {
-		existing = true
-	} else {
+	existing := present
+	if !present {
+		if !hasLocal && record.StoredAt != nil {
+			return false, s.localFailure()
+		}
 		createErr := s.backend.Create(ctx, object)
 		if err := s.crash(crashAfterRemoteCreate); err != nil {
-			s.backendMu.Unlock()
 			return false, err
 		}
-		present, existsErr = s.backend.Exists(ctx, object.ObjectID)
-		if existsErr == nil {
-			if err := s.crash(crashAfterRemotePresence); err != nil {
-				s.backendMu.Unlock()
-				return false, err
-			}
-		}
+		present, existsErr = s.backend.Exists(ctx, record.ObjectID)
 		if existsErr != nil {
-			s.backendMu.Unlock()
-			return false, s.backendFailure(record, existsErr)
+			return false, s.backendFailureLocked(record, existsErr)
+		}
+		if err := s.crash(crashAfterRemotePresence); err != nil {
+			return false, err
 		}
 		if !present {
-			s.backendMu.Unlock()
 			if createErr != nil {
-				return false, s.backendFailure(record, createErr)
+				return false, s.backendFailureLocked(record, createErr)
 			}
-			return false, s.backendFailureClass(record, "remote_verification_failed")
+			return false, s.backendFailureClassLocked(record, "remote_verification_failed")
 		}
 	}
-	s.backendMu.Unlock()
-	if err := s.finishVerified(object, record); err != nil {
-		return false, err
-	}
-	return existing, nil
-}
 
-func (s *Service) queryRemotePresence(ctx context.Context, record ObjectRecord, objectID string) (bool, error) {
-	s.backendMu.Lock()
-	present, err := s.backend.Exists(ctx, objectID)
-	if err == nil {
-		if crashErr := s.crash(crashAfterRemotePresence); crashErr != nil {
-			s.backendMu.Unlock()
-			return false, crashErr
-		}
-	}
-	s.backendMu.Unlock()
-	if err != nil {
-		return false, s.backendFailure(record, err)
-	}
-	return present, nil
-}
-
-func (s *Service) finishVerified(object PendingObject, record ObjectRecord) error {
-	storedAt := s.ops.now()
-	if storedAt.IsZero() || storedAt.Before(record.ReceivedAt) {
-		return s.localFailure()
-	}
 	if record.StoredAt == nil {
+		storedAt := s.ops.now()
+		if storedAt.IsZero() || storedAt.Before(record.ReceivedAt) {
+			return false, s.localFailure()
+		}
 		record.StoredAt = timePointer(storedAt)
-	}
-	if err := s.ledger.Put(record); err != nil {
-		return s.localFailure()
+		if err := s.ledger.Put(record); err != nil {
+			return false, s.localFailure()
+		}
 	}
 	if err := s.crash(crashAfterLedgerUpdate); err != nil {
-		return err
+		return false, err
 	}
-	if err := s.spool.RemoveEncrypted(object.EncryptedPath); err != nil {
-		return s.localFailure()
+	if hasLocal {
+		if err := s.spool.RemoveEncrypted(object.EncryptedPath); err != nil {
+			return false, s.localFailure()
+		}
 	}
 	if err := s.crash(crashAfterAgeRemoval); err != nil {
-		return err
+		return false, err
 	}
-	s.status.RemovePending(object.ObjectID)
+	s.status.RemovePending(record.ObjectID)
 	s.status.RecordSuccess(*record.StoredAt)
-	return nil
+	return existing, nil
 }
 
 func (s *Service) findDurableObject(objectID string) (PendingObject, bool, error) {
@@ -274,19 +352,19 @@ func (s *Service) findDurableObject(objectID string) (PendingObject, bool, error
 	return PendingObject{}, false, nil
 }
 
-func (s *Service) ensurePendingRecord(object PendingObject, compressedSize int64) (ObjectRecord, error) {
+func (s *Service) ensurePendingRecord(object PendingObject, compressedSize int64) (ObjectRecord, bool, error) {
 	record, found, err := s.ledger.Get(object.ObjectID)
 	if err != nil {
-		return ObjectRecord{}, s.localFailure()
+		return ObjectRecord{}, false, s.localFailure()
 	}
 	if found {
-		if !recordMatchesPending(record, object) {
-			return ObjectRecord{}, s.localFailure()
+		if record.CompressedSize != compressedSize || !recordMatchesPending(record, object) {
+			return ObjectRecord{}, false, s.localFailure()
 		}
-		return record, nil
+		return record, false, nil
 	}
 	if compressedSize <= 0 || object.ReceivedAt.IsZero() {
-		return ObjectRecord{}, s.localFailure()
+		return ObjectRecord{}, false, s.localFailure()
 	}
 	record = ObjectRecord{
 		ObjectID:       object.ObjectID,
@@ -297,9 +375,26 @@ func (s *Service) ensurePendingRecord(object PendingObject, compressedSize int64
 		RetryCount:     0,
 	}
 	if err := s.ledger.Put(record); err != nil {
-		return ObjectRecord{}, s.localFailure()
+		return ObjectRecord{}, true, s.localFailure()
 	}
-	return record, nil
+	return record, true, nil
+}
+
+func (s *Service) cleanupOwned(plaintextPath, partialPath, pendingID string) error {
+	failed := false
+	if partialPath != "" && s.spool.DiscardEncryptedPartial(partialPath) != nil {
+		failed = true
+	}
+	if pendingID != "" && s.ledger.DeletePending(pendingID) != nil {
+		failed = true
+	}
+	if plaintextPath != "" && s.spool.RemovePlaintext(plaintextPath) != nil {
+		failed = true
+	}
+	if failed {
+		return errors.New("collector cleanup failed")
+	}
+	return nil
 }
 
 func recordMatchesPending(record ObjectRecord, object PendingObject) bool {
@@ -309,11 +404,11 @@ func recordMatchesPending(record ObjectRecord, object PendingObject) bool {
 		record.EncryptedSize == object.EncryptedSize && !record.ReceivedAt.IsZero()
 }
 
-func (s *Service) backendFailure(record ObjectRecord, backendErr error) error {
-	return s.backendFailureClass(record, retryClass(backendErr))
+func (s *Service) backendFailureLocked(record ObjectRecord, backendErr error) error {
+	return s.backendFailureClassLocked(record, retryClass(backendErr))
 }
 
-func (s *Service) backendFailureClass(record ObjectRecord, class string) error {
+func (s *Service) backendFailureClassLocked(record ObjectRecord, class string) error {
 	attemptedAt := s.ops.now()
 	if attemptedAt.IsZero() || attemptedAt.Before(record.ReceivedAt) {
 		return s.localFailure()
