@@ -279,7 +279,7 @@ func (l *Ledger) createTemp() (string, int, error) {
 }
 func (l *Ledger) sameEntry(n string, st *unix.Stat_t) bool {
 	var cur unix.Stat_t
-	return l.ops.fstatat(l.dirFD, n, &cur, unix.AT_SYMLINK_NOFOLLOW) == nil && sameInode(st, &cur)
+	return l.ops.fstatat(l.dirFD, n, &cur, unix.AT_SYMLINK_NOFOLLOW) == nil && safeRegularMetadata(&cur) && sameInode(st, &cur)
 }
 func validateObjectRecord(r ObjectRecord) (string, bool) {
 	d, ok := canonicalDigest(r.ObjectID)

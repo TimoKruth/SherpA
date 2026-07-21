@@ -23,7 +23,6 @@ const (
 	spoolSafetyReserve   int64 = 1 << 30
 	spoolLockName              = ".sherpa-spool.lock"
 	spoolCopyBufferSize        = 32 * 1024
-	overlongProbeTimeout       = 25 * time.Millisecond
 	maxZeroProgressReads       = 8
 )
 
@@ -48,12 +47,14 @@ type spoolOps struct {
 	fstatat         func(int, string, *unix.Stat_t, int) error
 	close           func(int) error
 	write           func(int, []byte) (int, error)
+	unlinkat        func(int, string, int) error
+	flock           func(int, int) error
 	random          io.Reader
 	now             func() time.Time
 }
 
 func defaultSpoolOps() spoolOps {
-	return spoolOps{unix.Fstatfs, unix.Fsync, renameAtNoReplace, unix.Openat, unix.Fstatat, unix.Close, unix.Write, rand.Reader, time.Now}
+	return spoolOps{unix.Fstatfs, unix.Fsync, renameAtNoReplace, unix.Openat, unix.Fstatat, unix.Close, unix.Write, unix.Unlinkat, unix.Flock, rand.Reader, time.Now}
 }
 
 type Spool struct {
@@ -71,7 +72,7 @@ func OpenSpool(dir string, age time.Duration) (*Spool, error) {
 	return openSpool(dir, age, defaultSpoolOps())
 }
 func openSpool(dir string, age time.Duration, ops spoolOps) (*Spool, error) {
-	if age <= 0 || ops.statfs == nil || ops.fsync == nil || ops.renameNoReplace == nil || ops.openat == nil || ops.fstatat == nil || ops.close == nil || ops.write == nil || ops.random == nil || ops.now == nil {
+	if age <= 0 || ops.statfs == nil || ops.fsync == nil || ops.renameNoReplace == nil || ops.openat == nil || ops.fstatat == nil || ops.close == nil || ops.write == nil || ops.unlinkat == nil || ops.flock == nil || ops.random == nil || ops.now == nil {
 		return nil, errors.New("collector spool configuration invalid")
 	}
 	abs, err := filepath.Abs(dir)
@@ -117,20 +118,41 @@ func (s *Spool) AcquireLock() (func() error, error) {
 		return nil, errors.New("collector spool unavailable")
 	}
 	defer s.end()
-	fd, err := s.ops.openat(s.dirFD, spoolLockName, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	var expected unix.Stat_t
+	metaErr := s.ops.fstatat(s.dirFD, spoolLockName, &expected, unix.AT_SYMLINK_NOFOLLOW)
+	flags := unix.O_RDWR | unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
+	created := false
+	if errors.Is(metaErr, unix.ENOENT) {
+		flags |= unix.O_CREAT | unix.O_EXCL
+		created = true
+	} else if metaErr != nil || !safeRegularMetadata(&expected) {
+		return nil, errors.New("collector spool lock unsafe")
+	}
+	fd, err := s.ops.openat(s.dirFD, spoolLockName, flags, 0o600)
 	if err != nil {
 		return nil, classifyStorage(err, "collector spool lock unavailable")
 	}
-	if forceRegularMode0600(fd) != nil {
+	if created && forceRegularMode0600(fd) != nil {
 		_ = s.ops.close(fd)
 		return nil, errors.New("collector spool lock unsafe")
 	}
-	if err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	var opened unix.Stat_t
+	if unix.Fstat(fd, &opened) != nil || !safeRegularMetadata(&opened) || (!created && !sameInode(&expected, &opened)) {
+		_ = s.ops.close(fd)
+		return nil, errors.New("collector spool lock unsafe")
+	}
+	if err = s.ops.flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = s.ops.close(fd)
 		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
 			return nil, errors.New("collector spool already in use")
 		}
 		return nil, errors.New("collector spool lock unavailable")
+	}
+	if !s.sameEntry(spoolLockName, &opened) {
+		_ = s.ops.close(fd)
+		return nil, errors.New("collector spool lock unsafe")
 	}
 	var once sync.Once
 	var releaseErr error
@@ -169,6 +191,40 @@ func (s *Spool) Receive(ctx context.Context, source io.Reader, length int64) (pa
 	if ctx == nil || source == nil {
 		return "", "", 0, errors.New("collector upload invalid")
 	}
+	readCloser, ok := source.(io.ReadCloser)
+	if !ok {
+		return "", "", 0, errors.New("collector upload source not closable")
+	}
+	var closeOnce sync.Once
+	var sourceCloseErr error
+	closeSource := func() { closeOnce.Do(func() { sourceCloseErr = readCloser.Close() }) }
+	stopWatcher := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			closeSource()
+		case <-stopWatcher:
+		}
+	}()
+	var finishOnce sync.Once
+	finishSource := func() error {
+		finishOnce.Do(func() {
+			close(stopWatcher)
+			<-watcherDone
+			closeSource()
+		})
+		return sourceCloseErr
+	}
+	defer func() {
+		if finishSource() != nil && retErr == nil {
+			path, id, written, retErr = "", "", 0, errors.New("collector upload source close failed")
+		}
+	}()
+	if ctx.Err() != nil {
+		return "", "", 0, errors.New("collector upload canceled")
+	}
 	if !s.begin() {
 		return "", "", 0, errors.New("collector spool unavailable")
 	}
@@ -199,50 +255,68 @@ func (s *Spool) Receive(ctx context.Context, source io.Reader, length int64) (pa
 	h := sha256.New()
 	writer := io.MultiWriter(fdWriter{fd, s.ops.write}, h)
 	buf := make([]byte, spoolCopyBufferSize)
-	zeros := 0
+	zeroReads := 0
+	sawEOF := false
 	for written < length {
 		want := int64(len(buf))
-		if rem := length - written; rem < want {
-			want = rem
+		if remaining := length - written; remaining < want {
+			want = remaining
 		}
-		n, rerr := readCancelable(ctx, source, buf[:want], 0)
+		n, readErr := readCloser.Read(buf[:want])
+		if n < 0 || n > int(want) {
+			return "", "", 0, errors.New("collector upload read failed")
+		}
 		if n > 0 {
-			zeros = 0
-			wn, werr := writer.Write(buf[:n])
+			zeroReads = 0
+			wn, writeErr := writer.Write(buf[:n])
 			written += int64(wn)
-			if werr != nil || wn != n {
-				return "", "", 0, classifyStorage(werr, "collector upload write failed")
+			if writeErr != nil || wn != n {
+				return "", "", 0, classifyStorage(writeErr, "collector upload write failed")
 			}
 		} else {
-			zeros++
-			if zeros > maxZeroProgressReads {
+			zeroReads++
+			if zeroReads > maxZeroProgressReads {
 				return "", "", 0, errors.New("collector upload read failed")
 			}
 		}
-		if rerr != nil {
+		if readErr != nil {
 			if ctx.Err() != nil {
 				return "", "", 0, errors.New("collector upload canceled")
 			}
-			if errors.Is(rerr, io.EOF) {
-				return "", "", 0, errors.New("collector upload length mismatch")
+			if errors.Is(readErr, io.EOF) {
+				if written != length {
+					return "", "", 0, errors.New("collector upload length mismatch")
+				}
+				sawEOF = true
+				break
 			}
 			return "", "", 0, errors.New("collector upload read failed")
 		}
 	}
-	var extra [1]byte
-	for probeZeros := 0; ; probeZeros++ {
-		n, rerr := readCancelable(ctx, source, extra[:], overlongProbeTimeout)
-		if ctx.Err() != nil {
-			return "", "", 0, errors.New("collector upload canceled")
-		}
-		if n > 0 {
-			return "", "", 0, errors.New("collector upload length mismatch")
-		}
-		if errors.Is(rerr, io.EOF) || errors.Is(rerr, errProbeTimeout) {
-			break
-		}
-		if rerr != nil || probeZeros >= maxZeroProgressReads {
-			return "", "", 0, errors.New("collector upload length mismatch")
+	if !sawEOF {
+		var extra [1]byte
+		zeroReads = 0
+		for {
+			n, readErr := readCloser.Read(extra[:])
+			if n < 0 || n > 1 {
+				return "", "", 0, errors.New("collector upload read failed")
+			}
+			if n > 0 {
+				return "", "", 0, errors.New("collector upload length mismatch")
+			}
+			zeroReads++
+			if zeroReads > maxZeroProgressReads {
+				return "", "", 0, errors.New("collector upload length mismatch")
+			}
+			if readErr != nil {
+				if ctx.Err() != nil {
+					return "", "", 0, errors.New("collector upload canceled")
+				}
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				return "", "", 0, errors.New("collector upload read failed")
+			}
 		}
 	}
 	if err := s.ops.fsync(fd); err != nil {
@@ -253,52 +327,11 @@ func (s *Spool) Receive(ctx context.Context, source io.Reader, length int64) (pa
 		return "", "", 0, classifyStorage(err, "collector upload close failed")
 	}
 	fd = -1
+	if finishSource() != nil {
+		return "", "", 0, errors.New("collector upload source close failed")
+	}
 	success = true
 	return filepath.Join(s.path, name), "sha256:" + hex.EncodeToString(h.Sum(nil)), written, nil
-}
-
-var errProbeTimeout = errors.New("probe timeout")
-
-type readResult struct {
-	n   int
-	err error
-	buf []byte
-}
-
-func readCancelable(ctx context.Context, r io.Reader, p []byte, timeout time.Duration) (int, error) {
-	owned := make([]byte, len(p))
-	ch := make(chan readResult, 1)
-	go func() {
-		n, e := r.Read(owned)
-		ch <- readResult{n: n, err: e, buf: owned}
-	}()
-	var timer <-chan time.Time
-	var t *time.Timer
-	if timeout > 0 {
-		t = time.NewTimer(timeout)
-		defer t.Stop()
-		timer = t.C
-	}
-	select {
-	case x := <-ch:
-		if x.n < 0 || x.n > len(x.buf) {
-			return 0, errors.New("invalid read count")
-		}
-		if x.n > 0 {
-			copy(p, x.buf[:x.n])
-		}
-		return x.n, x.err
-	case <-ctx.Done():
-		if c, ok := r.(io.Closer); ok {
-			_ = c.Close()
-		}
-		return 0, ctx.Err()
-	case <-timer:
-		if c, ok := r.(io.Closer); ok {
-			_ = c.Close()
-		}
-		return 0, errProbeTimeout
-	}
 }
 
 type fdWriter struct {
@@ -387,40 +420,31 @@ func (s *Spool) remove(path string, plain bool) error {
 		return errors.New("collector removal path invalid")
 	}
 	delete(s.active, name)
-	return s.quarantineRemove(name)
-}
-func (s *Spool) quarantineRemove(name string) error {
-	st, regular, err := s.entryMetadata(name)
-	if err != nil || !regular {
-		return errors.New("collector spool removal failed")
-	}
-	fd, err := s.ops.openat(s.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return errors.New("collector spool removal failed")
-	}
-	var opened unix.Stat_t
-	ok := unix.Fstat(fd, &opened) == nil && sameInode(&st, &opened)
-	_ = s.ops.close(fd)
-	if !ok {
-		return errors.New("collector spool removal failed")
-	}
-	q, err := s.randomName(".sherpa-remove-", ".tmp")
-	if err != nil {
-		return errors.New("collector spool removal failed")
-	}
-	if err = s.ops.renameNoReplace(s.dirFD, name, s.dirFD, q); err != nil {
-		return errors.New("collector spool removal failed")
-	}
-	if !s.sameEntry(q, &opened) {
-		return errors.New("collector spool removal failed")
-	}
-	if err = unix.Unlinkat(s.dirFD, q, 0); err != nil {
+	if err := s.verifiedUnlink(name); err != nil {
 		return errors.New("collector spool removal failed")
 	}
 	if s.ops.fsync(s.dirFD) != nil {
 		return errors.New("collector spool synchronization failed")
 	}
 	return nil
+}
+
+func (s *Spool) verifiedUnlink(name string) error {
+	st, regular, err := s.entryMetadata(name)
+	if err != nil || !regular {
+		return errors.New("unsafe removal")
+	}
+	fd, err := s.ops.openat(s.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	var opened unix.Stat_t
+	valid := unix.Fstat(fd, &opened) == nil && safeRegularMetadata(&opened) && sameInode(&st, &opened)
+	closeErr := s.ops.close(fd)
+	if !valid || closeErr != nil || !s.sameEntry(name, &opened) {
+		return errors.New("unsafe removal")
+	}
+	return s.ops.unlinkat(s.dirFD, name, 0)
 }
 
 func (s *Spool) Discover() ([]PendingObject, error) {
@@ -522,8 +546,7 @@ func (s *Spool) cleanupStalePartialsAt(now time.Time) (int, error) {
 		if !s.sameEntry(n, &opened) {
 			return removed, errors.New("collector spool cleanup failed")
 		}
-		q, e := s.randomName(".sherpa-remove-", ".tmp")
-		if e != nil || s.ops.renameNoReplace(s.dirFD, n, s.dirFD, q) != nil || !s.sameEntry(q, &opened) || unix.Unlinkat(s.dirFD, q, 0) != nil {
+		if s.ops.unlinkat(s.dirFD, n, 0) != nil {
 			return removed, errors.New("collector spool cleanup failed")
 		}
 		removed++
@@ -546,14 +569,14 @@ func (s *Spool) CheckWritable() error {
 	}
 	if e = s.ops.fsync(fd); e != nil {
 		_ = s.ops.close(fd)
-		_ = unix.Unlinkat(s.dirFD, n, 0)
+		_ = s.ops.unlinkat(s.dirFD, n, 0)
 		return classifyStorage(e, "collector spool not writable")
 	}
 	if e = s.ops.close(fd); e != nil {
-		_ = unix.Unlinkat(s.dirFD, n, 0)
+		_ = s.ops.unlinkat(s.dirFD, n, 0)
 		return classifyStorage(e, "collector spool not writable")
 	}
-	if unix.Unlinkat(s.dirFD, n, 0) != nil || s.ops.fsync(s.dirFD) != nil {
+	if s.ops.unlinkat(s.dirFD, n, 0) != nil || s.ops.fsync(s.dirFD) != nil {
 		return errors.New("collector spool not writable")
 	}
 	return nil
@@ -574,6 +597,7 @@ func (s *Spool) createRandomFile(pre, suf string) (string, int, error) {
 		}
 		if forceRegularMode0600(fd) != nil {
 			_ = s.ops.close(fd)
+			_ = s.ops.unlinkat(s.dirFD, n, 0)
 			return "", -1, errors.New("unsafe file")
 		}
 		return n, fd, nil
@@ -602,7 +626,10 @@ func (s *Spool) entryMetadata(n string) (unix.Stat_t, bool, error) {
 }
 func (s *Spool) sameEntry(n string, st *unix.Stat_t) bool {
 	var cur unix.Stat_t
-	return s.ops.fstatat(s.dirFD, n, &cur, unix.AT_SYMLINK_NOFOLLOW) == nil && sameInode(st, &cur)
+	return s.ops.fstatat(s.dirFD, n, &cur, unix.AT_SYMLINK_NOFOLLOW) == nil && safeRegularMetadata(&cur) && sameInode(st, &cur)
+}
+func safeRegularMetadata(st *unix.Stat_t) bool {
+	return st != nil && st.Mode&unix.S_IFMT == unix.S_IFREG && st.Mode&0o7777 == 0o600 && st.Uid == uint32(os.Geteuid()) && st.Gid == uint32(os.Getegid())
 }
 func sameInode(a, b *unix.Stat_t) bool {
 	return a != nil && b != nil && a.Dev == b.Dev && a.Ino == b.Ino && a.Mode&unix.S_IFMT == b.Mode&unix.S_IFMT

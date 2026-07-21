@@ -65,7 +65,7 @@ func TestSpoolAcquireLockRejectsSecondProcess(t *testing.T) {
 func TestSpoolReceiveHashesExactCompressedBytes(t *testing.T) {
 	spool := openTestSpool(t, defaultSpoolOps())
 	body := bytes.Repeat([]byte("compressed-archive-canary\n"), 4096)
-	path, objectID, written, err := spool.Receive(context.Background(), bytes.NewReader(body), int64(len(body)))
+	path, objectID, written, err := spool.Receive(context.Background(), testReadCloser(body), int64(len(body)))
 	if err != nil {
 		t.Fatalf("Receive: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestSpoolReceiveRejectsShortAndOverlongBodies(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spool := openTestSpool(t, defaultSpoolOps())
-			path, digest, written, err := spool.Receive(context.Background(), bytes.NewReader(tc.body), tc.declared)
+			path, digest, written, err := spool.Receive(context.Background(), testReadCloser(tc.body), tc.declared)
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("Receive error = %v", err)
 			}
@@ -470,7 +470,7 @@ func TestSpoolReceiveHonorsContextCancellation(t *testing.T) {
 	spool := openTestSpool(t, defaultSpoolOps())
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	path, digest, written, err := spool.Receive(ctx, bytes.NewReader([]byte("x")), 1)
+	path, digest, written, err := spool.Receive(ctx, testReadCloser([]byte("x")), 1)
 	if err == nil || err.Error() != "collector upload canceled" {
 		t.Fatalf("error = %v", err)
 	}
@@ -527,6 +527,8 @@ func entryNames(entries []os.DirEntry) []string {
 }
 
 type transientEmptyReader struct{ calls int }
+
+func (r *transientEmptyReader) Close() error { return nil }
 
 func (r *transientEmptyReader) Read(buffer []byte) (int, error) {
 	r.calls++

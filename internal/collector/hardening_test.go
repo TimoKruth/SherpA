@@ -15,30 +15,92 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestSpoolReceiveExactBodyDoesNotWaitForOpenSource(t *testing.T) {
+func TestSpoolReceiveOpenExactBodyWaitsForEOFOrCancellation(t *testing.T) {
 	spool := openTestSpool(t, defaultSpoolOps())
 	r, w := io.Pipe()
-	defer w.Close()
-	go func() { _, _ = w.Write([]byte("x")) }()
-	done := make(chan error, 1)
-	go func() { _, _, _, err := spool.Receive(context.Background(), r, 1); done <- err }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Receive: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Receive waited forever for open exact-length source")
-	}
-}
-
-func TestSpoolReceiveBlockedReadIsCanceled(t *testing.T) {
-	spool := openTestSpool(t, defaultSpoolOps())
-	r, w := io.Pipe()
-	defer w.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { _, _, _, err := spool.Receive(ctx, r, 1); done <- err }()
+	if _, err := w.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("open exact body returned without EOF: %v", err)
+	case <-time.After(75 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != "collector upload canceled" {
+			t.Fatalf("error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("open exact body did not cancel")
+	}
+	_ = w.Close()
+}
+
+func TestSpoolReceiveDelayedExtraByteIsNeverAccepted(t *testing.T) {
+	spool := openTestSpool(t, defaultSpoolOps())
+	r := newDelayedExtraReadCloser()
+	done := make(chan error, 1)
+	go func() { _, _, _, err := spool.Receive(context.Background(), r, 1); done <- err }()
+	<-r.probing
+	select {
+	case err := <-done:
+		t.Fatalf("delayed overlong body accepted: %v", err)
+	case <-time.After(75 * time.Millisecond):
+	}
+	close(r.releaseExtra)
+	if err := <-done; err == nil || err.Error() != "collector upload length mismatch" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSpoolReceiveRejectsNonReadCloserBeforeCreatingPartial(t *testing.T) {
+	spool := openTestSpool(t, defaultSpoolOps())
+	_, _, _, err := spool.Receive(context.Background(), bytes.NewReader([]byte("x")), 1)
+	if err == nil || err.Error() != "collector upload source not closable" {
+		t.Fatalf("error = %v", err)
+	}
+	entries, readErr := os.ReadDir(spool.path)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("partial created: %v %v", entryNames(entries), readErr)
+	}
+}
+
+func TestSpoolReceiveHandlesNEOFFraming(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		source  io.ReadCloser
+		length  int64
+		wantErr string
+	}{
+		{"exact", &sequenceReadCloser{steps: []readStep{{data: []byte("x"), err: io.EOF}}}, 1, ""},
+		{"short", &sequenceReadCloser{steps: []readStep{{data: []byte("x"), err: io.EOF}}}, 2, "collector upload length mismatch"},
+		{"overlong", &sequenceReadCloser{steps: []readStep{{data: []byte("x")}, {data: []byte("y"), err: io.EOF}}}, 1, "collector upload length mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spool := openTestSpool(t, defaultSpoolOps())
+			_, _, _, err := spool.Receive(context.Background(), tc.source, tc.length)
+			if tc.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestSpoolReceiveBlockedReadIsCanceledAndJoined(t *testing.T) {
+	spool := openTestSpool(t, defaultSpoolOps())
+	r := newBlockingReadCloser()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { _, _, _, err := spool.Receive(ctx, r, 1); done <- err }()
+	<-r.entered
 	cancel()
 	select {
 	case err := <-done:
@@ -48,6 +110,50 @@ func TestSpoolReceiveBlockedReadIsCanceled(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("blocked Receive was not canceled")
 	}
+	select {
+	case <-r.exited:
+	case <-time.After(time.Second):
+		t.Fatal("blocked read worker was not joined")
+	}
+	if r.closeCount != 1 {
+		t.Fatalf("source close count = %d", r.closeCount)
+	}
+}
+
+func TestSpoolReceiveOwnsSourceOnEveryReturn(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		spool := openTestSpool(t, defaultSpoolOps())
+		source := &trackingReadCloser{Reader: bytes.NewReader([]byte("x"))}
+		if _, _, _, err := spool.Receive(context.Background(), source, 1); err != nil {
+			t.Fatal(err)
+		}
+		if source.closeCount != 1 {
+			t.Fatalf("source close count = %d", source.closeCount)
+		}
+	})
+	t.Run("preflight failure", func(t *testing.T) {
+		spool := openTestSpool(t, defaultSpoolOps())
+		source := &trackingReadCloser{Reader: bytes.NewReader([]byte("x"))}
+		if _, _, _, err := spool.Receive(context.Background(), source, 0); err == nil {
+			t.Fatal("invalid length accepted")
+		}
+		if source.closeCount != 1 {
+			t.Fatalf("source close count = %d", source.closeCount)
+		}
+	})
+	t.Run("close failure clears active", func(t *testing.T) {
+		spool := openTestSpool(t, defaultSpoolOps())
+		source := &trackingReadCloser{Reader: bytes.NewReader([]byte("x")), closeErr: unix.EIO}
+		if _, _, _, err := spool.Receive(context.Background(), source, 1); err == nil || err.Error() != "collector upload source close failed" {
+			t.Fatalf("error = %v", err)
+		}
+		spool.transition.Lock()
+		active := len(spool.active)
+		spool.transition.Unlock()
+		if active != 0 {
+			t.Fatalf("active uploads after close failure = %d", active)
+		}
+	})
 }
 
 func TestSpoolReceiveBoundsRepeatedZeroProgress(t *testing.T) {
@@ -85,7 +191,7 @@ func TestSpoolStorageErrorsClassifyInsufficientStorage(t *testing.T) {
 			ops := defaultSpoolOps()
 			ops.openat = func(int, string, int, uint32) (int, error) { return -1, errno }
 			spool := openTestSpool(t, ops)
-			_, _, _, err := spool.Receive(context.Background(), bytes.NewReader([]byte("x")), 1)
+			_, _, _, err := spool.Receive(context.Background(), testReadCloser([]byte("x")), 1)
 			if err == nil || err.Error() != "collector insufficient storage" {
 				t.Fatalf("create error = %v", err)
 			}
@@ -94,7 +200,7 @@ func TestSpoolStorageErrorsClassifyInsufficientStorage(t *testing.T) {
 	ops := defaultSpoolOps()
 	ops.fsync = func(int) error { return unix.ENOSPC }
 	spool := openTestSpool(t, ops)
-	_, _, _, err := spool.Receive(context.Background(), bytes.NewReader([]byte("x")), 1)
+	_, _, _, err := spool.Receive(context.Background(), testReadCloser([]byte("x")), 1)
 	if err == nil || err.Error() != "collector insufficient storage" {
 		t.Fatalf("fsync error = %v", err)
 	}
@@ -114,7 +220,7 @@ func TestSpoolUploadPartialGrammarRequiresExactRandomLength(t *testing.T) {
 
 func TestSpoolCleanupPreservesActivePartials(t *testing.T) {
 	spool := openTestSpoolWithAge(t, defaultSpoolOps(), time.Millisecond)
-	path, _, _, err := spool.Receive(context.Background(), bytes.NewReader([]byte("x")), 1)
+	path, _, _, err := spool.Receive(context.Background(), testReadCloser([]byte("x")), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +326,129 @@ func TestSpoolCloseWaitsForInFlightOperation(t *testing.T) {
 	}
 }
 
+func TestSpoolRemovalUsesDirectUnlinkWithoutQuarantine(t *testing.T) {
+	ops := defaultSpoolOps()
+	renames := 0
+	baseRename := ops.renameNoReplace
+	ops.renameNoReplace = func(a int, b string, c int, d string) error { renames++; return baseRename(a, b, c, d) }
+	spool := openTestSpool(t, ops)
+	path := filepath.Join(spool.path, testDigestHex+".tar.gz.age")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.RemoveEncrypted(path); err != nil {
+		t.Fatal(err)
+	}
+	if renames != 0 {
+		t.Fatalf("removal used %d quarantine renames", renames)
+	}
+	entries, _ := os.ReadDir(spool.path)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".sherpa-remove-") {
+			t.Fatalf("quarantine residue %q", entry.Name())
+		}
+	}
+}
+
+func TestSpoolRemovalReportsUnlinkAndSyncFailures(t *testing.T) {
+	t.Run("unlink", func(t *testing.T) {
+		ops := defaultSpoolOps()
+		ops.unlinkat = func(int, string, int) error { return unix.EIO }
+		spool := openTestSpool(t, ops)
+		path := filepath.Join(spool.path, testDigestHex+".tar.gz.age")
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := spool.RemoveEncrypted(path); err == nil {
+			t.Fatal("unlink failure hidden")
+		}
+	})
+	t.Run("sync", func(t *testing.T) {
+		ops := defaultSpoolOps()
+		ops.fsync = func(int) error { return unix.EIO }
+		spool := openTestSpool(t, ops)
+		path := filepath.Join(spool.path, testDigestHex+".tar.gz.age")
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := spool.RemoveEncrypted(path); err == nil || err.Error() != "collector spool synchronization failed" {
+			t.Fatalf("error = %v", err)
+		}
+	})
+}
+
+func TestSpoolLockRejectsStaticEntriesBeforeOpen(t *testing.T) {
+	ops := defaultSpoolOps()
+	opened := false
+	baseOpen := ops.openat
+	ops.openat = func(fd int, name string, flags int, mode uint32) (int, error) {
+		if name == spoolLockName {
+			opened = true
+		}
+		return baseOpen(fd, name, flags, mode)
+	}
+	spool := openTestSpool(t, ops)
+	if err := unix.Mkfifo(filepath.Join(spool.path, spoolLockName), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spool.AcquireLock(); err == nil {
+		t.Fatal("FIFO lock accepted")
+	}
+	if opened {
+		t.Fatal("FIFO lock operationally opened")
+	}
+}
+
+func TestSpoolLockRejectsReplacementAfterFlock(t *testing.T) {
+	ops := defaultSpoolOps()
+	spool := openTestSpool(t, ops)
+	spool.ops.flock = func(fd int, how int) error {
+		if err := unix.Flock(fd, how); err != nil {
+			return err
+		}
+		if err := os.Rename(filepath.Join(spool.path, spoolLockName), filepath.Join(spool.path, spoolLockName+".old")); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(spool.path, spoolLockName), []byte("x"), 0o600)
+	}
+	if _, err := spool.AcquireLock(); err == nil {
+		t.Fatal("replacement lock entry accepted")
+	}
+}
+
+func TestPublishedFilesRequireExactFinalMetadata(t *testing.T) {
+	t.Run("spool", func(t *testing.T) {
+		spool := openTestSpool(t, defaultSpoolOps())
+		partial, final, _ := spool.EncryptedPaths("sha256:" + testDigestHex)
+		if err := os.WriteFile(partial, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		base := spool.ops.renameNoReplace
+		spool.ops.renameNoReplace = func(a int, b string, c int, d string) error {
+			if err := base(a, b, c, d); err != nil {
+				return err
+			}
+			return unix.Chmod(final, 0o640)
+		}
+		if err := spool.CommitEncrypted(partial, final); err == nil {
+			t.Fatal("unsafe final mode accepted")
+		}
+	})
+	t.Run("ledger", func(t *testing.T) {
+		ledger := openTestLedger(t, defaultLedgerOps())
+		base := ledger.ops.rename
+		ledger.ops.rename = func(a int, b string, c int, d string) error {
+			if err := base(a, b, c, d); err != nil {
+				return err
+			}
+			return unix.Chmod(filepath.Join(ledger.path, d), 0o640)
+		}
+		if err := ledger.Put(validTestRecord(time.Now().UTC())); err == nil {
+			t.Fatal("unsafe ledger mode accepted")
+		}
+	})
+}
+
 func TestLedgerRecordInvariantMatrix(t *testing.T) {
 	now := time.Now().UTC()
 	later := now.Add(time.Minute)
@@ -323,13 +552,29 @@ func TestSpoolAcquireLockAcrossProcess(t *testing.T) {
 		os.Exit(0)
 	}
 	dir := newPrivateDir(t)
-	cmd := exec.Command(os.Args[0], "-test.run=TestSpoolAcquireLockAcrossProcess")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestSpoolAcquireLockAcrossProcess")
 	cmd.Env = append(os.Environ(), "SHERPA_LOCK_HELPER=1", "SHERPA_LOCK_DIR="+dir)
-	stdin, _ := cmd.StdinPipe()
-	stdout, _ := cmd.StdoutPipe()
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
 	buf := make([]byte, 6)
 	if _, err := io.ReadFull(stdout, buf); err != nil {
 		t.Fatal(err)
@@ -341,10 +586,13 @@ func TestSpoolAcquireLockAcrossProcess(t *testing.T) {
 	if _, err := spool.AcquireLock(); err == nil || err.Error() != "collector spool already in use" {
 		t.Fatalf("contention = %v", err)
 	}
-	_ = stdin.Close()
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Wait(); err != nil {
 		t.Fatal(err)
 	}
+	_ = stdout.Close()
 	release, err := spool.AcquireLock()
 	if err != nil {
 		t.Fatal(err)
@@ -353,6 +601,93 @@ func TestSpoolAcquireLockAcrossProcess(t *testing.T) {
 	_ = spool.Close()
 }
 
+func testReadCloser(data []byte) io.ReadCloser { return io.NopCloser(bytes.NewReader(data)) }
+
+type trackingReadCloser struct {
+	io.Reader
+	closeCount int
+	closeErr   error
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closeCount++
+	return r.closeErr
+}
+
+type readStep struct {
+	data []byte
+	err  error
+}
+type sequenceReadCloser struct {
+	steps  []readStep
+	closed bool
+}
+
+func (r *sequenceReadCloser) Read(p []byte) (int, error) {
+	if len(r.steps) == 0 {
+		return 0, io.EOF
+	}
+	step := r.steps[0]
+	r.steps = r.steps[1:]
+	n := copy(p, step.data)
+	return n, step.err
+}
+func (r *sequenceReadCloser) Close() error { r.closed = true; return nil }
+
+type delayedExtraReadCloser struct {
+	calls        int
+	probing      chan struct{}
+	releaseExtra chan struct{}
+	closed       chan struct{}
+	once         sync.Once
+}
+
+func newDelayedExtraReadCloser() *delayedExtraReadCloser {
+	return &delayedExtraReadCloser{probing: make(chan struct{}), releaseExtra: make(chan struct{}), closed: make(chan struct{})}
+}
+func (r *delayedExtraReadCloser) Read(p []byte) (int, error) {
+	r.calls++
+	if r.calls == 1 {
+		p[0] = 'x'
+		return 1, nil
+	}
+	if r.calls == 2 {
+		close(r.probing)
+		select {
+		case <-r.releaseExtra:
+			p[0] = 'y'
+			return 1, io.EOF
+		case <-r.closed:
+			return 0, os.ErrClosed
+		}
+	}
+	return 0, io.EOF
+}
+func (r *delayedExtraReadCloser) Close() error { r.once.Do(func() { close(r.closed) }); return nil }
+
+type blockingReadCloser struct {
+	entered    chan struct{}
+	exited     chan struct{}
+	unblock    chan struct{}
+	once       sync.Once
+	closeCount int
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{entered: make(chan struct{}), exited: make(chan struct{}), unblock: make(chan struct{})}
+}
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	close(r.entered)
+	<-r.unblock
+	close(r.exited)
+	return 0, os.ErrClosed
+}
+func (r *blockingReadCloser) Close() error {
+	r.once.Do(func() { r.closeCount++; close(r.unblock) })
+	return nil
+}
+
 type zeroReader struct{}
 
 func (zeroReader) Read([]byte) (int, error) { return 0, nil }
+func (zeroReader) Close() error             { return nil }
