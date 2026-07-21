@@ -24,6 +24,13 @@ type Result struct {
 	Status   ResultStatus
 }
 
+type plaintextFailurePolicy uint8
+
+const (
+	discardFailedPlaintext plaintextFailurePolicy = iota
+	retainFailedRepairPlaintext
+)
+
 type Ingestor interface {
 	Ingest(context.Context, io.Reader, int64) (Result, error)
 }
@@ -238,6 +245,7 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 	}
 
 	reused := false
+	failurePolicy := discardFailedPlaintext
 	if hasRecord && record.CompressedSize == compressedSize && hasFinal {
 		pending.ReceivedAt = record.ReceivedAt
 		if recordMatchesPending(record, pending) {
@@ -282,6 +290,7 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 			if present {
 				return Result{ObjectID: objectID, Status: ResultExisting}, nil
 			}
+			failurePolicy = retainFailedRepairPlaintext
 		}
 		partialPath, finalPath, pathErr := s.spool.EncryptedPaths(objectID)
 		if pathErr != nil {
@@ -290,7 +299,7 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		encryptedSize, encryptErr := s.ops.encryptFile(ctx, plaintextPath, partialPath)
 		if encryptErr != nil {
-			if s.cleanupOwned(plaintextPath, partialPath, "") != nil {
+			if s.cleanupFailedEncryption(plaintextPath, partialPath, failurePolicy) != nil {
 				return Result{}, s.localFailure()
 			}
 			if ctx.Err() != nil || errors.Is(encryptErr, context.Canceled) || errors.Is(encryptErr, context.DeadlineExceeded) {
@@ -303,7 +312,7 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		digest, ok := canonicalDigest(objectID)
 		if !ok || encryptedSize <= 0 {
-			if s.cleanupOwned(plaintextPath, partialPath, "") != nil {
+			if s.cleanupFailedEncryption(plaintextPath, partialPath, failurePolicy) != nil {
 				return Result{}, s.localFailure()
 			}
 			return Result{}, s.localFailure()
@@ -943,6 +952,31 @@ func (s *Service) ensurePendingRecord(object PendingObject, compressedSize int64
 		return ObjectRecord{}, true, s.localFailure()
 	}
 	return record, true, nil
+}
+
+func (s *Service) cleanupFailedEncryption(plaintextPath, partialPath string, policy plaintextFailurePolicy) error {
+	failed := false
+	if partialPath != "" && s.spool.DiscardEncryptedPartial(partialPath) != nil {
+		failed = true
+	}
+	if plaintextPath != "" {
+		var err error
+		switch policy {
+		case discardFailedPlaintext:
+			err = s.spool.RemovePlaintext(plaintextPath)
+		case retainFailedRepairPlaintext:
+			err = s.spool.ReleasePlaintext(plaintextPath)
+		default:
+			err = errors.New("collector cleanup policy invalid")
+		}
+		if err != nil {
+			failed = true
+		}
+	}
+	if failed {
+		return errors.New("collector cleanup failed")
+	}
+	return nil
 }
 
 func (s *Service) cleanupOwned(plaintextPath, partialPath, pendingID string) error {
