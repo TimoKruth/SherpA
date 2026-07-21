@@ -298,6 +298,163 @@ func TestServeGracefullyStopsHTTPAndWorker(t *testing.T) {
 	}
 }
 
+func TestServeForcedShutdownCancelsInFlightRequestBeforeStorageCleanup(t *testing.T) {
+	baseListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := &nonClosingListener{Listener: baseListener}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	workerDone := make(chan struct{})
+	spoolClosed := atomic.Bool{}
+	ledgerClosed := atomic.Bool{}
+	lockReleased := atomic.Bool{}
+	spool := &fakeSpoolResource{acquire: func() (func() error, error) {
+		return func() error { lockReleased.Store(true); return nil }, nil
+	}, close: func() error { spoolClosed.Store(true); return nil }}
+	ledger := &fakeLedgerResource{close: func() error { ledgerClosed.Store(true); return nil }}
+	ops := collectorRunOps{
+		loadConfig: func(func(string) string) (Config, error) {
+			return Config{ListenAddr: listener.Addr().String(), PartialMaxAge: time.Hour}, nil
+		},
+		openSpool:  func(string, time.Duration) (spoolResource, error) { return spool, nil },
+		openLedger: func(string) (ledgerResource, error) { return ledger, nil },
+		build: func(Config, spoolResource, ledgerResource, time.Time, *log.Logger) (http.Handler, workerRunner, error) {
+			return http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+					close(requestStarted)
+					<-request.Context().Done()
+					close(requestCanceled)
+				}), workerFunc(func(ctx context.Context) error {
+					<-ctx.Done()
+					close(workerDone)
+					return nil
+				}), nil
+		},
+		listen:          func(string, string) (net.Listener, error) { return listener, nil },
+		now:             time.Now,
+		shutdownTimeout: 25 * time.Millisecond,
+	}
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- runCollectorWithOps(ctx, func(string) string { return "" }, log.New(io.Discard, "", 0), ops)
+	}()
+
+	connection, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := fmt.Fprintf(connection, "GET /blocked HTTP/1.1\r\nHost: %s\r\n\r\n", listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	<-requestStarted
+	cancel()
+
+	select {
+	case err := <-runDone:
+		if err == nil || err.Error() != "collector HTTP shutdown failed" {
+			t.Fatalf("runCollectorWithOps error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("forced shutdown did not cancel the active request")
+	}
+	select {
+	case <-requestCanceled:
+	default:
+		t.Fatal("active request context was not canceled")
+	}
+	select {
+	case <-workerDone:
+	default:
+		t.Fatal("worker was not stopped after active request cancellation")
+	}
+	if !ledgerClosed.Load() || !spoolClosed.Load() || !lockReleased.Load() {
+		t.Fatalf("cleanup ledger=%v spool=%v lock=%v", ledgerClosed.Load(), spoolClosed.Load(), lockReleased.Load())
+	}
+}
+
+func TestServeFailureShutsDownActiveHTTPWork(t *testing.T) {
+	baseListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failAccept := make(chan struct{})
+	listener := &failAfterFirstAcceptListener{Listener: baseListener, fail: failAccept}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requestStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	workerDone := make(chan struct{})
+	spoolClosed := atomic.Bool{}
+	ledgerClosed := atomic.Bool{}
+	lockReleased := atomic.Bool{}
+	spool := &fakeSpoolResource{acquire: func() (func() error, error) {
+		return func() error { lockReleased.Store(true); return nil }, nil
+	}, close: func() error { spoolClosed.Store(true); return nil }}
+	ledger := &fakeLedgerResource{close: func() error { ledgerClosed.Store(true); return nil }}
+	ops := collectorRunOps{
+		loadConfig: func(func(string) string) (Config, error) {
+			return Config{ListenAddr: listener.Addr().String(), PartialMaxAge: time.Hour}, nil
+		},
+		openSpool:  func(string, time.Duration) (spoolResource, error) { return spool, nil },
+		openLedger: func(string) (ledgerResource, error) { return ledger, nil },
+		build: func(Config, spoolResource, ledgerResource, time.Time, *log.Logger) (http.Handler, workerRunner, error) {
+			return http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+					close(requestStarted)
+					<-request.Context().Done()
+					close(requestCanceled)
+				}), workerFunc(func(ctx context.Context) error {
+					<-ctx.Done()
+					close(workerDone)
+					return nil
+				}), nil
+		},
+		listen:          func(string, string) (net.Listener, error) { return listener, nil },
+		now:             time.Now,
+		shutdownTimeout: 25 * time.Millisecond,
+	}
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- runCollectorWithOps(ctx, func(string) string { return "" }, log.New(io.Discard, "", 0), ops)
+	}()
+
+	connection, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := fmt.Fprintf(connection, "GET /blocked HTTP/1.1\r\nHost: %s\r\n\r\n", listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	<-requestStarted
+	close(failAccept)
+
+	select {
+	case err := <-runDone:
+		if err == nil || err.Error() != "collector HTTP server failed" {
+			t.Fatalf("runCollectorWithOps error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unexpected Serve failure did not shut down active HTTP work")
+	}
+	select {
+	case <-requestCanceled:
+	default:
+		t.Fatal("active request context was not canceled")
+	}
+	select {
+	case <-workerDone:
+	default:
+		t.Fatal("worker was not stopped after active request cancellation")
+	}
+	if !ledgerClosed.Load() || !spoolClosed.Load() || !lockReleased.Load() {
+		t.Fatalf("cleanup ledger=%v spool=%v lock=%v", ledgerClosed.Load(), spoolClosed.Load(), lockReleased.Load())
+	}
+}
+
 func TestHealthcheckCommandCallsOnlyLocalHealthz(t *testing.T) {
 	for _, rawURL := range []string{
 		"https://127.0.0.1:8080/healthz",
@@ -337,6 +494,38 @@ func TestHealthcheckCommandCallsOnlyLocalHealthz(t *testing.T) {
 	if doer.request.Method != http.MethodGet || doer.request.URL.String() != "http://127.0.0.1:8080/healthz" || len(doer.request.Header.Values("Authorization")) != 0 {
 		t.Fatalf("healthcheck request = %#v headers=%v", doer.request, doer.request.Header)
 	}
+}
+
+type nonClosingListener struct{ net.Listener }
+
+func (listener *nonClosingListener) Accept() (net.Conn, error) {
+	connection, err := listener.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &nonClosingConn{Conn: connection}, nil
+}
+
+type nonClosingConn struct{ net.Conn }
+
+func (*nonClosingConn) Close() error { return nil }
+
+type failAfterFirstAcceptListener struct {
+	net.Listener
+	fail     <-chan struct{}
+	accepted atomic.Bool
+}
+
+func (listener *failAfterFirstAcceptListener) Accept() (net.Conn, error) {
+	if listener.accepted.CompareAndSwap(false, true) {
+		connection, err := listener.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		return &nonClosingConn{Conn: connection}, nil
+	}
+	<-listener.fail
+	return nil, errors.New("injected listener failure")
 }
 
 type fakeSpoolResource struct {

@@ -98,12 +98,13 @@ func (resource *concreteLedgerResource) collectorLedger() *collector.Ledger {
 }
 
 type collectorRunOps struct {
-	loadConfig func(func(string) string) (Config, error)
-	openSpool  func(string, time.Duration) (spoolResource, error)
-	openLedger func(string) (ledgerResource, error)
-	build      func(Config, spoolResource, ledgerResource, time.Time, *log.Logger) (http.Handler, workerRunner, error)
-	listen     func(string, string) (net.Listener, error)
-	now        func() time.Time
+	loadConfig      func(func(string) string) (Config, error)
+	openSpool       func(string, time.Duration) (spoolResource, error)
+	openLedger      func(string) (ledgerResource, error)
+	build           func(Config, spoolResource, ledgerResource, time.Time, *log.Logger) (http.Handler, workerRunner, error)
+	listen          func(string, string) (net.Listener, error)
+	now             func() time.Time
+	shutdownTimeout time.Duration
 }
 
 func defaultCollectorRunOps() collectorRunOps {
@@ -123,9 +124,10 @@ func defaultCollectorRunOps() collectorRunOps {
 			}
 			return &concreteLedgerResource{ledger: ledger}, nil
 		},
-		build:  buildCollectorRuntime,
-		listen: net.Listen,
-		now:    time.Now,
+		build:           buildCollectorRuntime,
+		listen:          net.Listen,
+		now:             time.Now,
+		shutdownTimeout: collectorShutdownTimeout,
 	}
 }
 
@@ -233,7 +235,14 @@ func runCollectorWithOps(ctx context.Context, getenv func(string) string, logger
 		return errors.New("collector runtime unavailable")
 	}
 	tracker := &trackedHandler{handler: handler}
+	serverContext, cancelServer := context.WithCancel(context.Background())
+	defer cancelServer()
 	server := newCollectorServer(config.ListenAddr, tracker)
+	server.BaseContext = func(net.Listener) context.Context { return serverContext }
+	shutdownTimeout := ops.shutdownTimeout
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = collectorShutdownTimeout
+	}
 
 	workerContext, cancelWorker := context.WithCancel(ctx)
 	observedWorkerContext := newObservedContext(workerContext)
@@ -265,6 +274,7 @@ func runCollectorWithOps(ctx context.Context, getenv func(string) string, logger
 	var runErr error
 	workerFinished := false
 	serverFinished := false
+	var serveErr error
 	select {
 	case <-ctx.Done():
 	case workerErr := <-workerDone:
@@ -276,28 +286,30 @@ func runCollectorWithOps(ctx context.Context, getenv func(string) string, logger
 		} else {
 			runErr = errors.New("collector worker failed")
 		}
-	case serveErr := <-serverDone:
+	case serveErr = <-serverDone:
 		serverFinished = true
 		if !errors.Is(serveErr, http.ErrServerClosed) {
 			runErr = errors.New("collector HTTP server failed")
 		}
 	}
 
-	if !serverFinished {
-		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), collectorShutdownTimeout)
-		shutdownErr := server.Shutdown(shutdownContext)
-		cancelShutdown()
-		if shutdownErr != nil {
-			_ = server.Close()
-			if runErr == nil {
-				runErr = errors.New("collector HTTP shutdown failed")
-			}
-		}
-		serveErr := <-serverDone
-		if !errors.Is(serveErr, http.ErrServerClosed) && runErr == nil {
-			runErr = errors.New("collector HTTP server failed")
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownErr := server.Shutdown(shutdownContext)
+	cancelShutdown()
+	if shutdownErr != nil {
+		cancelServer()
+		_ = server.Close()
+		if runErr == nil {
+			runErr = errors.New("collector HTTP shutdown failed")
 		}
 	}
+	if !serverFinished {
+		serveErr = <-serverDone
+	}
+	if !errors.Is(serveErr, http.ErrServerClosed) && runErr == nil {
+		runErr = errors.New("collector HTTP server failed")
+	}
+	cancelServer()
 	tracker.active.Wait()
 	cancelWorker()
 	if !workerFinished {
