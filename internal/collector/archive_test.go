@@ -295,11 +295,13 @@ func TestServiceCrashWindowsRestartSafely(t *testing.T) {
 			if err == nil || err.Error() != "collector operation interrupted" {
 				t.Fatalf("Ingest error = %v", err)
 			}
-			for _, name := range spoolEntryNames(t, fixture.spool.path) {
-				if strings.HasSuffix(name, ".partial") {
-					old := time.Unix(1, 0)
-					if err := os.Chtimes(filepath.Join(fixture.spool.path, name), old, old); err != nil {
-						t.Fatal(err)
+			if point != crashAfterUploadPartial {
+				for _, name := range spoolEntryNames(t, fixture.spool.path) {
+					if strings.HasSuffix(name, ".partial") {
+						old := time.Unix(1, 0)
+						if err := os.Chtimes(filepath.Join(fixture.spool.path, name), old, old); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
 			}
@@ -331,6 +333,13 @@ func TestServiceCrashWindowsRestartSafely(t *testing.T) {
 			})
 			if runErr := worker.Run(ctx); runErr != nil {
 				t.Fatalf("restart Run: %v", runErr)
+			}
+			if point == crashAfterUploadPartial {
+				objectID := "sha256:" + digestHex(archive)
+				record, found, getErr := restartedLedger.Get(objectID)
+				if getErr != nil || !found || !record.ReceivedAt.Equal(fixture.now) {
+					t.Fatalf("upload crash receipt record=%#v found=%v err=%v", record, found, getErr)
+				}
 			}
 			for _, name := range spoolEntryNames(t, fixture.spool.path) {
 				if strings.HasSuffix(name, ".partial") {
