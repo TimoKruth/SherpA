@@ -366,6 +366,14 @@ type fdWriter struct {
 func (w fdWriter) Write(p []byte) (int, error) { return w.write(w.fd, p) }
 
 func (s *Spool) SetUploadReceipt(uploadPath string, receivedAt time.Time) error {
+	return s.setPlaintextReceipt(uploadPath, receivedAt, false)
+}
+
+func (s *Spool) SetBoundReceipt(boundPath string, receivedAt time.Time) error {
+	return s.setPlaintextReceipt(boundPath, receivedAt, true)
+}
+
+func (s *Spool) setPlaintextReceipt(path string, receivedAt time.Time, bound bool) error {
 	if !s.begin() {
 		return errors.New("collector spool unavailable")
 	}
@@ -375,8 +383,8 @@ func (s *Spool) SetUploadReceipt(uploadPath string, receivedAt time.Time) error 
 	}
 	s.transition.Lock()
 	defer s.transition.Unlock()
-	name, ok := s.exactChild(uploadPath)
-	if !ok || !validUploadPartialName(name) {
+	name, ok := s.exactChild(path)
+	if !ok || (bound && !plainPendingPattern.MatchString(name)) || (!bound && !validUploadPartialName(name)) {
 		return errors.New("collector plaintext path invalid")
 	}
 	st, regular, err := s.entryMetadata(name)
@@ -399,6 +407,9 @@ func (s *Spool) SetUploadReceipt(uploadPath string, receivedAt time.Time) error 
 	closeErr := s.ops.close(fd)
 	if !valid || err != nil || closeErr != nil || !s.sameEntry(name, &opened) {
 		return errors.New("collector plaintext unsafe")
+	}
+	if bound && s.ops.fsync(s.dirFD) != nil {
+		return errors.New("collector spool synchronization failed")
 	}
 	return nil
 }

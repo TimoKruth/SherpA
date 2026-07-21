@@ -319,9 +319,7 @@ func (w *Worker) reconcileStartup(ctx context.Context) ([]PendingObject, error) 
 			}
 			delete(objectByID, record.ObjectID)
 		}
-		if hasObject {
-			w.status.RecordPending(record.ObjectID, record.ReceivedAt)
-		}
+		w.status.RecordPending(record.ObjectID, record.ReceivedAt)
 		queue = append(queue, object)
 	}
 	if len(objectByID) != 0 {
