@@ -71,6 +71,32 @@ func TestEncryptFileRoundTripsWithGeneratedX25519Identity(t *testing.T) {
 	}
 }
 
+func TestEncryptedSizeMatchesX25519Output(t *testing.T) {
+	identity := generateTestIdentity(t)
+	encryptor := NewEncryptor(identity.Recipient())
+	for _, plaintextSize := range []int{0, 1, 64 * 1024, 64*1024 + 1} {
+		t.Run(fmt.Sprintf("plaintext-%d", plaintextSize), func(t *testing.T) {
+			dir := safeTempDir(t)
+			sourcePath := filepath.Join(dir, "size-source")
+			partialPath := filepath.Join(dir, "size-output.age.partial")
+			if err := os.WriteFile(sourcePath, make([]byte, plaintextSize), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			want, err := encryptor.encryptedSize(int64(plaintextSize))
+			if err != nil {
+				t.Fatalf("EncryptedSize: %v", err)
+			}
+			got, err := encryptor.EncryptFile(context.Background(), sourcePath, partialPath)
+			if err != nil {
+				t.Fatalf("EncryptFile: %v", err)
+			}
+			if got != want {
+				t.Fatalf("encryptedSize(%d) = %d, actual output = %d", plaintextSize, want, got)
+			}
+		})
+	}
+}
+
 func TestEncryptFileWritesMode0600AndSyncsBeforeSuccess(t *testing.T) {
 	identity := generateTestIdentity(t)
 	dir := safeTempDir(t)

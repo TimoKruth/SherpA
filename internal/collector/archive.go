@@ -47,6 +47,7 @@ type serviceOps struct {
 	now          func() time.Time
 	validateFile func(context.Context, string, recoveryarchive.Limits) (recoveryarchive.Report, error)
 	encryptFile  func(context.Context, string, string) (int64, error)
+	publishWait  func()
 	crash        func(serviceCrashPoint) error
 }
 
@@ -59,8 +60,22 @@ func newServiceGate() serviceGate {
 }
 
 func (g serviceGate) acquire(ctx context.Context) error {
+	return g.acquireObserved(ctx, nil)
+}
+
+func (g serviceGate) acquireObserved(ctx context.Context, wait func()) error {
 	if g == nil || ctx == nil {
 		return context.Canceled
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g:
+		return nil
+	default:
+	}
+	if wait != nil {
+		wait()
 	}
 	select {
 	case <-ctx.Done():
@@ -141,7 +156,7 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		return Result{}, errors.New("collector archive invalid")
 	}
-	if err := s.publishGate.acquire(ctx); err != nil {
+	if err := s.publishGate.acquireObserved(ctx, s.ops.publishWait); err != nil {
 		if s.cleanupOwned(plaintextPath, "", "") != nil {
 			return Result{}, s.localFailure()
 		}
@@ -256,6 +271,18 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 			_ = s.spool.ReleasePlaintext(plaintextPath)
 			return Result{}, s.localFailure()
 		}
+		if hasRecord && record.StoredAt != nil {
+			s.status.RecordPending(record.ObjectID, record.ReceivedAt)
+			var present bool
+			record, present, err = s.proveStoredBound(ctx, record.ObjectID, compressedSize, plaintextPath)
+			if err != nil {
+				_ = s.spool.ReleasePlaintext(plaintextPath)
+				return Result{}, err
+			}
+			if present {
+				return Result{ObjectID: objectID, Status: ResultExisting}, nil
+			}
+		}
 		partialPath, finalPath, pathErr := s.spool.EncryptedPaths(objectID)
 		if pathErr != nil {
 			_ = s.spool.ReleasePlaintext(plaintextPath)
@@ -298,10 +325,12 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		pending.ReceivedAt = record.ReceivedAt
 	}
 	s.status.RecordPending(pending.ObjectID, pending.ReceivedAt)
+
+	// Publication completion owns the commit transaction in this direction only:
+	// publishGate -> commitGate. No commit-held path acquires publication ownership.
+	existing, err := s.CommitPending(ctx, pending)
 	s.publishGate.release()
 	publicationHeld = false
-
-	existing, err := s.CommitPending(ctx, pending)
 	if err != nil {
 		return Result{}, err
 	}
@@ -389,6 +418,49 @@ func (s *Service) publishEncrypted(plaintextPath, partialPath, finalPath string,
 	return record, nil
 }
 
+func (s *Service) proveStoredBound(ctx context.Context, objectID string, compressedSize int64, plaintextPath string) (ObjectRecord, bool, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return ObjectRecord{}, false, errors.New("collector backend cancelled")
+	}
+	if err := s.commitGate.acquire(ctx); err != nil {
+		return ObjectRecord{}, false, errors.New("collector backend cancelled")
+	}
+	defer s.commitGate.release()
+	if ctx.Err() != nil {
+		return ObjectRecord{}, false, errors.New("collector backend cancelled")
+	}
+	record, found, err := s.ledger.Get(objectID)
+	if err != nil || !found || record.StoredAt == nil || record.CompressedSize != compressedSize {
+		return ObjectRecord{}, false, s.localFailure()
+	}
+	expectedEncryptedSize, err := s.encryptor.encryptedSize(compressedSize)
+	if err != nil || record.EncryptedSize != expectedEncryptedSize {
+		return ObjectRecord{}, false, s.localFailure()
+	}
+	if _, hasLocal, err := s.findDurableObject(objectID); err != nil || hasLocal {
+		return ObjectRecord{}, false, s.localFailure()
+	}
+	present, existsErr := s.backend.Exists(ctx, objectID)
+	if existsErr != nil {
+		if ctx.Err() != nil || errors.Is(existsErr, context.Canceled) || errors.Is(existsErr, context.DeadlineExceeded) {
+			return record, false, errors.New("collector backend cancelled")
+		}
+		return record, false, s.backendFailureLocked(record, existsErr)
+	}
+	if err := s.crash(crashAfterRemotePresence); err != nil {
+		return record, false, err
+	}
+	if !present {
+		return record, false, nil
+	}
+	if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
+		return record, false, s.localFailure()
+	}
+	s.status.RemovePending(record.ObjectID)
+	s.status.RecordSuccess(*record.StoredAt)
+	return record, true, nil
+}
+
 func (s *Service) CommitPending(ctx context.Context, object PendingObject) (bool, error) {
 	if s == nil || s.ledger == nil || s.spool == nil || s.backend == nil || s.status == nil || s.ops.now == nil || s.commitGate == nil || ctx == nil {
 		return false, errors.New("collector service unavailable")
@@ -400,10 +472,13 @@ func (s *Service) CommitPending(ctx context.Context, object PendingObject) (bool
 		return false, errors.New("collector backend cancelled")
 	}
 	defer s.commitGate.release()
+	return s.commitPendingLocked(ctx, object)
+}
+
+func (s *Service) commitPendingLocked(ctx context.Context, object PendingObject) (bool, error) {
 	if ctx.Err() != nil {
 		return false, errors.New("collector backend cancelled")
 	}
-
 	record, found, err := s.ledger.Get(object.ObjectID)
 	if err != nil || !found || !recordMatchesPending(record, object) {
 		return false, s.localFailure()

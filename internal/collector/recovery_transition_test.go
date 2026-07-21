@@ -292,6 +292,168 @@ func TestIngestConcurrentDuplicateWaitsUntilWinnerFinishesPostRename(t *testing.
 	}
 }
 
+func TestIngestDuplicateJoinsWinnerCommitCompletion(t *testing.T) {
+	tests := []struct {
+		name             string
+		beforeWaiter     func(*fakeBackend, string)
+		wantEncryptions  int32
+		wantRenames      int32
+		wantCreates      int
+		wantExists       int
+		wantWaiterStatus ResultStatus
+		wantWaiterError  string
+		wantBound        int
+		wantPending      bool
+	}{
+		{
+			name:             "remote remains present",
+			wantEncryptions:  1,
+			wantRenames:      1,
+			wantCreates:      1,
+			wantExists:       3,
+			wantWaiterStatus: ResultExisting,
+		},
+		{
+			name: "remote removed before waiter proof",
+			beforeWaiter: func(backend *fakeBackend, objectID string) {
+				backend.set(objectID, false)
+			},
+			wantEncryptions:  2,
+			wantRenames:      2,
+			wantCreates:      2,
+			wantExists:       5,
+			wantWaiterStatus: ResultStored,
+		},
+		{
+			name: "backend unavailable during waiter proof",
+			beforeWaiter: func(backend *fakeBackend, _ string) {
+				backend.existsErr = errors.New("offline")
+			},
+			wantEncryptions: 1,
+			wantRenames:     1,
+			wantCreates:     1,
+			wantExists:      3,
+			wantWaiterError: "collector backend unavailable",
+			wantBound:       1,
+			wantPending:     true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			winnerAtCleanup := make(chan struct{})
+			releaseWinner := make(chan struct{})
+			waiterWaiting := make(chan struct{})
+			secondPublished := make(chan struct{})
+			var cleanupOnce sync.Once
+			var waitOnce sync.Once
+			var publishOnce sync.Once
+			var encryptions atomic.Int32
+			var renames atomic.Int32
+			spoolOps := defaultSpoolOps()
+			rename := spoolOps.renameNoReplace
+			spoolOps.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+				err := rename(oldDirFD, oldName, newDirFD, newName)
+				if err == nil && completeAgePattern.MatchString(newName) {
+					if renames.Add(1) == 2 {
+						publishOnce.Do(func() { close(secondPublished) })
+					}
+				}
+				return err
+			}
+			backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+			fixture := newTransitionFixture(t, spoolOps, backend, func(encryptor *Encryptor, now func() time.Time) serviceOps {
+				return serviceOps{
+					now: now,
+					encryptFile: func(ctx context.Context, sourcePath, partialPath string) (int64, error) {
+						encryptions.Add(1)
+						return encryptor.EncryptFile(ctx, sourcePath, partialPath)
+					},
+					publishWait: func() {
+						waitOnce.Do(func() { close(waiterWaiting) })
+					},
+					crash: func(point serviceCrashPoint) error {
+						if point == crashAfterAgeRemoval {
+							cleanupOnce.Do(func() {
+								close(winnerAtCleanup)
+								<-releaseWinner
+							})
+						}
+						return nil
+					},
+				}
+			})
+			archive := validRecoveryArchive(t, "join-commit-"+test.name)
+			objectID := "sha256:" + digestHex(archive)
+			type outcome struct {
+				result Result
+				err    error
+			}
+			winnerDone := make(chan outcome, 1)
+			waiterDone := make(chan outcome, 1)
+			go func() {
+				result, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+				winnerDone <- outcome{result: result, err: err}
+			}()
+			<-winnerAtCleanup
+			storedBefore, found, err := fixture.ledger.Get(objectID)
+			if err != nil || !found || storedBefore.StoredAt == nil {
+				t.Fatalf("winner stored record = %#v found=%v err=%v", storedBefore, found, err)
+			}
+			go func() {
+				result, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+				waiterDone <- outcome{result: result, err: err}
+			}()
+			select {
+			case <-waiterWaiting:
+				if test.beforeWaiter != nil {
+					test.beforeWaiter(backend, objectID)
+				}
+				close(releaseWinner)
+			case <-secondPublished:
+				close(releaseWinner)
+				winner := <-winnerDone
+				waiter := <-waiterDone
+				t.Fatalf("waiter republished before winner completion: winner=%#v waiter=%#v renames=%d", winner, waiter, renames.Load())
+			}
+			winner := <-winnerDone
+			waiter := <-waiterDone
+			if winner.err != nil || winner.result.ObjectID != objectID || winner.result.Status != ResultStored {
+				t.Fatalf("winner outcome = %#v err=%v", winner.result, winner.err)
+			}
+			if test.wantWaiterError == "" {
+				if waiter.err != nil || waiter.result.ObjectID != objectID || waiter.result.Status != test.wantWaiterStatus {
+					t.Fatalf("waiter outcome = %#v err=%v", waiter.result, waiter.err)
+				}
+			} else if waiter.err == nil || waiter.err.Error() != test.wantWaiterError {
+				t.Fatalf("waiter error = %v", waiter.err)
+			}
+			if encryptions.Load() != test.wantEncryptions || renames.Load() != test.wantRenames {
+				t.Fatalf("publication counts encryptions=%d renames=%d, want %d/%d", encryptions.Load(), renames.Load(), test.wantEncryptions, test.wantRenames)
+			}
+			if backend.createCalls != test.wantCreates || backend.existsCalls != test.wantExists {
+				t.Fatalf("backend calls create=%d exists=%d, want %d/%d", backend.createCalls, backend.existsCalls, test.wantCreates, test.wantExists)
+			}
+			storedAfter, found, err := fixture.ledger.Get(objectID)
+			if err != nil || !found || storedAfter.StoredAt == nil || !storedAfter.StoredAt.Equal(*storedBefore.StoredAt) || !storedAfter.ReceivedAt.Equal(storedBefore.ReceivedAt) {
+				t.Fatalf("final stored record = %#v found=%v err=%v", storedAfter, found, err)
+			}
+			if test.wantPending {
+				snapshot := fixture.status.Snapshot()
+				if snapshot.OldestPendingAt == nil || !snapshot.OldestPendingAt.Equal(storedBefore.ReceivedAt) || snapshot.TerminalLocalError {
+					t.Fatalf("pending readiness = %#v", snapshot)
+				}
+			} else if snapshot := fixture.status.Snapshot(); snapshot.OldestPendingAt != nil || snapshot.TerminalLocalError || !fixture.status.Ready() {
+				t.Fatalf("final readiness = %#v ready=%v", snapshot, fixture.status.Ready())
+			}
+			assertPlaintextNamespace(t, fixture.spool.path, 0, test.wantBound)
+			if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != test.wantBound {
+				t.Fatalf("final spool entries = %v", entries)
+			}
+			assertNoActiveSpoolReservations(t, fixture.spool)
+		})
+	}
+}
+
 func TestIngestReconcilesTransientPostRenameFailures(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1193,6 +1355,9 @@ func newTransitionFixtureWithLedgerOps(t testing.TB, spoolOps spoolOps, ledgerOp
 		}
 		if custom.encryptFile != nil {
 			ops.encryptFile = custom.encryptFile
+		}
+		if custom.publishWait != nil {
+			ops.publishWait = custom.publishWait
 		}
 		if custom.crash != nil {
 			ops.crash = custom.crash

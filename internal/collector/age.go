@@ -12,7 +12,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const encryptionCopyBufferSize = 32 * 1024
+const (
+	encryptionCopyBufferSize = 32 * 1024
+	ageX25519HeaderSize      = 168
+	ageStreamNonceSize       = 16
+	ageStreamChunkSize       = 64 * 1024
+	ageStreamTagSize         = 16
+)
 
 type Encryptor struct {
 	recipient age.Recipient
@@ -20,6 +26,28 @@ type Encryptor struct {
 
 func NewEncryptor(recipient age.Recipient) *Encryptor {
 	return &Encryptor{recipient: recipient}
+}
+
+func (e *Encryptor) encryptedSize(plaintextSize int64) (int64, error) {
+	if e == nil || e.recipient == nil || plaintextSize < 0 {
+		return 0, errors.New("collector encryption setup failed")
+	}
+	if _, ok := e.recipient.(*age.X25519Recipient); !ok {
+		return 0, errors.New("collector encryption setup failed")
+	}
+
+	chunks := plaintextSize / ageStreamChunkSize
+	if plaintextSize%ageStreamChunkSize != 0 {
+		chunks++
+	}
+	if chunks == 0 {
+		chunks = 1
+	}
+	fixedSize := int64(ageX25519HeaderSize + ageStreamNonceSize)
+	if chunks > (math.MaxInt64-plaintextSize-fixedSize)/ageStreamTagSize {
+		return 0, errors.New("collector encryption setup failed")
+	}
+	return plaintextSize + fixedSize + chunks*ageStreamTagSize, nil
 }
 
 func (e *Encryptor) EncryptFile(ctx context.Context, sourcePath, partialPath string) (int64, error) {
