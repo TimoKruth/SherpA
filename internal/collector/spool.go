@@ -20,43 +20,40 @@ import (
 )
 
 const (
-	spoolSafetyReserve  int64 = 1 << 30
-	spoolLockName             = ".sherpa-spool.lock"
-	spoolCopyBufferSize       = 32 * 1024
+	spoolSafetyReserve   int64 = 1 << 30
+	spoolLockName              = ".sherpa-spool.lock"
+	spoolCopyBufferSize        = 32 * 1024
+	overlongProbeTimeout       = 25 * time.Millisecond
+	maxZeroProgressReads       = 8
 )
 
 var (
 	objectIDPattern      = regexp.MustCompile(`^sha256:([0-9a-f]{64})$`)
 	completeAgePattern   = regexp.MustCompile(`^([0-9a-f]{64})\.tar\.gz\.age$`)
 	partialAgePattern    = regexp.MustCompile(`^[0-9a-f]{64}\.tar\.gz\.age\.partial$`)
-	uploadPartialPattern = regexp.MustCompile(`^\.sherpa-upload-[0-9a-f]+\.upload\.partial$`)
+	uploadPartialPattern = regexp.MustCompile(`^\.sherpa-upload-[0-9a-f]{32}\.upload\.partial$`)
 )
 
 type PendingObject struct {
-	ObjectID      string
-	DigestHex     string
-	ArchiveName   string
-	EncryptedPath string
-	EncryptedSize int64
-	ReceivedAt    time.Time
+	ObjectID, DigestHex, ArchiveName, EncryptedPath string
+	EncryptedSize                                   int64
+	ReceivedAt                                      time.Time
 }
 
 type spoolOps struct {
 	statfs          func(int, *unix.Statfs_t) error
 	fsync           func(int) error
 	renameNoReplace func(int, string, int, string) error
+	openat          func(int, string, int, uint32) (int, error)
+	fstatat         func(int, string, *unix.Stat_t, int) error
+	close           func(int) error
+	write           func(int, []byte) (int, error)
 	random          io.Reader
 	now             func() time.Time
 }
 
 func defaultSpoolOps() spoolOps {
-	return spoolOps{
-		statfs:          unix.Fstatfs,
-		fsync:           unix.Fsync,
-		renameNoReplace: renameAtNoReplace,
-		random:          rand.Reader,
-		now:             time.Now,
-	}
+	return spoolOps{unix.Fstatfs, unix.Fsync, renameAtNoReplace, unix.Openat, unix.Fstatat, unix.Close, unix.Write, rand.Reader, time.Now}
 }
 
 type Spool struct {
@@ -64,52 +61,72 @@ type Spool struct {
 	path          string
 	partialMaxAge time.Duration
 	ops           spoolOps
-	closeOnce     sync.Once
-	closeErr      error
+	life          sync.RWMutex
+	transition    sync.Mutex
+	active        map[string]struct{}
+	closed        bool
 }
 
-func OpenSpool(dir string, partialMaxAge time.Duration) (*Spool, error) {
-	return openSpool(dir, partialMaxAge, defaultSpoolOps())
+func OpenSpool(dir string, age time.Duration) (*Spool, error) {
+	return openSpool(dir, age, defaultSpoolOps())
 }
-
-func openSpool(dir string, partialMaxAge time.Duration, ops spoolOps) (*Spool, error) {
-	if partialMaxAge <= 0 || ops.statfs == nil || ops.fsync == nil || ops.renameNoReplace == nil || ops.random == nil || ops.now == nil {
+func openSpool(dir string, age time.Duration, ops spoolOps) (*Spool, error) {
+	if age <= 0 || ops.statfs == nil || ops.fsync == nil || ops.renameNoReplace == nil || ops.openat == nil || ops.fstatat == nil || ops.close == nil || ops.write == nil || ops.random == nil || ops.now == nil {
 		return nil, errors.New("collector spool configuration invalid")
 	}
-	fd, cleanPath, err := openPrivateDirectory(dir)
+	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, errors.New("collector spool directory unsafe")
 	}
-	return &Spool{dirFD: fd, path: cleanPath, partialMaxAge: partialMaxAge, ops: ops}, nil
+	abs = filepath.Clean(abs)
+	fd, _, err := openPrivateDirectory(abs)
+	if err != nil {
+		return nil, errors.New("collector spool directory unsafe")
+	}
+	return &Spool{dirFD: fd, path: abs, partialMaxAge: age, ops: ops, active: make(map[string]struct{})}, nil
 }
-
 func (s *Spool) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.closeOnce.Do(func() {
-		if s.dirFD >= 0 && unix.Close(s.dirFD) != nil {
-			s.closeErr = errors.New("collector spool close failed")
-		}
+	s.life.Lock()
+	defer s.life.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.dirFD >= 0 && s.ops.close(s.dirFD) != nil {
 		s.dirFD = -1
-	})
-	return s.closeErr
+		return errors.New("collector spool close failed")
+	}
+	s.dirFD = -1
+	return nil
 }
+func (s *Spool) begin() bool {
+	s.life.RLock()
+	if s.closed || s.dirFD < 0 {
+		s.life.RUnlock()
+		return false
+	}
+	return true
+}
+func (s *Spool) end() { s.life.RUnlock() }
 
 func (s *Spool) AcquireLock() (func() error, error) {
-	if !s.usable() {
+	if !s.begin() {
 		return nil, errors.New("collector spool unavailable")
 	}
-	fd, err := unix.Openat(s.dirFD, spoolLockName, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
+	defer s.end()
+	fd, err := s.ops.openat(s.dirFD, spoolLockName, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
 	if err != nil {
-		return nil, errors.New("collector spool lock unavailable")
+		return nil, classifyStorage(err, "collector spool lock unavailable")
 	}
-	if err := forceRegularMode0600(fd); err != nil {
-		_ = unix.Close(fd)
+	if forceRegularMode0600(fd) != nil {
+		_ = s.ops.close(fd)
 		return nil, errors.New("collector spool lock unsafe")
 	}
-	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		_ = unix.Close(fd)
+	if err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = s.ops.close(fd)
 		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
 			return nil, errors.New("collector spool already in use")
 		}
@@ -117,287 +134,396 @@ func (s *Spool) AcquireLock() (func() error, error) {
 	}
 	var once sync.Once
 	var releaseErr error
-	release := func() error {
+	return func() error {
 		once.Do(func() {
-			if err := unix.Close(fd); err != nil {
+			if s.ops.close(fd) != nil {
 				releaseErr = errors.New("collector spool lock release failed")
 			}
 		})
 		return releaseErr
-	}
-	return release, nil
+	}, nil
 }
-
-func (s *Spool) Admit(contentLength int64) error {
-	if !s.usable() || contentLength <= 0 || contentLength > (math.MaxInt64-spoolSafetyReserve)/2 {
+func (s *Spool) Admit(n int64) error {
+	if !s.begin() {
 		return errors.New("collector insufficient storage")
 	}
-	required := spoolSafetyReserve + 2*contentLength
-	var stat unix.Statfs_t
-	if err := s.ops.statfs(s.dirFD, &stat); err != nil {
+	defer s.end()
+	return s.admit(n)
+}
+func (s *Spool) admit(n int64) error {
+	if n <= 0 || n > (math.MaxInt64-spoolSafetyReserve)/2 {
 		return errors.New("collector insufficient storage")
 	}
-	blockSize := uint64(stat.Bsize)
-	if blockSize == 0 || stat.Bavail > math.MaxUint64/blockSize {
+	var st unix.Statfs_t
+	if s.ops.statfs(s.dirFD, &st) != nil {
 		return errors.New("collector insufficient storage")
 	}
-	available := stat.Bavail * blockSize
-	if available < uint64(required) {
+	bs := uint64(st.Bsize)
+	if bs == 0 || st.Bavail > math.MaxUint64/bs || st.Bavail*bs < uint64(spoolSafetyReserve+2*n) {
 		return errors.New("collector insufficient storage")
 	}
 	return nil
 }
 
-func (s *Spool) Receive(ctx context.Context, source io.Reader, contentLength int64) (string, string, int64, error) {
+func (s *Spool) Receive(ctx context.Context, source io.Reader, length int64) (path, id string, written int64, retErr error) {
 	if ctx == nil || source == nil {
 		return "", "", 0, errors.New("collector upload invalid")
 	}
-	if err := s.Admit(contentLength); err != nil {
+	if !s.begin() {
+		return "", "", 0, errors.New("collector spool unavailable")
+	}
+	defer s.end()
+	if err := s.admit(length); err != nil {
 		return "", "", 0, err
 	}
+	s.transition.Lock()
 	name, fd, err := s.createRandomFile(".sherpa-upload-", ".upload.partial")
+	if err == nil {
+		s.active[name] = struct{}{}
+	}
+	s.transition.Unlock()
 	if err != nil {
-		return "", "", 0, errors.New("collector upload unavailable")
+		return "", "", 0, classifyStorage(err, "collector upload unavailable")
 	}
-	file := os.NewFile(uintptr(fd), "collector-spool-upload")
-	if file == nil {
-		_ = unix.Close(fd)
-		return "", "", 0, errors.New("collector upload unavailable")
-	}
-	closed := false
+	success := false
 	defer func() {
-		if !closed {
-			_ = file.Close()
+		if !success {
+			s.transition.Lock()
+			delete(s.active, name)
+			s.transition.Unlock()
+		}
+		if fd >= 0 {
+			_ = s.ops.close(fd)
 		}
 	}()
-
-	hash := sha256.New()
-	writer := io.MultiWriter(file, hash)
-	buffer := make([]byte, spoolCopyBufferSize)
-	written, copyErr := io.CopyBuffer(writer, io.LimitReader(&contextReader{ctx: ctx, reader: source}, contentLength), buffer)
-	if copyErr != nil {
+	h := sha256.New()
+	writer := io.MultiWriter(fdWriter{fd, s.ops.write}, h)
+	buf := make([]byte, spoolCopyBufferSize)
+	zeros := 0
+	for written < length {
+		want := int64(len(buf))
+		if rem := length - written; rem < want {
+			want = rem
+		}
+		n, rerr := readCancelable(ctx, source, buf[:want], 0)
+		if n > 0 {
+			zeros = 0
+			wn, werr := writer.Write(buf[:n])
+			written += int64(wn)
+			if werr != nil || wn != n {
+				return "", "", 0, classifyStorage(werr, "collector upload write failed")
+			}
+		} else {
+			zeros++
+			if zeros > maxZeroProgressReads {
+				return "", "", 0, errors.New("collector upload read failed")
+			}
+		}
+		if rerr != nil {
+			if ctx.Err() != nil {
+				return "", "", 0, errors.New("collector upload canceled")
+			}
+			if errors.Is(rerr, io.EOF) {
+				return "", "", 0, errors.New("collector upload length mismatch")
+			}
+			return "", "", 0, errors.New("collector upload read failed")
+		}
+	}
+	var extra [1]byte
+	for probeZeros := 0; ; probeZeros++ {
+		n, rerr := readCancelable(ctx, source, extra[:], overlongProbeTimeout)
 		if ctx.Err() != nil {
 			return "", "", 0, errors.New("collector upload canceled")
 		}
-		return "", "", 0, errors.New("collector upload read failed")
-	}
-	if written != contentLength {
-		return "", "", 0, errors.New("collector upload length mismatch")
-	}
-	var extra [1]byte
-	n, extraErr := io.ReadFull(&contextReader{ctx: ctx, reader: source}, extra[:])
-	if ctx.Err() != nil {
-		return "", "", 0, errors.New("collector upload canceled")
-	}
-	if n != 0 || !errors.Is(extraErr, io.EOF) {
-		return "", "", 0, errors.New("collector upload length mismatch")
+		if n > 0 {
+			return "", "", 0, errors.New("collector upload length mismatch")
+		}
+		if errors.Is(rerr, io.EOF) || errors.Is(rerr, errProbeTimeout) {
+			break
+		}
+		if rerr != nil || probeZeros >= maxZeroProgressReads {
+			return "", "", 0, errors.New("collector upload length mismatch")
+		}
 	}
 	if err := s.ops.fsync(fd); err != nil {
-		return "", "", 0, errors.New("collector upload synchronization failed")
+		return "", "", 0, classifyStorage(err, "collector upload synchronization failed")
 	}
-	closed = true
-	if err := file.Close(); err != nil {
-		return "", "", 0, errors.New("collector upload close failed")
+	if err := s.ops.close(fd); err != nil {
+		fd = -1
+		return "", "", 0, classifyStorage(err, "collector upload close failed")
 	}
-	return filepath.Join(s.path, name), "sha256:" + hex.EncodeToString(hash.Sum(nil)), written, nil
+	fd = -1
+	success = true
+	return filepath.Join(s.path, name), "sha256:" + hex.EncodeToString(h.Sum(nil)), written, nil
 }
 
-func (s *Spool) EncryptedPaths(objectID string) (string, string, error) {
-	digest, ok := canonicalDigest(objectID)
-	if !s.usable() || !ok {
+var errProbeTimeout = errors.New("probe timeout")
+
+type readResult struct {
+	n   int
+	err error
+	buf []byte
+}
+
+func readCancelable(ctx context.Context, r io.Reader, p []byte, timeout time.Duration) (int, error) {
+	owned := make([]byte, len(p))
+	ch := make(chan readResult, 1)
+	go func() {
+		n, e := r.Read(owned)
+		ch <- readResult{n: n, err: e, buf: owned}
+	}()
+	var timer <-chan time.Time
+	var t *time.Timer
+	if timeout > 0 {
+		t = time.NewTimer(timeout)
+		defer t.Stop()
+		timer = t.C
+	}
+	select {
+	case x := <-ch:
+		if x.n < 0 || x.n > len(x.buf) {
+			return 0, errors.New("invalid read count")
+		}
+		if x.n > 0 {
+			copy(p, x.buf[:x.n])
+		}
+		return x.n, x.err
+	case <-ctx.Done():
+		if c, ok := r.(io.Closer); ok {
+			_ = c.Close()
+		}
+		return 0, ctx.Err()
+	case <-timer:
+		if c, ok := r.(io.Closer); ok {
+			_ = c.Close()
+		}
+		return 0, errProbeTimeout
+	}
+}
+
+type fdWriter struct {
+	fd    int
+	write func(int, []byte) (int, error)
+}
+
+func (w fdWriter) Write(p []byte) (int, error) { return w.write(w.fd, p) }
+
+func (s *Spool) EncryptedPaths(id string) (string, string, error) {
+	if !s.begin() {
+		return "", "", errors.New("collector spool unavailable")
+	}
+	defer s.end()
+	d, ok := canonicalDigest(id)
+	if !ok {
 		return "", "", errors.New("collector object ID invalid")
 	}
-	base := digest + ".tar.gz.age"
-	return filepath.Join(s.path, base+".partial"), filepath.Join(s.path, base), nil
+	n := d + ".tar.gz.age.partial"
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	if _, exists := s.active[n]; exists {
+		return "", "", errors.New("collector encrypted path active")
+	}
+	s.active[n] = struct{}{}
+	return filepath.Join(s.path, n), filepath.Join(s.path, d+".tar.gz.age"), nil
 }
-
 func (s *Spool) CommitEncrypted(partial, final string) error {
-	if !s.usable() {
+	if !s.begin() {
 		return errors.New("collector spool unavailable")
 	}
-	partialName, finalName, ok := s.validEncryptedPair(partial, final)
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	pn, fn, ok := s.validEncryptedPair(partial, final)
 	if !ok {
 		return errors.New("collector encrypted path invalid")
 	}
-	fd, err := unix.Openat(s.dirFD, partialName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	defer delete(s.active, pn)
+	st, regular, err := s.entryMetadata(pn)
+	if err != nil || !regular {
+		return errors.New("collector encrypted partial unsafe")
+	}
+	fd, err := s.ops.openat(s.dirFD, pn, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return errors.New("collector encrypted partial unavailable")
 	}
-	if err := verifyRegularMode0600(fd); err != nil {
-		_ = unix.Close(fd)
+	var opened unix.Stat_t
+	if unix.Fstat(fd, &opened) != nil || !sameInode(&st, &opened) {
+		_ = s.ops.close(fd)
 		return errors.New("collector encrypted partial unsafe")
 	}
-	var openedStat unix.Stat_t
-	if err := unix.Fstat(fd, &openedStat); err != nil {
-		_ = unix.Close(fd)
+	if err = s.ops.fsync(fd); err != nil {
+		_ = s.ops.close(fd)
+		return classifyStorage(err, "collector encrypted synchronization failed")
+	}
+	if err = s.ops.close(fd); err != nil {
+		return classifyStorage(err, "collector encrypted close failed")
+	}
+	if !s.sameEntry(pn, &opened) {
 		return errors.New("collector encrypted partial unsafe")
 	}
-	if err := s.ops.fsync(fd); err != nil {
-		_ = unix.Close(fd)
-		return errors.New("collector encrypted synchronization failed")
+	if err = s.ops.renameNoReplace(s.dirFD, pn, s.dirFD, fn); err != nil {
+		return classifyStorage(err, "collector encrypted commit failed")
 	}
-	if err := unix.Close(fd); err != nil {
-		return errors.New("collector encrypted close failed")
+	if !s.sameEntry(fn, &opened) {
+		return errors.New("collector encrypted commit unsafe")
 	}
-	if !sameDirectoryEntry(s.dirFD, partialName, &openedStat) {
-		return errors.New("collector encrypted partial unsafe")
-	}
-	if err := s.ops.renameNoReplace(s.dirFD, partialName, s.dirFD, finalName); err != nil {
-		return errors.New("collector encrypted commit failed")
-	}
-	if err := s.ops.fsync(s.dirFD); err != nil {
-		return errors.New("collector spool synchronization failed")
+	if err = s.ops.fsync(s.dirFD); err != nil {
+		return classifyStorage(err, "collector spool synchronization failed")
 	}
 	return nil
 }
-
-func (s *Spool) RemovePlaintext(path string) error {
-	if !s.usable() {
+func (s *Spool) RemovePlaintext(path string) error { return s.remove(path, true) }
+func (s *Spool) RemoveEncrypted(path string) error { return s.remove(path, false) }
+func (s *Spool) remove(path string, plain bool) error {
+	if !s.begin() {
 		return errors.New("collector spool unavailable")
 	}
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
 	name, ok := s.exactChild(path)
-	if !ok || !validUploadPartialName(name) {
-		return errors.New("collector plaintext path invalid")
+	valid := ok && ((plain && validUploadPartialName(name)) || (!plain && (completeAgePattern.MatchString(name) || partialAgePattern.MatchString(name))))
+	if !valid {
+		return errors.New("collector removal path invalid")
 	}
-	return s.removeRegular(name, "collector plaintext removal failed")
+	delete(s.active, name)
+	return s.quarantineRemove(name)
 }
-
-func (s *Spool) RemoveEncrypted(path string) error {
-	if !s.usable() {
-		return errors.New("collector spool unavailable")
+func (s *Spool) quarantineRemove(name string) error {
+	st, regular, err := s.entryMetadata(name)
+	if err != nil || !regular {
+		return errors.New("collector spool removal failed")
 	}
-	name, ok := s.exactChild(path)
-	if !ok || !completeAgePattern.MatchString(name) {
-		return errors.New("collector encrypted path invalid")
-	}
-	return s.removeRegular(name, "collector encrypted removal failed")
-}
-
-func (s *Spool) removeRegular(name, failure string) error {
-	fd, err := unix.Openat(s.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	fd, err := s.ops.openat(s.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return errors.New(failure)
+		return errors.New("collector spool removal failed")
 	}
-	if err := verifyRegularMode0600(fd); err != nil {
-		_ = unix.Close(fd)
-		return errors.New(failure)
+	var opened unix.Stat_t
+	ok := unix.Fstat(fd, &opened) == nil && sameInode(&st, &opened)
+	_ = s.ops.close(fd)
+	if !ok {
+		return errors.New("collector spool removal failed")
 	}
-	var openedStat unix.Stat_t
-	if err := unix.Fstat(fd, &openedStat); err != nil {
-		_ = unix.Close(fd)
-		return errors.New(failure)
+	q, err := s.randomName(".sherpa-remove-", ".tmp")
+	if err != nil {
+		return errors.New("collector spool removal failed")
 	}
-	if err := unix.Close(fd); err != nil {
-		return errors.New(failure)
+	if err = s.ops.renameNoReplace(s.dirFD, name, s.dirFD, q); err != nil {
+		return errors.New("collector spool removal failed")
 	}
-	if !sameDirectoryEntry(s.dirFD, name, &openedStat) {
-		return errors.New(failure)
+	if !s.sameEntry(q, &opened) {
+		return errors.New("collector spool removal failed")
 	}
-	if err := unix.Unlinkat(s.dirFD, name, 0); err != nil {
-		return errors.New(failure)
+	if err = unix.Unlinkat(s.dirFD, q, 0); err != nil {
+		return errors.New("collector spool removal failed")
 	}
-	if err := s.ops.fsync(s.dirFD); err != nil {
+	if s.ops.fsync(s.dirFD) != nil {
 		return errors.New("collector spool synchronization failed")
 	}
 	return nil
 }
 
 func (s *Spool) Discover() ([]PendingObject, error) {
-	if !s.usable() {
+	if !s.begin() {
 		return nil, errors.New("collector spool unavailable")
 	}
-	entries, err := readDirectoryNames(s.dirFD)
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	names, err := readDirectoryNames(s.dirFD)
 	if err != nil {
 		return nil, errors.New("collector spool discovery failed")
 	}
-	objects := make([]PendingObject, 0)
-	for _, name := range entries {
-		match := completeAgePattern.FindStringSubmatch(name)
-		if match == nil {
+	var out []PendingObject
+	for _, n := range names {
+		m := completeAgePattern.FindStringSubmatch(n)
+		if m == nil {
 			continue
 		}
-		fd, openErr := unix.Openat(s.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-		if openErr != nil {
-			if errors.Is(openErr, unix.ELOOP) || errors.Is(openErr, unix.ENOENT) || errors.Is(openErr, unix.ENXIO) {
-				continue
-			}
-			return nil, errors.New("collector spool object unavailable")
+		st, regular, e := s.entryMetadata(n)
+		if e != nil {
+			return nil, errors.New("collector spool object unsafe")
 		}
-		if verifyRegularMode0600(fd) != nil {
-			_ = unix.Close(fd)
+		if !regular {
 			continue
 		}
-		var openedStat unix.Stat_t
-		if err := unix.Fstat(fd, &openedStat); err != nil {
-			_ = unix.Close(fd)
+		fd, e := s.ops.openat(s.dirFD, n, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		if e != nil {
 			return nil, errors.New("collector spool object unavailable")
 		}
-		file := os.NewFile(uintptr(fd), "collector-spool-object")
-		info, statErr := file.Stat()
-		closeErr := file.Close()
-		if statErr != nil || closeErr != nil || !info.Mode().IsRegular() || !sameDirectoryEntry(s.dirFD, name, &openedStat) {
+		var opened unix.Stat_t
+		if unix.Fstat(fd, &opened) != nil || !sameInode(&st, &opened) {
+			_ = s.ops.close(fd)
+			return nil, errors.New("collector spool object unsafe")
+		}
+		f := os.NewFile(uintptr(fd), "object")
+		info, e := f.Stat()
+		ce := f.Close()
+		if e != nil || ce != nil || !s.sameEntry(n, &opened) {
 			return nil, errors.New("collector spool object unavailable")
 		}
-		digest := match[1]
-		objects = append(objects, PendingObject{
-			ObjectID: "sha256:" + digest, DigestHex: digest, ArchiveName: "sherpa-" + digest,
-			EncryptedPath: filepath.Join(s.path, name), EncryptedSize: info.Size(), ReceivedAt: info.ModTime(),
-		})
+		d := m[1]
+		out = append(out, PendingObject{"sha256:" + d, d, "sherpa-" + d, filepath.Join(s.path, n), info.Size(), info.ModTime()})
 	}
-	sort.Slice(objects, func(i, j int) bool {
-		if objects[i].ReceivedAt.Equal(objects[j].ReceivedAt) {
-			return objects[i].DigestHex < objects[j].DigestHex
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ReceivedAt.Equal(out[j].ReceivedAt) {
+			return out[i].DigestHex < out[j].DigestHex
 		}
-		return objects[i].ReceivedAt.Before(objects[j].ReceivedAt)
+		return out[i].ReceivedAt.Before(out[j].ReceivedAt)
 	})
-	return objects, nil
+	return out, nil
 }
-
 func (s *Spool) CleanupStalePartials() (int, error) { return s.cleanupStalePartialsAt(s.ops.now()) }
-
 func (s *Spool) cleanupStalePartialsAt(now time.Time) (int, error) {
-	if !s.usable() {
+	if !s.begin() {
 		return 0, errors.New("collector spool unavailable")
 	}
-	entries, err := readDirectoryNames(s.dirFD)
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	names, err := readDirectoryNames(s.dirFD)
 	if err != nil {
 		return 0, errors.New("collector spool cleanup failed")
 	}
-	cutoff := now.Add(-s.partialMaxAge)
+	cut := now.Add(-s.partialMaxAge)
 	removed := 0
-	for _, name := range entries {
-		if !validUploadPartialName(name) && !partialAgePattern.MatchString(name) {
+	for _, n := range names {
+		if !validUploadPartialName(n) && !partialAgePattern.MatchString(n) {
 			continue
 		}
-		fd, openErr := unix.Openat(s.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-		if openErr != nil {
+		if _, active := s.active[n]; active {
 			continue
 		}
-		if verifyRegularMode0600(fd) != nil {
-			_ = unix.Close(fd)
-			continue
-		}
-		var openedStat unix.Stat_t
-		if err := unix.Fstat(fd, &openedStat); err != nil {
-			_ = unix.Close(fd)
+		st, regular, e := s.entryMetadata(n)
+		if e != nil {
 			return removed, errors.New("collector spool cleanup failed")
 		}
-		file := os.NewFile(uintptr(fd), "collector-spool-partial")
-		info, statErr := file.Stat()
-		closeErr := file.Close()
-		if statErr != nil || closeErr != nil {
-			return removed, errors.New("collector spool cleanup failed")
-		}
-		if !info.ModTime().Before(cutoff) {
+		if !regular {
 			continue
 		}
-		if !sameDirectoryEntry(s.dirFD, name, &openedStat) {
+		fd, e := s.ops.openat(s.dirFD, n, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		if e != nil {
+			continue
+		}
+		var opened unix.Stat_t
+		if unix.Fstat(fd, &opened) != nil || !sameInode(&st, &opened) {
+			_ = s.ops.close(fd)
 			return removed, errors.New("collector spool cleanup failed")
 		}
-		if err := unix.Unlinkat(s.dirFD, name, 0); err != nil {
-			if errors.Is(err, unix.ENOENT) {
-				continue
-			}
+		f := os.NewFile(uintptr(fd), "partial")
+		info, e := f.Stat()
+		ce := f.Close()
+		if e != nil || ce != nil {
+			return removed, errors.New("collector spool cleanup failed")
+		}
+		if !info.ModTime().Before(cut) {
+			continue
+		}
+		if !s.sameEntry(n, &opened) {
+			return removed, errors.New("collector spool cleanup failed")
+		}
+		q, e := s.randomName(".sherpa-remove-", ".tmp")
+		if e != nil || s.ops.renameNoReplace(s.dirFD, n, s.dirFD, q) != nil || !s.sameEntry(q, &opened) || unix.Unlinkat(s.dirFD, q, 0) != nil {
 			return removed, errors.New("collector spool cleanup failed")
 		}
 		removed++
@@ -407,150 +533,167 @@ func (s *Spool) cleanupStalePartialsAt(now time.Time) (int, error) {
 	}
 	return removed, nil
 }
-
 func (s *Spool) CheckWritable() error {
-	if !s.usable() {
+	if !s.begin() {
 		return errors.New("collector spool unavailable")
 	}
-	name, fd, err := s.createRandomFile(".sherpa-probe-", ".tmp")
-	if err != nil {
-		return errors.New("collector spool not writable")
+	defer s.end()
+	s.transition.Lock()
+	defer s.transition.Unlock()
+	n, fd, e := s.createRandomFile(".sherpa-probe-", ".tmp")
+	if e != nil {
+		return classifyStorage(e, "collector spool not writable")
 	}
-	if err := s.ops.fsync(fd); err != nil {
-		_ = unix.Close(fd)
-		_ = unix.Unlinkat(s.dirFD, name, 0)
-		return errors.New("collector spool not writable")
+	if e = s.ops.fsync(fd); e != nil {
+		_ = s.ops.close(fd)
+		_ = unix.Unlinkat(s.dirFD, n, 0)
+		return classifyStorage(e, "collector spool not writable")
 	}
-	if err := unix.Close(fd); err != nil {
-		_ = unix.Unlinkat(s.dirFD, name, 0)
-		return errors.New("collector spool not writable")
+	if e = s.ops.close(fd); e != nil {
+		_ = unix.Unlinkat(s.dirFD, n, 0)
+		return classifyStorage(e, "collector spool not writable")
 	}
-	if err := unix.Unlinkat(s.dirFD, name, 0); err != nil {
-		return errors.New("collector spool not writable")
-	}
-	if err := s.ops.fsync(s.dirFD); err != nil {
+	if unix.Unlinkat(s.dirFD, n, 0) != nil || s.ops.fsync(s.dirFD) != nil {
 		return errors.New("collector spool not writable")
 	}
 	return nil
 }
 
-func (s *Spool) createRandomFile(prefix, suffix string) (string, int, error) {
-	for attempts := 0; attempts < 8; attempts++ {
-		var randomBytes [16]byte
-		if _, err := io.ReadFull(s.ops.random, randomBytes[:]); err != nil {
-			return "", -1, err
+func (s *Spool) createRandomFile(pre, suf string) (string, int, error) {
+	for i := 0; i < 8; i++ {
+		n, e := s.randomName(pre, suf)
+		if e != nil {
+			return "", -1, e
 		}
-		name := prefix + hex.EncodeToString(randomBytes[:]) + suffix
-		fd, err := unix.Openat(s.dirFD, name, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
-		if errors.Is(err, unix.EEXIST) {
+		fd, e := s.ops.openat(s.dirFD, n, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
+		if errors.Is(e, unix.EEXIST) {
 			continue
 		}
-		if err != nil {
-			return "", -1, err
+		if e != nil {
+			return "", -1, e
 		}
-		if err := forceRegularMode0600(fd); err != nil {
-			_ = unix.Close(fd)
-			return "", -1, err
+		if forceRegularMode0600(fd) != nil {
+			_ = s.ops.close(fd)
+			return "", -1, errors.New("unsafe file")
 		}
-		return name, fd, nil
+		return n, fd, nil
 	}
-	return "", -1, errors.New("random file collision")
+	return "", -1, errors.New("random collision")
 }
-
-func (s *Spool) validEncryptedPair(partial, final string) (string, string, bool) {
-	partialName, partialOK := s.exactChild(partial)
-	finalName, finalOK := s.exactChild(final)
-	if !partialOK || !finalOK || !partialAgePattern.MatchString(partialName) || !completeAgePattern.MatchString(finalName) {
-		return "", "", false
+func (s *Spool) randomName(pre, suf string) (string, error) {
+	var b [16]byte
+	if _, e := io.ReadFull(s.ops.random, b[:]); e != nil {
+		return "", e
 	}
-	return partialName, finalName, partialName == finalName+".partial"
+	return pre + hex.EncodeToString(b[:]) + suf, nil
 }
-func (s *Spool) exactChild(path string) (string, bool) {
-	if path == "" || filepath.Clean(path) != path || filepath.Dir(path) != s.path {
+func (s *Spool) entryMetadata(n string) (unix.Stat_t, bool, error) {
+	var st unix.Stat_t
+	if e := s.ops.fstatat(s.dirFD, n, &st, unix.AT_SYMLINK_NOFOLLOW); e != nil {
+		return st, false, e
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return st, false, nil
+	}
+	if st.Mode&0o7777 != 0o600 || st.Uid != uint32(os.Geteuid()) || st.Gid != uint32(os.Getegid()) {
+		return st, false, errors.New("unsafe")
+	}
+	return st, true, nil
+}
+func (s *Spool) sameEntry(n string, st *unix.Stat_t) bool {
+	var cur unix.Stat_t
+	return s.ops.fstatat(s.dirFD, n, &cur, unix.AT_SYMLINK_NOFOLLOW) == nil && sameInode(st, &cur)
+}
+func sameInode(a, b *unix.Stat_t) bool {
+	return a != nil && b != nil && a.Dev == b.Dev && a.Ino == b.Ino && a.Mode&unix.S_IFMT == b.Mode&unix.S_IFMT
+}
+func classifyStorage(err error, fallback string) error {
+	if errors.Is(err, unix.ENOSPC) || errors.Is(err, unix.EDQUOT) {
+		return errors.New("collector insufficient storage")
+	}
+	return errors.New(fallback)
+}
+func (s *Spool) validEncryptedPair(p, f string) (string, string, bool) {
+	pn, po := s.exactChild(p)
+	fn, fo := s.exactChild(f)
+	return pn, fn, po && fo && partialAgePattern.MatchString(pn) && completeAgePattern.MatchString(fn) && pn == fn+".partial"
+}
+func (s *Spool) exactChild(p string) (string, bool) {
+	if p == "" || filepath.Clean(p) != p || filepath.Dir(p) != s.path {
 		return "", false
 	}
-	name := filepath.Base(path)
-	if name == "." || name == string(os.PathSeparator) || strings.Contains(name, string(os.PathSeparator)) {
+	n := filepath.Base(p)
+	return n, n != "." && !strings.Contains(n, string(os.PathSeparator))
+}
+func canonicalDigest(id string) (string, bool) {
+	m := objectIDPattern.FindStringSubmatch(id)
+	if m == nil {
 		return "", false
 	}
-	return name, true
+	return m[1], true
 }
-func (s *Spool) usable() bool { return s != nil && s.dirFD >= 0 }
-
-func canonicalDigest(objectID string) (string, bool) {
-	match := objectIDPattern.FindStringSubmatch(objectID)
-	if match == nil {
-		return "", false
-	}
-	return match[1], true
-}
-func validUploadPartialName(name string) bool { return uploadPartialPattern.MatchString(name) }
+func validUploadPartialName(n string) bool { return uploadPartialPattern.MatchString(n) }
 
 func openPrivateDirectory(path string) (int, string, error) {
-	start, components, err := safePathComponents(path)
-	if err != nil {
-		return -1, "", err
+	start, parts, e := safePathComponents(path)
+	if e != nil {
+		return -1, "", e
 	}
-	fd, err := unix.Open(start, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return -1, "", err
+	fd, e := unix.Open(start, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if e != nil {
+		return -1, "", e
 	}
-	for _, component := range components {
-		next, openErr := unix.Openat(fd, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-		closeErr := unix.Close(fd)
-		if openErr != nil || closeErr != nil {
-			if openErr == nil {
+	for _, p := range parts {
+		next, oe := unix.Openat(fd, p, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		ce := unix.Close(fd)
+		if oe != nil || ce != nil {
+			if oe == nil {
 				_ = unix.Close(next)
 			}
 			return -1, "", errors.New("unsafe directory")
 		}
 		fd = next
 	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Mode&0o7777 != 0o700 || stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) {
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Mode&0o7777 != 0o700 || st.Uid != uint32(os.Geteuid()) || st.Gid != uint32(os.Getegid()) {
 		_ = unix.Close(fd)
 		return -1, "", errors.New("unsafe directory")
 	}
 	return fd, filepath.Clean(path), nil
 }
-
 func forceRegularMode0600(fd int) error {
-	if err := unix.Fchmod(fd, 0o600); err != nil {
-		return err
+	if e := unix.Fchmod(fd, 0o600); e != nil {
+		return e
 	}
 	return verifyRegularMode0600(fd)
 }
 func verifyRegularMode0600(fd int) error {
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return err
+	var st unix.Stat_t
+	if e := unix.Fstat(fd, &st); e != nil {
+		return e
 	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o7777 != 0o600 || stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) {
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0o7777 != 0o600 || st.Uid != uint32(os.Geteuid()) || st.Gid != uint32(os.Getegid()) {
 		return errors.New("unsafe file")
 	}
 	return nil
 }
-func sameDirectoryEntry(dirFD int, name string, opened *unix.Stat_t) bool {
-	var current unix.Stat_t
-	if opened == nil || unix.Fstatat(dirFD, name, &current, unix.AT_SYMLINK_NOFOLLOW) != nil {
-		return false
-	}
-	return current.Dev == opened.Dev && current.Ino == opened.Ino && current.Mode&unix.S_IFMT == opened.Mode&unix.S_IFMT
+func sameDirectoryEntry(fd int, n string, st *unix.Stat_t) bool {
+	var cur unix.Stat_t
+	return st != nil && unix.Fstatat(fd, n, &cur, unix.AT_SYMLINK_NOFOLLOW) == nil && sameInode(st, &cur)
 }
-
-func readDirectoryNames(dirFD int) ([]string, error) {
-	fd, err := unix.Openat(dirFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
+func readDirectoryNames(fd int) ([]string, error) {
+	d, e := unix.Openat(fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if e != nil {
+		return nil, e
 	}
-	file := os.NewFile(uintptr(fd), "collector-directory")
-	entries, readErr := file.ReadDir(-1)
-	closeErr := file.Close()
-	if readErr != nil {
-		return nil, readErr
+	f := os.NewFile(uintptr(d), "dir")
+	entries, re := f.ReadDir(-1)
+	ce := f.Close()
+	if re != nil {
+		return nil, re
 	}
-	if closeErr != nil {
-		return nil, closeErr
+	if ce != nil {
+		return nil, ce
 	}
 	names := make([]string, len(entries))
 	for i := range entries {

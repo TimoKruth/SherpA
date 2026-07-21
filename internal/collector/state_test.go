@@ -87,6 +87,9 @@ func TestLedgerPutUsesMode0600AtomicReplacement(t *testing.T) {
 	}
 
 	record.RetryCount = 3
+	attempt := record.ReceivedAt.Add(time.Second)
+	record.LastAttemptAt = &attempt
+	record.LatestRetryClass = "temporary"
 	if err := ledger.Put(record); err != nil {
 		t.Fatal(err)
 	}

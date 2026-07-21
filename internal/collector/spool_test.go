@@ -324,7 +324,7 @@ func TestSpoolDiscoversCompleteAgeFilesOldestFirst(t *testing.T) {
 func TestSpoolCleanupRemovesOnlyStalePartials(t *testing.T) {
 	spool := openTestSpoolWithAge(t, defaultSpoolOps(), time.Hour)
 	now := time.Now()
-	stale := []string{".sherpa-upload-deadbeef.upload.partial", testDigestHex + ".tar.gz.age.partial"}
+	stale := []string{".sherpa-upload-0123456789abcdef0123456789abcdef.upload.partial", testDigestHex + ".tar.gz.age.partial"}
 	keep := []string{".sherpa-upload-deadbeef.upload.partial.extra", testDigestHex + ".tar.gz.age", "g" + testDigestHex[1:] + ".tar.gz.age.partial"}
 	for _, name := range append(append([]string{}, stale...), keep...) {
 		path := filepath.Join(spool.path, name)
@@ -481,7 +481,7 @@ func TestSpoolReceiveHonorsContextCancellation(t *testing.T) {
 
 func TestSpoolRemoveValidatesCanonicalNamesAndSyncs(t *testing.T) {
 	spool := openTestSpool(t, defaultSpoolOps())
-	plain := filepath.Join(spool.path, ".sherpa-upload-deadbeef.upload.partial")
+	plain := filepath.Join(spool.path, ".sherpa-upload-0123456789abcdef0123456789abcdef.upload.partial")
 	encrypted := filepath.Join(spool.path, testDigestHex+".tar.gz.age")
 	for _, path := range []string{plain, encrypted} {
 		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {

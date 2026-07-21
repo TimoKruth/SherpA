@@ -5,22 +5,19 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"golang.org/x/sys/unix"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"sync"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 const ledgerRecordMaxBytes = 16 * 1024
 
-var (
-	ledgerRecordPattern = regexp.MustCompile(`^([0-9a-f]{64})\.json$`)
-	retryClassPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
-)
+var ledgerRecordPattern = regexp.MustCompile(`^([0-9a-f]{64})\.json$`)
 
 type ObjectRecord struct {
 	ObjectID         string     `json:"object_id"`
@@ -33,272 +30,304 @@ type ObjectRecord struct {
 	LatestRetryClass string     `json:"latest_retry_class,omitempty"`
 	RetryCount       int        `json:"retry_count"`
 }
-
 type ledgerOps struct {
-	fsync  func(int) error
-	rename func(int, string, int, string) error
-	random io.Reader
+	fsync   func(int) error
+	rename  func(int, string, int, string) error
+	random  io.Reader
+	openat  func(int, string, int, uint32) (int, error)
+	fstatat func(int, string, *unix.Stat_t, int) error
+	close   func(int) error
 }
 
 func defaultLedgerOps() ledgerOps {
-	return ledgerOps{fsync: unix.Fsync, rename: unix.Renameat, random: rand.Reader}
+	return ledgerOps{unix.Fsync, unix.Renameat, rand.Reader, unix.Openat, unix.Fstatat, unix.Close}
 }
 
 type Ledger struct {
-	dirFD     int
-	path      string
-	ops       ledgerOps
-	closeOnce sync.Once
-	closeErr  error
+	dirFD      int
+	path       string
+	ops        ledgerOps
+	life       sync.RWMutex
+	transition sync.Mutex
+	closed     bool
 }
 
 func OpenLedger(dir string) (*Ledger, error) { return openLedger(dir, defaultLedgerOps()) }
-
 func openLedger(dir string, ops ledgerOps) (*Ledger, error) {
-	if ops.fsync == nil || ops.rename == nil || ops.random == nil {
+	if ops.fsync == nil || ops.rename == nil || ops.random == nil || ops.openat == nil || ops.fstatat == nil || ops.close == nil {
 		return nil, errors.New("collector ledger configuration invalid")
 	}
-	fd, cleanPath, err := openPrivateDirectory(dir)
-	if err != nil {
+	abs, e := filepath.Abs(dir)
+	if e != nil {
 		return nil, errors.New("collector ledger directory unsafe")
 	}
-	return &Ledger{dirFD: fd, path: cleanPath, ops: ops}, nil
+	abs = filepath.Clean(abs)
+	fd, _, e := openPrivateDirectory(abs)
+	if e != nil {
+		return nil, errors.New("collector ledger directory unsafe")
+	}
+	return &Ledger{dirFD: fd, path: abs, ops: ops}, nil
 }
-
+func (l *Ledger) begin() bool {
+	l.life.RLock()
+	if l.closed || l.dirFD < 0 {
+		l.life.RUnlock()
+		return false
+	}
+	return true
+}
+func (l *Ledger) end() { l.life.RUnlock() }
 func (l *Ledger) Close() error {
 	if l == nil {
 		return nil
 	}
-	l.closeOnce.Do(func() {
-		if l.dirFD >= 0 && unix.Close(l.dirFD) != nil {
-			l.closeErr = errors.New("collector ledger close failed")
-		}
+	l.life.Lock()
+	defer l.life.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	if l.ops.close(l.dirFD) != nil {
 		l.dirFD = -1
-	})
-	return l.closeErr
-}
-
-func (l *Ledger) Get(objectID string) (ObjectRecord, bool, error) {
-	var zero ObjectRecord
-	if !l.usable() {
-		return zero, false, errors.New("collector ledger unavailable")
+		return errors.New("collector ledger close failed")
 	}
-	digest, ok := canonicalDigest(objectID)
+	l.dirFD = -1
+	return nil
+}
+func (l *Ledger) Get(id string) (ObjectRecord, bool, error) {
+	var z ObjectRecord
+	if !l.begin() {
+		return z, false, errors.New("collector ledger unavailable")
+	}
+	defer l.end()
+	l.transition.Lock()
+	defer l.transition.Unlock()
+	d, ok := canonicalDigest(id)
 	if !ok {
-		return zero, false, errors.New("collector object ID invalid")
+		return z, false, errors.New("collector object ID invalid")
 	}
-	record, found, err := l.readRecord(digest+".json", false)
-	if err != nil {
-		return zero, false, err
-	}
-	if !found {
-		return zero, false, nil
-	}
-	return record, true, nil
+	return l.readRecord(d+".json", false)
 }
-
-func (l *Ledger) Put(record ObjectRecord) error {
-	if !l.usable() {
+func (l *Ledger) Put(r ObjectRecord) error {
+	if !l.begin() {
 		return errors.New("collector ledger unavailable")
 	}
-	digest, ok := validateObjectRecord(record)
+	defer l.end()
+	l.transition.Lock()
+	defer l.transition.Unlock()
+	d, ok := validateObjectRecord(r)
 	if !ok {
 		return errors.New("collector ledger record invalid")
 	}
-	data, err := json.Marshal(record)
-	if err != nil || len(data) == 0 || len(data) > ledgerRecordMaxBytes {
+	data, e := json.Marshal(r)
+	if e != nil || len(data) == 0 || len(data) > ledgerRecordMaxBytes {
 		return errors.New("collector ledger record invalid")
 	}
-	name, fd, err := l.createTemp()
-	if err != nil {
+	n, fd, e := l.createTemp()
+	if e != nil {
 		return errors.New("collector ledger write failed")
 	}
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = unix.Unlinkat(l.dirFD, name, 0)
+			_ = unix.Unlinkat(l.dirFD, n, 0)
 		}
 	}()
-	file := os.NewFile(uintptr(fd), "collector-ledger-temp")
-	if file == nil {
-		_ = unix.Close(fd)
+	if e = writeFD(fd, data); e != nil {
+		_ = l.ops.close(fd)
 		return errors.New("collector ledger write failed")
 	}
-	closed := false
-	defer func() {
-		if !closed {
-			_ = file.Close()
-		}
-	}()
-	if err := writeAll(file, data); err != nil {
-		return errors.New("collector ledger write failed")
-	}
-	if err := l.ops.fsync(fd); err != nil {
+	if e = l.ops.fsync(fd); e != nil {
+		_ = l.ops.close(fd)
 		return errors.New("collector ledger synchronization failed")
 	}
-	closed = true
-	if err := file.Close(); err != nil {
+	var opened unix.Stat_t
+	if unix.Fstat(fd, &opened) != nil {
+		_ = l.ops.close(fd)
+		return errors.New("collector ledger replacement unsafe")
+	}
+	if e = l.ops.close(fd); e != nil {
 		return errors.New("collector ledger close failed")
 	}
-	target := digest + ".json"
-	if err := l.ops.rename(l.dirFD, name, l.dirFD, target); err != nil {
+	target := d + ".json"
+	if e = l.ops.rename(l.dirFD, n, l.dirFD, target); e != nil {
 		return errors.New("collector ledger replacement failed")
 	}
 	cleanup = false
-	if err := l.verifyTarget(target); err != nil {
+	if !l.sameEntry(target, &opened) {
 		return errors.New("collector ledger replacement unsafe")
 	}
-	if err := l.ops.fsync(l.dirFD); err != nil {
+	if l.ops.fsync(l.dirFD) != nil {
 		return errors.New("collector ledger synchronization failed")
 	}
 	return nil
 }
-
 func (l *Ledger) List() ([]ObjectRecord, error) {
-	if !l.usable() {
+	if !l.begin() {
 		return nil, errors.New("collector ledger unavailable")
 	}
-	entries, err := readDirectoryNames(l.dirFD)
-	if err != nil {
+	defer l.end()
+	l.transition.Lock()
+	defer l.transition.Unlock()
+	names, e := readDirectoryNames(l.dirFD)
+	if e != nil {
 		return nil, errors.New("collector ledger list failed")
 	}
-	records := make([]ObjectRecord, 0)
-	for _, name := range entries {
-		match := ledgerRecordPattern.FindStringSubmatch(name)
-		if match == nil {
+	var out []ObjectRecord
+	for _, n := range names {
+		m := ledgerRecordPattern.FindStringSubmatch(n)
+		if m == nil {
 			continue
 		}
-		record, found, readErr := l.readRecord(name, true)
-		if readErr != nil {
-			return nil, readErr
+		r, found, e := l.readRecord(n, true)
+		if e != nil {
+			return nil, e
 		}
 		if !found {
 			continue
 		}
-		digest, ok := canonicalDigest(record.ObjectID)
-		if !ok || digest != match[1] || record.ArchiveName != "sherpa-"+match[1] {
+		d, ok := canonicalDigest(r.ObjectID)
+		if !ok || d != m[1] || r.ArchiveName != "sherpa-"+m[1] {
 			return nil, errors.New("collector ledger record invalid")
 		}
-		records = append(records, record)
+		out = append(out, r)
 	}
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].ReceivedAt.Equal(records[j].ReceivedAt) {
-			return records[i].ObjectID < records[j].ObjectID
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ReceivedAt.Equal(out[j].ReceivedAt) {
+			return out[i].ObjectID < out[j].ObjectID
 		}
-		return records[i].ReceivedAt.Before(records[j].ReceivedAt)
+		return out[i].ReceivedAt.Before(out[j].ReceivedAt)
 	})
-	return records, nil
+	return out, nil
 }
-
-func (l *Ledger) readRecord(name string, ignoreStatic bool) (ObjectRecord, bool, error) {
-	var zero ObjectRecord
-	fd, err := unix.Openat(l.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil {
-		if errors.Is(err, unix.ENOENT) {
-			return zero, false, nil
-		}
-		if ignoreStatic && (errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENXIO)) {
-			return zero, false, nil
-		}
-		return zero, false, errors.New("collector ledger record unavailable")
+func (l *Ledger) readRecord(n string, ignoreStatic bool) (ObjectRecord, bool, error) {
+	var z ObjectRecord
+	var meta unix.Stat_t
+	e := l.ops.fstatat(l.dirFD, n, &meta, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(e, unix.ENOENT) {
+		return z, false, nil
 	}
-	if err := verifyRegularMode0600(fd); err != nil {
-		var stat unix.Stat_t
-		statErr := unix.Fstat(fd, &stat)
-		_ = unix.Close(fd)
-		if ignoreStatic && statErr == nil && stat.Mode&unix.S_IFMT != unix.S_IFREG {
-			return zero, false, nil
-		}
-		return zero, false, errors.New("collector ledger record unsafe")
+	if e != nil {
+		return z, false, errors.New("collector ledger record unavailable")
 	}
-	file := os.NewFile(uintptr(fd), "collector-ledger-record")
-	info, statErr := file.Stat()
-	if statErr != nil {
-		_ = file.Close()
-		return zero, false, errors.New("collector ledger record unavailable")
+	if meta.Mode&unix.S_IFMT != unix.S_IFREG {
+		if ignoreStatic {
+			return z, false, nil
+		}
+		return z, false, errors.New("collector ledger record unsafe")
+	}
+	if meta.Mode&0o7777 != 0o600 || meta.Uid != uint32(os.Geteuid()) || meta.Gid != uint32(os.Getegid()) {
+		return z, false, errors.New("collector ledger record unsafe")
+	}
+	fd, e := l.ops.openat(l.dirFD, n, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if e != nil {
+		return z, false, errors.New("collector ledger record unavailable")
+	}
+	var opened unix.Stat_t
+	if unix.Fstat(fd, &opened) != nil || !sameInode(&meta, &opened) {
+		_ = l.ops.close(fd)
+		return z, false, errors.New("collector ledger record unsafe")
+	}
+	f := os.NewFile(uintptr(fd), "record")
+	info, e := f.Stat()
+	if e != nil {
+		_ = f.Close()
+		return z, false, errors.New("collector ledger record unavailable")
 	}
 	if info.Size() <= 0 || info.Size() > ledgerRecordMaxBytes {
-		_ = file.Close()
-		return zero, false, errors.New("collector ledger record invalid")
+		_ = f.Close()
+		return z, false, errors.New("collector ledger record invalid")
 	}
-	decoder := json.NewDecoder(io.LimitReader(file, ledgerRecordMaxBytes+1))
-	decoder.DisallowUnknownFields()
-	var record ObjectRecord
-	decodeErr := decoder.Decode(&record)
+	dec := json.NewDecoder(io.LimitReader(f, ledgerRecordMaxBytes+1))
+	dec.DisallowUnknownFields()
+	var r ObjectRecord
+	de := dec.Decode(&r)
 	var trailing any
-	trailingErr := decoder.Decode(&trailing)
-	closeErr := file.Close()
-	if decodeErr != nil || !errors.Is(trailingErr, io.EOF) || closeErr != nil {
-		return zero, false, errors.New("collector ledger record invalid")
+	te := dec.Decode(&trailing)
+	ce := f.Close()
+	if de != nil || !errors.Is(te, io.EOF) || ce != nil {
+		return z, false, errors.New("collector ledger record invalid")
 	}
-	digest, ok := validateObjectRecord(record)
-	if !ok || name != digest+".json" {
-		return zero, false, errors.New("collector ledger record invalid")
+	d, ok := validateObjectRecord(r)
+	if !ok || n != d+".json" {
+		return z, false, errors.New("collector ledger record invalid")
 	}
-	return record, true, nil
+	return r, true, nil
 }
-
 func (l *Ledger) createTemp() (string, int, error) {
-	for attempt := 0; attempt < 8; attempt++ {
-		var randomBytes [16]byte
-		if _, err := io.ReadFull(l.ops.random, randomBytes[:]); err != nil {
-			return "", -1, err
+	for i := 0; i < 8; i++ {
+		var b [16]byte
+		if _, e := io.ReadFull(l.ops.random, b[:]); e != nil {
+			return "", -1, e
 		}
-		name := ".sherpa-ledger-" + hex.EncodeToString(randomBytes[:]) + ".tmp"
-		fd, err := unix.Openat(l.dirFD, name, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
-		if errors.Is(err, unix.EEXIST) {
+		n := ".sherpa-ledger-" + hex.EncodeToString(b[:]) + ".tmp"
+		fd, e := l.ops.openat(l.dirFD, n, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
+		if errors.Is(e, unix.EEXIST) {
 			continue
 		}
-		if err != nil {
-			return "", -1, err
+		if e != nil {
+			return "", -1, e
 		}
-		if err := forceRegularMode0600(fd); err != nil {
-			_ = unix.Close(fd)
-			_ = unix.Unlinkat(l.dirFD, name, 0)
-			return "", -1, err
+		if forceRegularMode0600(fd) != nil {
+			_ = l.ops.close(fd)
+			_ = unix.Unlinkat(l.dirFD, n, 0)
+			return "", -1, e
 		}
-		return name, fd, nil
+		return n, fd, nil
 	}
 	return "", -1, errors.New("collector ledger temporary unavailable")
 }
-
-func (l *Ledger) verifyTarget(name string) error {
-	fd, err := unix.Openat(l.dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return err
-	}
-	verifyErr := verifyRegularMode0600(fd)
-	closeErr := unix.Close(fd)
-	if verifyErr != nil {
-		return verifyErr
-	}
-	return closeErr
+func (l *Ledger) sameEntry(n string, st *unix.Stat_t) bool {
+	var cur unix.Stat_t
+	return l.ops.fstatat(l.dirFD, n, &cur, unix.AT_SYMLINK_NOFOLLOW) == nil && sameInode(st, &cur)
 }
-func (l *Ledger) usable() bool { return l != nil && l.dirFD >= 0 }
-
-func validateObjectRecord(record ObjectRecord) (string, bool) {
-	digest, ok := canonicalDigest(record.ObjectID)
-	if !ok || record.ArchiveName != "sherpa-"+digest || record.CompressedSize < 0 || record.EncryptedSize < 0 || record.RetryCount < 0 || record.ReceivedAt.IsZero() || (record.LatestRetryClass != "" && !retryClassPattern.MatchString(record.LatestRetryClass)) {
+func validateObjectRecord(r ObjectRecord) (string, bool) {
+	d, ok := canonicalDigest(r.ObjectID)
+	if !ok || r.ArchiveName != "sherpa-"+d || r.CompressedSize <= 0 || r.EncryptedSize <= 0 || r.RetryCount < 0 || r.ReceivedAt.IsZero() || !allowedRetryClass(r.LatestRetryClass) {
 		return "", false
 	}
-	if record.StoredAt != nil && record.StoredAt.IsZero() {
+	if r.StoredAt != nil && (r.StoredAt.IsZero() || r.StoredAt.Before(r.ReceivedAt)) {
 		return "", false
 	}
-	if record.LastAttemptAt != nil && record.LastAttemptAt.IsZero() {
+	if r.LastAttemptAt != nil && (r.LastAttemptAt.IsZero() || r.LastAttemptAt.Before(r.ReceivedAt)) {
 		return "", false
 	}
-	return digest, true
+	if r.RetryCount == 0 {
+		return d, r.LastAttemptAt == nil && r.LatestRetryClass == ""
+	}
+	return d, r.LastAttemptAt != nil && r.LatestRetryClass != ""
 }
-
-func writeAll(writer io.Writer, data []byte) error {
-	for len(data) > 0 {
-		n, err := writer.Write(data)
-		if n < 0 || n > len(data) {
+func allowedRetryClass(s string) bool {
+	switch s {
+	case "", "temporary", "backend_unavailable", "backend_timeout", "backend_failed", "remote_verification_failed", "local_state_failed", "cancelled":
+		return true
+	}
+	return false
+}
+func writeFD(fd int, p []byte) error {
+	for len(p) > 0 {
+		n, e := unix.Write(fd, p)
+		if n > 0 {
+			p = p[n:]
+		}
+		if e != nil {
+			return e
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+func writeAll(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, e := w.Write(p)
+		if n < 0 || n > len(p) {
 			return errors.New("invalid write count")
 		}
-		data = data[n:]
-		if err != nil {
-			return err
+		p = p[n:]
+		if e != nil {
+			return e
 		}
 		if n == 0 {
 			return io.ErrShortWrite
