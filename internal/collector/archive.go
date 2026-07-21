@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"math"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -24,12 +23,43 @@ type Result struct {
 	Status   ResultStatus
 }
 
-type plaintextFailurePolicy uint8
+type plaintextProvenance uint8
 
 const (
-	discardFailedPlaintext plaintextFailurePolicy = iota
-	retainFailedRepairPlaintext
+	plaintextCurrentRequest plaintextProvenance = iota
+	plaintextCanonicalExisting
+	plaintextCanonicalStoredRepair
 )
+
+type pendingLedgerState uint8
+
+const (
+	pendingLedgerAbsent pendingLedgerState = iota
+	pendingLedgerPublicationUncertain
+	pendingLedgerDurable
+)
+
+type encryptedPublicationState uint8
+
+const (
+	encryptedPublicationPreRename encryptedPublicationState = iota
+	encryptedPublicationRenamedUncertain
+	encryptedPublicationDurable
+)
+
+type ingestAttempt struct {
+	plaintextPath string
+	partialPath   string
+	finalPath     string
+	pendingID     string
+	provenance    plaintextProvenance
+	pending       pendingLedgerState
+	publication   encryptedPublicationState
+}
+
+func (a ingestAttempt) retainPlaintext() bool {
+	return a.provenance != plaintextCurrentRequest || a.pending != pendingLedgerAbsent
+}
 
 type Ingestor interface {
 	Ingest(context.Context, io.Reader, int64) (Result, error)
@@ -192,6 +222,16 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		_ = s.spool.ReleasePlaintext(plaintextPath)
 		return Result{}, s.localFailure()
 	}
+	attempt := ingestAttempt{
+		plaintextPath: plaintextPath,
+		pendingID:     objectID,
+		provenance:    plaintextCurrentRequest,
+		pending:       pendingLedgerAbsent,
+		publication:   encryptedPublicationPreRename,
+	}
+	if hasRecord {
+		attempt.pending = pendingLedgerDurable
+	}
 	bound, hasBound, err := s.findBoundPlaintext(objectID)
 	if err != nil {
 		_ = s.spool.ReleasePlaintext(plaintextPath)
@@ -212,6 +252,13 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 			return Result{}, s.localFailure()
 		}
 		plaintextPath = bound.Path
+		attempt.plaintextPath = plaintextPath
+		attempt.provenance = plaintextCanonicalExisting
+		pendingAt := bound.ReceivedAt
+		if hasRecord {
+			pendingAt = record.ReceivedAt
+		}
+		s.status.RecordPending(objectID, pendingAt)
 	}
 	bindFresh := func() error {
 		if hasBound {
@@ -236,16 +283,24 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 				return err
 			}
 			bound = reusedBound
+			attempt.provenance = plaintextCanonicalExisting
 		} else {
 			bound = PlainObject{ObjectID: objectID, DigestHex: objectID[len("sha256:"):], Path: outcome.path, CompressedSize: compressedSize, ReceivedAt: receivedAt}
 		}
 		plaintextPath = bound.Path
+		attempt.plaintextPath = plaintextPath
 		hasBound = true
+		if attempt.retainPlaintext() {
+			pendingAt := bound.ReceivedAt
+			if hasRecord {
+				pendingAt = record.ReceivedAt
+			}
+			s.status.RecordPending(objectID, pendingAt)
+		}
 		return nil
 	}
 
 	reused := false
-	failurePolicy := discardFailedPlaintext
 	if hasRecord && record.CompressedSize == compressedSize && hasFinal {
 		pending.ReceivedAt = record.ReceivedAt
 		if recordMatchesPending(record, pending) {
@@ -290,16 +345,20 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 			if present {
 				return Result{ObjectID: objectID, Status: ResultExisting}, nil
 			}
-			failurePolicy = retainFailedRepairPlaintext
+			attempt.provenance = plaintextCanonicalStoredRepair
 		}
 		partialPath, finalPath, pathErr := s.spool.EncryptedPaths(objectID)
 		if pathErr != nil {
-			_ = s.spool.ReleasePlaintext(plaintextPath)
+			if s.cleanupIngestFailure(&attempt, encryptedPublicationPreRename) != nil {
+				return Result{}, s.localFailure()
+			}
 			return Result{}, s.localFailure()
 		}
+		attempt.partialPath = partialPath
+		attempt.finalPath = finalPath
 		encryptedSize, encryptErr := s.ops.encryptFile(ctx, plaintextPath, partialPath)
 		if encryptErr != nil {
-			if s.cleanupFailedEncryption(plaintextPath, partialPath, failurePolicy) != nil {
+			if s.cleanupIngestFailure(&attempt, encryptedPublicationPreRename) != nil {
 				return Result{}, s.localFailure()
 			}
 			if ctx.Err() != nil || errors.Is(encryptErr, context.Canceled) || errors.Is(encryptErr, context.DeadlineExceeded) {
@@ -312,7 +371,7 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 		}
 		digest, ok := canonicalDigest(objectID)
 		if !ok || encryptedSize <= 0 {
-			if s.cleanupFailedEncryption(plaintextPath, partialPath, failurePolicy) != nil {
+			if s.cleanupIngestFailure(&attempt, encryptedPublicationPreRename) != nil {
 				return Result{}, s.localFailure()
 			}
 			return Result{}, s.localFailure()
@@ -327,7 +386,7 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 			ObjectID: objectID, DigestHex: digest, ArchiveName: "sherpa-" + digest,
 			EncryptedPath: finalPath, EncryptedSize: encryptedSize, ReceivedAt: pendingReceivedAt,
 		}
-		record, err = s.publishEncrypted(plaintextPath, partialPath, finalPath, pending, compressedSize)
+		record, err = s.publishEncrypted(&attempt, pending, compressedSize)
 		if err != nil {
 			return Result{}, err
 		}
@@ -350,75 +409,69 @@ func (s *Service) Ingest(ctx context.Context, source io.Reader, length int64) (R
 	return Result{ObjectID: objectID, Status: status}, nil
 }
 
-func (s *Service) publishEncrypted(plaintextPath, partialPath, finalPath string, object PendingObject, compressedSize int64) (ObjectRecord, error) {
+func (s *Service) publishEncrypted(attempt *ingestAttempt, object PendingObject, compressedSize int64) (ObjectRecord, error) {
+	if attempt == nil || attempt.plaintextPath == "" || attempt.partialPath == "" || attempt.finalPath == "" {
+		return ObjectRecord{}, s.localFailure()
+	}
 	record, cleanupPending, err := s.ensurePendingRecord(object, compressedSize)
 	if err != nil {
-		if plainPendingPattern.MatchString(filepath.Base(plaintextPath)) {
-			failed := s.spool.DiscardEncryptedPartial(partialPath) != nil
-			if cleanupPending && s.ledger.DeletePending(object.ObjectID) != nil {
-				failed = true
-			}
-			if s.spool.ReleasePlaintext(plaintextPath) != nil {
-				failed = true
-			}
-			if failed {
-				return ObjectRecord{}, s.localFailure()
-			}
-			return ObjectRecord{}, err
-		}
-		pendingID := ""
 		if cleanupPending {
-			pendingID = object.ObjectID
+			attempt.pending = pendingLedgerPublicationUncertain
 		}
-		if s.cleanupOwned(plaintextPath, partialPath, pendingID) != nil {
+		if s.cleanupIngestFailure(attempt, encryptedPublicationPreRename) != nil {
 			return ObjectRecord{}, s.localFailure()
 		}
 		return ObjectRecord{}, err
 	}
+	attempt.pending = pendingLedgerDurable
 	object.ReceivedAt = record.ReceivedAt
+	s.status.RecordPending(record.ObjectID, record.ReceivedAt)
 	if err := s.crash(crashAfterPendingLedger); err != nil {
 		return ObjectRecord{}, err
 	}
-	outcome, commitErr := s.spool.commitEncrypted(partialPath, finalPath)
+	outcome, commitErr := s.spool.commitEncrypted(attempt.partialPath, attempt.finalPath)
 	if commitErr != nil && !outcome.renamed {
 		published, foundPublished, discoverErr := s.findDurableObject(object.ObjectID)
 		if discoverErr != nil {
-			_ = s.spool.ReleaseEncryptedPartial(partialPath)
-			_ = s.spool.ReleasePlaintext(plaintextPath)
+			if s.cleanupIngestFailure(attempt, encryptedPublicationPreRename) != nil {
+				return ObjectRecord{}, s.localFailure()
+			}
 			return ObjectRecord{}, s.localFailure()
 		}
 		if foundPublished {
 			published.ReceivedAt = record.ReceivedAt
 			if recordMatchesPending(record, published) && record.CompressedSize == compressedSize {
-				if s.cleanupOwned(plaintextPath, partialPath, "") != nil {
+				attempt.publication = encryptedPublicationDurable
+				failed := s.spool.DiscardEncryptedPartial(attempt.partialPath) != nil
+				if s.spool.RemovePlaintext(attempt.plaintextPath) != nil {
+					failed = true
+				}
+				if failed {
 					return ObjectRecord{}, s.localFailure()
 				}
 				return record, nil
 			}
-			_ = s.spool.DiscardEncryptedPartial(partialPath)
-			_ = s.spool.ReleasePlaintext(plaintextPath)
-			return ObjectRecord{}, s.localFailure()
 		}
-		pendingID := ""
-		if cleanupPending && !foundPublished {
-			pendingID = object.ObjectID
-		}
-		if s.cleanupOwned(plaintextPath, partialPath, pendingID) != nil {
+		if s.cleanupIngestFailure(attempt, encryptedPublicationPreRename) != nil {
 			return ObjectRecord{}, s.localFailure()
 		}
 		return ObjectRecord{}, s.localFailure()
 	}
 	if commitErr != nil {
-		_, finalizeErr := s.spool.finalizeEncrypted(finalPath, object.EncryptedSize, outcome.identity)
+		attempt.publication = encryptedPublicationRenamedUncertain
+		_, finalizeErr := s.spool.finalizeEncrypted(attempt.finalPath, object.EncryptedSize, outcome.identity)
 		if finalizeErr != nil {
-			_ = s.spool.ReleasePlaintext(plaintextPath)
+			if s.cleanupIngestFailure(attempt, encryptedPublicationRenamedUncertain) != nil {
+				return ObjectRecord{}, s.localFailure()
+			}
 			return ObjectRecord{}, s.localFailure()
 		}
 	}
+	attempt.publication = encryptedPublicationDurable
 	if err := s.crash(crashAfterAgeRename); err != nil {
 		return ObjectRecord{}, err
 	}
-	if err := s.spool.RemovePlaintext(plaintextPath); err != nil {
+	if err := s.spool.RemovePlaintext(attempt.plaintextPath); err != nil {
 		return ObjectRecord{}, s.localFailure()
 	}
 	if err := s.crash(crashAfterPlaintextRemoval); err != nil {
@@ -909,7 +962,19 @@ func (s *Service) recoverBoundPlaintextLocked(ctx context.Context, plain PlainOb
 		_ = s.spool.ReleasePlaintext(plain.Path)
 		return s.localFailure()
 	}
-	_, err = s.publishEncrypted(plain.Path, partialPath, finalPath, pending, plain.CompressedSize)
+	attempt := ingestAttempt{
+		plaintextPath: plain.Path,
+		partialPath:   partialPath,
+		finalPath:     finalPath,
+		pendingID:     plain.ObjectID,
+		provenance:    plaintextCanonicalExisting,
+		pending:       pendingLedgerAbsent,
+		publication:   encryptedPublicationPreRename,
+	}
+	if hasRecord {
+		attempt.pending = pendingLedgerDurable
+	}
+	_, err = s.publishEncrypted(&attempt, pending, plain.CompressedSize)
 	return err
 }
 
@@ -954,24 +1019,37 @@ func (s *Service) ensurePendingRecord(object PendingObject, compressedSize int64
 	return record, true, nil
 }
 
-func (s *Service) cleanupFailedEncryption(plaintextPath, partialPath string, policy plaintextFailurePolicy) error {
-	failed := false
-	if partialPath != "" && s.spool.DiscardEncryptedPartial(partialPath) != nil {
-		failed = true
+func (s *Service) cleanupIngestFailure(attempt *ingestAttempt, publication encryptedPublicationState) error {
+	if attempt == nil || attempt.plaintextPath == "" || publication == encryptedPublicationDurable {
+		return errors.New("collector cleanup policy invalid")
 	}
-	if plaintextPath != "" {
-		var err error
-		switch policy {
-		case discardFailedPlaintext:
-			err = s.spool.RemovePlaintext(plaintextPath)
-		case retainFailedRepairPlaintext:
-			err = s.spool.ReleasePlaintext(plaintextPath)
-		default:
-			err = errors.New("collector cleanup policy invalid")
-		}
-		if err != nil {
+	attempt.publication = publication
+	failed := false
+	switch publication {
+	case encryptedPublicationPreRename:
+		if attempt.partialPath != "" && s.spool.DiscardEncryptedPartial(attempt.partialPath) != nil {
 			failed = true
 		}
+		if attempt.pending == pendingLedgerPublicationUncertain && attempt.pendingID != "" {
+			if s.ledger.DeletePending(attempt.pendingID) != nil {
+				failed = true
+			}
+		}
+	case encryptedPublicationRenamedUncertain:
+		if attempt.partialPath != "" && s.spool.ReleaseEncryptedPartial(attempt.partialPath) != nil {
+			failed = true
+		}
+	default:
+		return errors.New("collector cleanup policy invalid")
+	}
+	var plaintextErr error
+	if publication == encryptedPublicationRenamedUncertain || attempt.retainPlaintext() {
+		plaintextErr = s.spool.ReleasePlaintext(attempt.plaintextPath)
+	} else {
+		plaintextErr = s.spool.RemovePlaintext(attempt.plaintextPath)
+	}
+	if plaintextErr != nil {
+		failed = true
 	}
 	if failed {
 		return errors.New("collector cleanup failed")

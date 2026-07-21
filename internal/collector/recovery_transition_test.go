@@ -614,6 +614,273 @@ func TestIngestStoredRepairFinalizationFailureRetainsBoundForRestart(t *testing.
 	assertStoredRecoveryComplete(t, restartedSpool, restartedLedger, restartedStatus, objectID, int64(len(archive)))
 }
 
+func TestIngestStoredRepairPreRenameFailuresRetainCanonicalBound(t *testing.T) {
+	tests := []string{
+		"partial fsync",
+		"partial close",
+		"identity recheck",
+		"rename no replace",
+	}
+	for _, failurePoint := range tests {
+		t.Run(failurePoint, func(t *testing.T) {
+			archive := validRecoveryArchive(t, "stored-repair-"+failurePoint)
+			objectID := "sha256:" + digestHex(archive)
+			partialName := digestHex(archive) + ".tar.gz.age.partial"
+			var dirFD int
+			var armed atomic.Bool
+			var fired atomic.Bool
+			spoolOps := preRenameFailureOps(failurePoint, partialName, &dirFD, &armed, &fired)
+			backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+			fixture := newTransitionFixture(t, spoolOps, backend, nil)
+			dirFD = fixture.spool.dirFD
+
+			if _, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive))); err != nil {
+				t.Fatalf("initial Ingest: %v", err)
+			}
+			storedBefore, found, err := fixture.ledger.Get(objectID)
+			if err != nil || !found || storedBefore.StoredAt == nil {
+				t.Fatalf("initial stored record = %#v found=%v err=%v", storedBefore, found, err)
+			}
+			backend.set(objectID, false)
+			armed.Store(true)
+			_, err = fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+			if err == nil || err.Error() != "collector local state failed" {
+				t.Fatalf("repair Ingest error = %v", err)
+			}
+			if !fired.Load() {
+				t.Fatal("pre-rename failure seam did not fire")
+			}
+			if backend.createCalls != 1 {
+				t.Fatalf("failed repair Create calls = %d", backend.createCalls)
+			}
+			assertRetainedStoredRepair(t, fixture, archive, storedBefore, true)
+
+			armed.Store(false)
+			restartedSpool, restartedLedger := reopenRecoveryFixture(t, fixture.spool, fixture.ledger)
+			restartedStatus := NewStatusTracker(ReadinessConfig{StartedAt: fixture.now, StartupGrace: time.Hour, MaxRecoveryAge: 24 * time.Hour}, fixture.clock)
+			restartedStatus.SetSpoolWritable(true)
+			restartedService := newService(restartedSpool, restartedLedger, fixture.service.encryptor, backend, restartedStatus, recoveryarchive.DefaultLimits(), serviceOps{now: fixture.clock})
+			runWorkerOnce(t, restartedSpool, restartedLedger, restartedService, restartedStatus, fixture.clock)
+			if !backend.has(objectID) || backend.createCalls != 2 {
+				t.Fatalf("restarted repair remote=%v create=%d", backend.has(objectID), backend.createCalls)
+			}
+			storedAfter, found, err := restartedLedger.Get(objectID)
+			if err != nil || !found || storedAfter.StoredAt == nil || !storedAfter.StoredAt.Equal(*storedBefore.StoredAt) ||
+				!storedAfter.ReceivedAt.Equal(storedBefore.ReceivedAt) || storedAfter.RetryCount != storedBefore.RetryCount ||
+				!equalOptionalTime(storedAfter.LastAttemptAt, storedBefore.LastAttemptAt) || storedAfter.LatestRetryClass != storedBefore.LatestRetryClass {
+				t.Fatalf("restarted repair record = %#v found=%v err=%v", storedAfter, found, err)
+			}
+			assertStoredRecoveryComplete(t, restartedSpool, restartedLedger, restartedStatus, objectID, int64(len(archive)))
+		})
+	}
+}
+
+func TestIngestPreExistingBoundCancellationRetainsCanonicalRecovery(t *testing.T) {
+	tests := []string{"immediate retry", "restart worker"}
+	for _, recovery := range tests {
+		t.Run(recovery, func(t *testing.T) {
+			archive := validRecoveryArchive(t, "preexisting-cancel-"+recovery)
+			backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+			fixture, encryptor := interruptedBoundFixture(t, archive, backend)
+			encryptionStarted := make(chan struct{})
+			var calls atomic.Int32
+			fixture.service = newService(fixture.spool, fixture.ledger, encryptor, backend, fixture.status, recoveryarchive.DefaultLimits(), serviceOps{
+				now: fixture.clock,
+				encryptFile: func(ctx context.Context, sourcePath, partialPath string) (int64, error) {
+					if calls.Add(1) == 1 {
+						close(encryptionStarted)
+						<-ctx.Done()
+						return 0, ctx.Err()
+					}
+					return encryptor.EncryptFile(ctx, sourcePath, partialPath)
+				},
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				_, err := fixture.service.Ingest(ctx, testReadCloser(archive), int64(len(archive)))
+				done <- err
+			}()
+			<-encryptionStarted
+			cancel()
+			if err := <-done; err == nil || err.Error() != "collector ingestion canceled" {
+				t.Fatalf("cancelled Ingest error = %v", err)
+			}
+			assertRetainedUnledgeredBound(t, fixture, archive, false)
+			if backend.createCalls != 0 {
+				t.Fatalf("Create calls after cancellation = %d", backend.createCalls)
+			}
+
+			objectID := "sha256:" + digestHex(archive)
+			switch recovery {
+			case "immediate retry":
+				result, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+				if err != nil || result.Status != ResultStored || result.ObjectID != objectID {
+					t.Fatalf("immediate retry result = %#v err=%v", result, err)
+				}
+				assertStoredRecoveryComplete(t, fixture.spool, fixture.ledger, fixture.status, objectID, int64(len(archive)))
+			case "restart worker":
+				restartedSpool, restartedLedger := reopenRecoveryFixture(t, fixture.spool, fixture.ledger)
+				restartedStatus := NewStatusTracker(ReadinessConfig{StartedAt: fixture.now, StartupGrace: time.Hour, MaxRecoveryAge: 24 * time.Hour}, fixture.clock)
+				restartedStatus.SetSpoolWritable(true)
+				restartedService := newService(restartedSpool, restartedLedger, encryptor, backend, restartedStatus, recoveryarchive.DefaultLimits(), serviceOps{now: fixture.clock})
+				runWorkerOnce(t, restartedSpool, restartedLedger, restartedService, restartedStatus, fixture.clock)
+				assertStoredRecoveryComplete(t, restartedSpool, restartedLedger, restartedStatus, objectID, int64(len(archive)))
+			default:
+				t.Fatalf("unknown recovery path %q", recovery)
+			}
+			if backend.createCalls != 1 {
+				t.Fatalf("recovery Create calls = %d", backend.createCalls)
+			}
+		})
+	}
+}
+
+func TestIngestPreExistingBoundFinalizationFailureRetainsCanonicalRecovery(t *testing.T) {
+	archive := validRecoveryArchive(t, "preexisting-finalization-failure")
+	objectID := "sha256:" + digestHex(archive)
+	backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+	fixture, encryptor := interruptedBoundFixture(t, archive, backend)
+	fixture.service = newService(fixture.spool, fixture.ledger, encryptor, backend, fixture.status, recoveryarchive.DefaultLimits(), serviceOps{
+		now: fixture.clock,
+		encryptFile: func(ctx context.Context, sourcePath, partialPath string) (int64, error) {
+			return encryptor.encryptFile(ctx, sourcePath, partialPath, encryptionFileFinalizer{
+				ageClose: func(writer io.Closer) error {
+					if err := writer.Close(); err != nil {
+						return err
+					}
+					return errors.New("forced finalization failure")
+				},
+			})
+		},
+	})
+	_, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+	if err == nil || err.Error() != "collector encryption failed" {
+		t.Fatalf("Ingest error = %v", err)
+	}
+	assertRetainedUnledgeredBound(t, fixture, archive, false)
+	if backend.createCalls != 0 {
+		t.Fatalf("Create calls after finalization failure = %d", backend.createCalls)
+	}
+
+	restartedSpool, restartedLedger := reopenRecoveryFixture(t, fixture.spool, fixture.ledger)
+	restartedStatus := NewStatusTracker(ReadinessConfig{StartedAt: fixture.now, StartupGrace: time.Hour, MaxRecoveryAge: 24 * time.Hour}, fixture.clock)
+	restartedStatus.SetSpoolWritable(true)
+	restartedService := newService(restartedSpool, restartedLedger, encryptor, backend, restartedStatus, recoveryarchive.DefaultLimits(), serviceOps{now: fixture.clock})
+	runWorkerOnce(t, restartedSpool, restartedLedger, restartedService, restartedStatus, fixture.clock)
+	if backend.createCalls != 1 {
+		t.Fatalf("restarted Create calls = %d", backend.createCalls)
+	}
+	assertStoredRecoveryComplete(t, restartedSpool, restartedLedger, restartedStatus, objectID, int64(len(archive)))
+}
+
+func interruptedBoundFixture(t testing.TB, archive []byte, backend Backend) (*transitionFixture, *Encryptor) {
+	t.Helper()
+	initial := newTransitionFixture(t, defaultSpoolOps(), backend, nil)
+	initial.service.ops.crash = crashAt(crashAfterPlaintextBind)
+	_, err := initial.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+	if err == nil || err.Error() != "collector operation interrupted" {
+		t.Fatalf("interrupted Ingest error = %v", err)
+	}
+	if entries := spoolEntryNames(t, initial.spool.path); len(entries) != 1 || !plainPendingPattern.MatchString(entries[0]) {
+		t.Fatalf("interrupted bound entries = %v", entries)
+	}
+	encryptor := initial.service.encryptor
+	spool, ledger := reopenRecoveryFixture(t, initial.spool, initial.ledger)
+	status := NewStatusTracker(ReadinessConfig{StartedAt: initial.now, StartupGrace: time.Hour, MaxRecoveryAge: 24 * time.Hour}, initial.clock)
+	status.SetSpoolWritable(true)
+	return &transitionFixture{
+		spool: spool, ledger: ledger, backend: backend, status: status,
+		now: initial.now, clock: initial.clock,
+	}, encryptor
+}
+
+func assertRetainedUnledgeredBound(t testing.TB, fixture *transitionFixture, archive []byte, terminal bool) {
+	t.Helper()
+	objects, err := fixture.spool.DiscoverPlaintexts()
+	if err != nil || len(objects) != 1 || objects[0].ObjectID != "sha256:"+digestHex(archive) ||
+		objects[0].CompressedSize != int64(len(archive)) || !objects[0].ReceivedAt.Equal(fixture.now) {
+		t.Fatalf("retained plaintexts = %#v err=%v", objects, err)
+	}
+	contents, err := os.ReadFile(objects[0].Path)
+	if err != nil || !bytes.Equal(contents, archive) {
+		t.Fatalf("retained plaintext content mismatch err=%v", err)
+	}
+	var metadata unix.Stat_t
+	if err := unix.Lstat(objects[0].Path, &metadata); err != nil || metadata.Mode&unix.S_IFMT != unix.S_IFREG || metadata.Mode&0o7777 != 0o600 ||
+		metadata.Uid != uint32(os.Geteuid()) || metadata.Gid != uint32(os.Getegid()) {
+		t.Fatalf("retained plaintext metadata mode=%#o uid=%d gid=%d err=%v", metadata.Mode, metadata.Uid, metadata.Gid, err)
+	}
+	if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 1 || !plainPendingPattern.MatchString(entries[0]) {
+		t.Fatalf("retained bound entries = %v", entries)
+	}
+	if records, err := fixture.ledger.List(); err != nil || len(records) != 0 {
+		t.Fatalf("unexpected ledger records = %#v err=%v", records, err)
+	}
+	snapshot := fixture.status.Snapshot()
+	if snapshot.OldestPendingAt == nil || !snapshot.OldestPendingAt.Equal(fixture.now) || snapshot.TerminalLocalError != terminal {
+		t.Fatalf("retained bound readiness = %#v", snapshot)
+	}
+	assertNoActiveSpoolReservations(t, fixture.spool)
+}
+
+func preRenameFailureOps(failurePoint, partialName string, dirFD *int, armed, fired *atomic.Bool) spoolOps {
+	ops := defaultSpoolOps()
+	switch failurePoint {
+	case "partial fsync":
+		fsync := ops.fsync
+		ops.fsync = func(fd int) error {
+			if armed.Load() && !fired.Load() && descriptorMatchesEntry(fd, *dirFD, partialName) && fired.CompareAndSwap(false, true) {
+				return unix.EIO
+			}
+			return fsync(fd)
+		}
+	case "partial close":
+		closeFD := ops.close
+		ops.close = func(fd int) error {
+			matches := armed.Load() && !fired.Load() && descriptorMatchesEntry(fd, *dirFD, partialName)
+			err := closeFD(fd)
+			if matches && fired.CompareAndSwap(false, true) {
+				if err != nil {
+					return err
+				}
+				return unix.EIO
+			}
+			return err
+		}
+	case "identity recheck":
+		fstatat := ops.fstatat
+		var checks atomic.Int32
+		ops.fstatat = func(fd int, name string, stat *unix.Stat_t, flags int) error {
+			if armed.Load() && !fired.Load() && name == partialName && checks.Add(1) == 2 && fired.CompareAndSwap(false, true) {
+				return unix.EIO
+			}
+			return fstatat(fd, name, stat, flags)
+		}
+	case "rename no replace":
+		rename := ops.renameNoReplace
+		ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+			if armed.Load() && oldName == partialName && completeAgePattern.MatchString(newName) && fired.CompareAndSwap(false, true) {
+				return unix.EIO
+			}
+			return rename(oldDirFD, oldName, newDirFD, newName)
+		}
+	default:
+		panic("unknown pre-rename failure point")
+	}
+	return ops
+}
+
+func descriptorMatchesEntry(fd, dirFD int, name string) bool {
+	if fd < 0 || dirFD < 0 || name == "" {
+		return false
+	}
+	var descriptor, entry unix.Stat_t
+	return unix.Fstat(fd, &descriptor) == nil &&
+		unix.Fstatat(dirFD, name, &entry, unix.AT_SYMLINK_NOFOLLOW) == nil &&
+		sameInode(&descriptor, &entry)
+}
+
 func assertRetainedStoredRepair(t testing.TB, fixture *transitionFixture, archive []byte, record ObjectRecord, terminal bool) {
 	t.Helper()
 	objects, err := fixture.spool.DiscoverPlaintexts()
@@ -944,6 +1211,12 @@ func TestIngestEncryptFailureBeforeCreateCleansOwnership(t *testing.T) {
 	}
 	if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 0 {
 		t.Fatalf("encryption failure entries = %v", entries)
+	}
+	if records, err := fixture.ledger.List(); err != nil || len(records) != 0 {
+		t.Fatalf("encryption failure ledger = %#v err=%v", records, err)
+	}
+	if snapshot := fixture.status.Snapshot(); snapshot.OldestPendingAt != nil || snapshot.TerminalLocalError {
+		t.Fatalf("encryption failure readiness = %#v", snapshot)
 	}
 	assertNoActiveSpoolReservations(t, fixture.spool)
 }
@@ -1305,21 +1578,55 @@ func TestIngestPendingLedgerPrecedesAgePublication(t *testing.T) {
 	}
 }
 
-func TestIngestRenameFailureCleansNewPendingRecordAndOwnedFiles(t *testing.T) {
+func TestIngestPendingLedgerRenameFailureRetainsCanonicalBound(t *testing.T) {
 	spoolOps := defaultSpoolOps()
-	spoolOps.renameNoReplace = func(int, string, int, string) error { return errors.New("rename failure") }
-	fixture := newTransitionFixture(t, spoolOps, &fakeBackend{objects: make(map[string]bool), createVisible: true}, nil)
-	archive := validRecoveryArchive(t, "rename-cleanup")
+	var failRename atomic.Bool
+	failRename.Store(true)
+	rename := spoolOps.renameNoReplace
+	spoolOps.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+		if failRename.Load() && partialAgePattern.MatchString(oldName) && completeAgePattern.MatchString(newName) {
+			return errors.New("rename failure")
+		}
+		return rename(oldDirFD, oldName, newDirFD, newName)
+	}
+	backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+	fixture := newTransitionFixture(t, spoolOps, backend, nil)
+	archive := validRecoveryArchive(t, "rename-retains-pending")
+	objectID := "sha256:" + digestHex(archive)
 	_, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
 	if err == nil || err.Error() != "collector local state failed" {
 		t.Fatalf("Ingest error = %v", err)
 	}
-	if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 0 {
+	objects, discoverErr := fixture.spool.DiscoverPlaintexts()
+	if discoverErr != nil || len(objects) != 1 || objects[0].ObjectID != objectID || objects[0].CompressedSize != int64(len(archive)) || !objects[0].ReceivedAt.Equal(fixture.now) {
+		t.Fatalf("retained pending plaintexts = %#v err=%v", objects, discoverErr)
+	}
+	if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 1 || !plainPendingPattern.MatchString(entries[0]) {
 		t.Fatalf("rename failure entries = %v", entries)
 	}
-	if records, err := fixture.ledger.List(); err != nil || len(records) != 0 {
-		t.Fatalf("orphan ledger = %#v err=%v", records, err)
+	record, found, getErr := fixture.ledger.Get(objectID)
+	if getErr != nil || !found || record.StoredAt != nil || record.CompressedSize != int64(len(archive)) || record.EncryptedSize <= 0 || !record.ReceivedAt.Equal(fixture.now) {
+		t.Fatalf("retained pending ledger = %#v found=%v err=%v", record, found, getErr)
 	}
+	snapshot := fixture.status.Snapshot()
+	if snapshot.OldestPendingAt == nil || !snapshot.OldestPendingAt.Equal(record.ReceivedAt) || !snapshot.TerminalLocalError {
+		t.Fatalf("retained pending readiness = %#v", snapshot)
+	}
+	assertNoActiveSpoolReservations(t, fixture.spool)
+	if backend.createCalls != 0 {
+		t.Fatalf("Create calls before durable age = %d", backend.createCalls)
+	}
+
+	failRename.Store(false)
+	restartedSpool, restartedLedger := reopenRecoveryFixture(t, fixture.spool, fixture.ledger)
+	restartedStatus := NewStatusTracker(ReadinessConfig{StartedAt: fixture.now, StartupGrace: time.Hour, MaxRecoveryAge: 24 * time.Hour}, fixture.clock)
+	restartedStatus.SetSpoolWritable(true)
+	restartedService := newService(restartedSpool, restartedLedger, fixture.service.encryptor, backend, restartedStatus, recoveryarchive.DefaultLimits(), serviceOps{now: fixture.clock})
+	runWorkerOnce(t, restartedSpool, restartedLedger, restartedService, restartedStatus, fixture.clock)
+	if backend.createCalls != 1 {
+		t.Fatalf("restarted Create calls = %d", backend.createCalls)
+	}
+	assertStoredRecoveryComplete(t, restartedSpool, restartedLedger, restartedStatus, objectID, int64(len(archive)))
 }
 
 func TestWorkerCleansOrphanPendingLedgerAndPartial(t *testing.T) {

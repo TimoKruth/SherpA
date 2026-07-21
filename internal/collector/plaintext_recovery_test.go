@@ -122,7 +122,7 @@ func TestIngestPersistentPostRenameFsyncRetainsBoundPlaintext(t *testing.T) {
 	assertBoundRecoveryState(t, fixture.spool, fixture.ledger, objectID, int64(len(archive)))
 	assertNoActiveSpoolReservations(t, fixture.spool)
 	snapshot := fixture.status.Snapshot()
-	if !snapshot.SpoolWritable || snapshot.OldestPendingAt != nil || snapshot.NewestSuccessfulAt != nil || !snapshot.TerminalLocalError {
+	if !snapshot.SpoolWritable || snapshot.OldestPendingAt == nil || !snapshot.OldestPendingAt.Equal(fixture.now) || snapshot.NewestSuccessfulAt != nil || !snapshot.TerminalLocalError {
 		t.Fatalf("persistent fsync readiness = %#v", snapshot)
 	}
 
