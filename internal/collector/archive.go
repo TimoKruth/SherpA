@@ -438,24 +438,31 @@ func (s *Service) publishEncrypted(attempt *ingestAttempt, object PendingObject,
 			}
 			return ObjectRecord{}, s.localFailure()
 		}
+		matchingFinal := false
 		if foundPublished {
 			published.ReceivedAt = record.ReceivedAt
-			if recordMatchesPending(record, published) && record.CompressedSize == compressedSize {
-				attempt.publication = encryptedPublicationDurable
-				failed := s.spool.DiscardEncryptedPartial(attempt.partialPath) != nil
-				if s.spool.RemovePlaintext(attempt.plaintextPath) != nil {
-					failed = true
-				}
-				if failed {
-					return ObjectRecord{}, s.localFailure()
-				}
-				return record, nil
-			}
+			matchingFinal = recordMatchesPending(record, published) && record.CompressedSize == compressedSize
 		}
-		if s.cleanupIngestFailure(attempt, encryptedPublicationPreRename) != nil {
+		if !matchingFinal {
+			if s.cleanupIngestFailure(attempt, encryptedPublicationPreRename) != nil {
+				return ObjectRecord{}, s.localFailure()
+			}
 			return ObjectRecord{}, s.localFailure()
 		}
-		return ObjectRecord{}, s.localFailure()
+		attempt.publication = encryptedPublicationRenamedUncertain
+		if syncErr := s.spool.syncEncrypted(attempt.finalPath, object.EncryptedSize); syncErr != nil {
+			if s.cleanupIngestFailure(attempt, encryptedPublicationRenamedUncertain) != nil {
+				return ObjectRecord{}, s.localFailure()
+			}
+			return ObjectRecord{}, s.localFailure()
+		}
+		attempt.publication = encryptedPublicationDurable
+		if s.spool.DiscardEncryptedPartial(attempt.partialPath) != nil {
+			_ = s.spool.ReleaseEncryptedPartial(attempt.partialPath)
+			_ = s.spool.ReleasePlaintext(attempt.plaintextPath)
+			return ObjectRecord{}, s.localFailure()
+		}
+		commitErr = nil
 	}
 	if commitErr != nil {
 		attempt.publication = encryptedPublicationRenamedUncertain

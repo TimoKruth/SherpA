@@ -911,6 +911,371 @@ func assertRetainedStoredRepair(t testing.TB, fixture *transitionFixture, archiv
 	assertNoActiveSpoolReservations(t, fixture.spool)
 }
 
+func TestIngestAmbiguousRenameFinalSyncFailureRetainsRecoveryCopies(t *testing.T) {
+	archive := validRecoveryArchive(t, "ambiguous-rename-sync-failure")
+	digest := digestHex(archive)
+	partialName := digest + ".tar.gz.age.partial"
+	finalName := digest + ".tar.gz.age"
+	plainName := digest + ".tar.gz.plain.pending"
+	var dirFD int
+	var renamed atomic.Bool
+	var syncFailed atomic.Bool
+	var directorySyncs atomic.Int32
+	var plaintextUnlinks atomic.Int32
+	ops := defaultSpoolOps()
+	rename := ops.renameNoReplace
+	fsync := ops.fsync
+	unlink := ops.unlinkat
+	ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+		err := rename(oldDirFD, oldName, newDirFD, newName)
+		if err == nil && oldName == partialName && newName == finalName {
+			renamed.Store(true)
+			return unix.EIO
+		}
+		return err
+	}
+	ops.fsync = func(fd int) error {
+		if renamed.Load() && fd == dirFD {
+			directorySyncs.Add(1)
+			if syncFailed.CompareAndSwap(false, true) {
+				return unix.EIO
+			}
+		}
+		return fsync(fd)
+	}
+	ops.unlinkat = func(fd int, name string, flags int) error {
+		if renamed.Load() && name == plainName {
+			plaintextUnlinks.Add(1)
+		}
+		return unlink(fd, name, flags)
+	}
+	backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+	fixture := newTransitionFixture(t, ops, backend, nil)
+	dirFD = fixture.spool.dirFD
+	_, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+	if err == nil || err.Error() != "collector local state failed" {
+		t.Fatalf("Ingest error = %v", err)
+	}
+	if !renamed.Load() || directorySyncs.Load() != 1 {
+		t.Fatalf("ambiguous rename=%v directory syncs=%d", renamed.Load(), directorySyncs.Load())
+	}
+	if plaintextUnlinks.Load() != 0 {
+		t.Fatalf("plaintext unlink attempts before durable final = %d", plaintextUnlinks.Load())
+	}
+	objectID := "sha256:" + digest
+	assertPendingFinalRecoveryState(t, fixture, objectID, true, true)
+	assertNoActiveSpoolReservations(t, fixture.spool)
+	if backend.existsCalls != 0 || backend.createCalls != 0 {
+		t.Fatalf("backend called before durable final: exists=%d create=%d", backend.existsCalls, backend.createCalls)
+	}
+
+	restartedSpool, restartedLedger := reopenRecoveryFixture(t, fixture.spool, fixture.ledger)
+	restartedStatus := NewStatusTracker(ReadinessConfig{StartedAt: fixture.now, StartupGrace: time.Hour, MaxRecoveryAge: 24 * time.Hour}, fixture.clock)
+	restartedStatus.SetSpoolWritable(true)
+	restartedService := newService(restartedSpool, restartedLedger, fixture.service.encryptor, backend, restartedStatus, recoveryarchive.DefaultLimits(), serviceOps{now: fixture.clock})
+	runWorkerOnce(t, restartedSpool, restartedLedger, restartedService, restartedStatus, fixture.clock)
+	if !backend.has(objectID) || backend.createCalls != 1 {
+		t.Fatalf("restart remote=%v create=%d", backend.has(objectID), backend.createCalls)
+	}
+	assertStoredRecoveryComplete(t, restartedSpool, restartedLedger, restartedStatus, objectID, int64(len(archive)))
+}
+
+func TestIngestAmbiguousRenamePlaintextSyncFailureRetainsDurableFinal(t *testing.T) {
+	for _, plaintextPresent := range []bool{false, true} {
+		name := "plaintext absent"
+		if plaintextPresent {
+			name = "plaintext present"
+		}
+		t.Run(name, func(t *testing.T) {
+			archive := validRecoveryArchive(t, "ambiguous-plaintext-sync-"+name)
+			digest := digestHex(archive)
+			partialName := digest + ".tar.gz.age.partial"
+			finalName := digest + ".tar.gz.age"
+			plainName := digest + ".tar.gz.plain.pending"
+			var dirFD int
+			var plainPath string
+			var renamed atomic.Bool
+			var directorySyncs atomic.Int32
+			var plaintextUnlinks atomic.Int32
+			var restoreErr error
+			receipt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+			ops := defaultSpoolOps()
+			rename := ops.renameNoReplace
+			fsync := ops.fsync
+			unlink := ops.unlinkat
+			ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+				err := rename(oldDirFD, oldName, newDirFD, newName)
+				if err == nil && oldName == partialName && newName == finalName {
+					renamed.Store(true)
+					return unix.EIO
+				}
+				return err
+			}
+			ops.fsync = func(fd int) error {
+				if renamed.Load() && fd == dirFD {
+					call := directorySyncs.Add(1)
+					if call == 2 {
+						if plaintextPresent {
+							if err := os.WriteFile(plainPath, archive, 0o600); err != nil {
+								restoreErr = err
+							} else if err := os.Chtimes(plainPath, receipt, receipt); err != nil {
+								restoreErr = err
+							}
+						}
+						return unix.EIO
+					}
+				}
+				return fsync(fd)
+			}
+			ops.unlinkat = func(fd int, entry string, flags int) error {
+				if renamed.Load() && entry == plainName {
+					plaintextUnlinks.Add(1)
+				}
+				return unlink(fd, entry, flags)
+			}
+			backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+			fixture := newTransitionFixture(t, ops, backend, nil)
+			dirFD = fixture.spool.dirFD
+			plainPath = filepath.Join(fixture.spool.path, plainName)
+			_, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+			if err == nil || err.Error() != "collector local state failed" {
+				t.Fatalf("Ingest error = %v", err)
+			}
+			if restoreErr != nil {
+				t.Fatalf("restore plaintext outcome: %v", restoreErr)
+			}
+			if !renamed.Load() || directorySyncs.Load() != 2 || plaintextUnlinks.Load() != 1 {
+				t.Fatalf("rename=%v directory syncs=%d plaintext unlinks=%d", renamed.Load(), directorySyncs.Load(), plaintextUnlinks.Load())
+			}
+			objectID := "sha256:" + digest
+			assertPendingFinalRecoveryState(t, fixture, objectID, plaintextPresent, true)
+			assertNoActiveSpoolReservations(t, fixture.spool)
+			if backend.existsCalls != 0 || backend.createCalls != 0 {
+				t.Fatalf("backend called after plaintext sync failure: exists=%d create=%d", backend.existsCalls, backend.createCalls)
+			}
+
+			restartedSpool, restartedLedger := reopenRecoveryFixture(t, fixture.spool, fixture.ledger)
+			restartedStatus := NewStatusTracker(ReadinessConfig{StartedAt: fixture.now, StartupGrace: time.Hour, MaxRecoveryAge: 24 * time.Hour}, fixture.clock)
+			restartedStatus.SetSpoolWritable(true)
+			restartedService := newService(restartedSpool, restartedLedger, fixture.service.encryptor, backend, restartedStatus, recoveryarchive.DefaultLimits(), serviceOps{now: fixture.clock})
+			runWorkerOnce(t, restartedSpool, restartedLedger, restartedService, restartedStatus, fixture.clock)
+			if !backend.has(objectID) || backend.createCalls != 1 {
+				t.Fatalf("restart remote=%v create=%d", backend.has(objectID), backend.createCalls)
+			}
+			assertStoredRecoveryComplete(t, restartedSpool, restartedLedger, restartedStatus, objectID, int64(len(archive)))
+		})
+	}
+}
+
+func TestIngestAmbiguousRenameCrashAfterIndependentFinalSyncIsRecoverable(t *testing.T) {
+	archive := validRecoveryArchive(t, "ambiguous-rename-crash-after-sync")
+	digest := digestHex(archive)
+	partialName := digest + ".tar.gz.age.partial"
+	finalName := digest + ".tar.gz.age"
+	var dirFD int
+	var renamed atomic.Bool
+	var directorySyncs atomic.Int32
+	synced := make(chan struct{})
+	var syncOnce sync.Once
+	ops := defaultSpoolOps()
+	rename := ops.renameNoReplace
+	fsync := ops.fsync
+	ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+		err := rename(oldDirFD, oldName, newDirFD, newName)
+		if err == nil && oldName == partialName && newName == finalName {
+			renamed.Store(true)
+			return unix.EIO
+		}
+		return err
+	}
+	ops.fsync = func(fd int) error {
+		if renamed.Load() && fd == dirFD {
+			directorySyncs.Add(1)
+		}
+		return fsync(fd)
+	}
+	backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+	fixture := newTransitionFixture(t, ops, backend, func(encryptor *Encryptor, now func() time.Time) serviceOps {
+		return serviceOps{
+			now:         now,
+			encryptFile: encryptor.EncryptFile,
+			crash: func(point serviceCrashPoint) error {
+				if point == crashAfterAgeRename {
+					syncOnce.Do(func() { close(synced) })
+					return errors.New("crash after independent sync")
+				}
+				return nil
+			},
+		}
+	})
+	dirFD = fixture.spool.dirFD
+	_, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+	if err == nil || err.Error() != "collector operation interrupted" {
+		t.Fatalf("Ingest error = %v", err)
+	}
+	select {
+	case <-synced:
+	default:
+		t.Fatal("crash hook was not reached after independent final sync")
+	}
+	if !renamed.Load() || directorySyncs.Load() != 1 {
+		t.Fatalf("rename=%v directory syncs=%d", renamed.Load(), directorySyncs.Load())
+	}
+	objectID := "sha256:" + digest
+	assertPendingFinalRecoveryState(t, fixture, objectID, true, false)
+	if backend.existsCalls != 0 || backend.createCalls != 0 {
+		t.Fatalf("backend called before crash recovery: exists=%d create=%d", backend.existsCalls, backend.createCalls)
+	}
+
+	restartedSpool, restartedLedger := reopenRecoveryFixture(t, fixture.spool, fixture.ledger)
+	restartedStatus := NewStatusTracker(ReadinessConfig{StartedAt: fixture.now, StartupGrace: time.Hour, MaxRecoveryAge: 24 * time.Hour}, fixture.clock)
+	restartedStatus.SetSpoolWritable(true)
+	restartedService := newService(restartedSpool, restartedLedger, fixture.service.encryptor, backend, restartedStatus, recoveryarchive.DefaultLimits(), serviceOps{now: fixture.clock})
+	runWorkerOnce(t, restartedSpool, restartedLedger, restartedService, restartedStatus, fixture.clock)
+	if !backend.has(objectID) || backend.createCalls != 1 {
+		t.Fatalf("restart remote=%v create=%d", backend.has(objectID), backend.createCalls)
+	}
+	assertStoredRecoveryComplete(t, restartedSpool, restartedLedger, restartedStatus, objectID, int64(len(archive)))
+}
+
+func TestIngestNoReplaceConflictSyncsMatchingFinalBeforePlaintextDeletion(t *testing.T) {
+	for _, matching := range []bool{true, false} {
+		name := "matching"
+		if !matching {
+			name = "mismatched"
+		}
+		t.Run(name, func(t *testing.T) {
+			archive := validRecoveryArchive(t, "no-replace-conflict-"+name)
+			digest := digestHex(archive)
+			partialName := digest + ".tar.gz.age.partial"
+			finalName := digest + ".tar.gz.age"
+			plainName := digest + ".tar.gz.plain.pending"
+			var dirFD int
+			var observe atomic.Bool
+			var eventsMu sync.Mutex
+			var events []string
+			recordEvent := func(event string) {
+				if !observe.Load() {
+					return
+				}
+				eventsMu.Lock()
+				events = append(events, event)
+				eventsMu.Unlock()
+			}
+			ops := defaultSpoolOps()
+			rename := ops.renameNoReplace
+			fsync := ops.fsync
+			unlink := ops.unlinkat
+			ops.renameNoReplace = func(oldDirFD int, oldName string, newDirFD int, newName string) error {
+				if oldName != partialName || newName != finalName {
+					return rename(oldDirFD, oldName, newDirFD, newName)
+				}
+				if matching {
+					if err := unix.Linkat(oldDirFD, oldName, newDirFD, newName, 0); err != nil {
+						return err
+					}
+				} else {
+					fd, err := unix.Openat(newDirFD, newName, unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+					if err != nil {
+						return err
+					}
+					_, writeErr := unix.Write(fd, []byte("mismatched encrypted object"))
+					syncErr := unix.Fsync(fd)
+					closeErr := unix.Close(fd)
+					if writeErr != nil || syncErr != nil || closeErr != nil {
+						return unix.EIO
+					}
+				}
+				if err := unix.Fsync(newDirFD); err != nil {
+					return err
+				}
+				observe.Store(true)
+				return rename(oldDirFD, oldName, newDirFD, newName)
+			}
+			ops.fsync = func(fd int) error {
+				if fd == dirFD {
+					recordEvent("fsync-directory")
+				}
+				return fsync(fd)
+			}
+			ops.unlinkat = func(fd int, entry string, flags int) error {
+				switch entry {
+				case partialName:
+					recordEvent("unlink-partial")
+				case plainName:
+					recordEvent("unlink-plaintext")
+				}
+				return unlink(fd, entry, flags)
+			}
+			backend := &fakeBackend{objects: make(map[string]bool), createVisible: true}
+			fixture := newTransitionFixture(t, ops, backend, nil)
+			dirFD = fixture.spool.dirFD
+			result, err := fixture.service.Ingest(context.Background(), testReadCloser(archive), int64(len(archive)))
+			eventsMu.Lock()
+			observed := append([]string(nil), events...)
+			eventsMu.Unlock()
+			if matching {
+				if err != nil || result.Status != ResultStored {
+					t.Fatalf("matching result = %#v err=%v", result, err)
+				}
+				if len(observed) == 0 || observed[0] != "fsync-directory" {
+					t.Fatalf("matching conflict event order = %v", observed)
+				}
+				if entries := spoolEntryNames(t, fixture.spool.path); len(entries) != 0 {
+					t.Fatalf("matching final entries = %v", entries)
+				}
+				if backend.createCalls != 1 {
+					t.Fatalf("matching Create calls = %d", backend.createCalls)
+				}
+			} else {
+				if err == nil || err.Error() != "collector local state failed" {
+					t.Fatalf("mismatched Ingest error = %v", err)
+				}
+				if len(observed) == 0 || observed[0] != "unlink-partial" {
+					t.Fatalf("mismatched conflict event order = %v", observed)
+				}
+				objectID := "sha256:" + digest
+				assertPendingFinalRecoveryState(t, fixture, objectID, true, true)
+				if backend.existsCalls != 0 || backend.createCalls != 0 {
+					t.Fatalf("backend called for mismatched final: exists=%d create=%d", backend.existsCalls, backend.createCalls)
+				}
+			}
+			assertNoActiveSpoolReservations(t, fixture.spool)
+		})
+	}
+}
+
+func assertPendingFinalRecoveryState(t testing.TB, fixture *transitionFixture, objectID string, wantPlaintext, terminal bool) {
+	t.Helper()
+	entries := spoolEntryNames(t, fixture.spool.path)
+	plainCount, finalCount, partialCount := 0, 0, 0
+	for _, entry := range entries {
+		switch {
+		case plainPendingPattern.MatchString(entry):
+			plainCount++
+		case completeAgePattern.MatchString(entry):
+			finalCount++
+		case partialAgePattern.MatchString(entry):
+			partialCount++
+		}
+	}
+	wantPlainCount := 0
+	if wantPlaintext {
+		wantPlainCount = 1
+	}
+	if plainCount != wantPlainCount || finalCount != 1 || partialCount != 0 || len(entries) != wantPlainCount+1 {
+		t.Fatalf("pending recovery entries = %v", entries)
+	}
+	record, found, err := fixture.ledger.Get(objectID)
+	if err != nil || !found || record.StoredAt != nil || record.EncryptedSize <= 0 || record.CompressedSize <= 0 {
+		t.Fatalf("pending recovery ledger = %#v found=%v err=%v", record, found, err)
+	}
+	snapshot := fixture.status.Snapshot()
+	if snapshot.OldestPendingAt == nil || !snapshot.OldestPendingAt.Equal(record.ReceivedAt) || snapshot.TerminalLocalError != terminal {
+		t.Fatalf("pending recovery readiness = %#v", snapshot)
+	}
+}
+
 func TestIngestReconcilesTransientPostRenameFailures(t *testing.T) {
 	tests := []struct {
 		name string
