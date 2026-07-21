@@ -549,10 +549,10 @@ func (s *Spool) cleanupStalePartialsAt(now time.Time) (int, error) {
 		if s.ops.unlinkat(s.dirFD, n, 0) != nil {
 			return removed, errors.New("collector spool cleanup failed")
 		}
+		if s.ops.fsync(s.dirFD) != nil {
+			return removed, errors.New("collector spool cleanup failed")
+		}
 		removed++
-	}
-	if removed > 0 && s.ops.fsync(s.dirFD) != nil {
-		return removed, errors.New("collector spool synchronization failed")
 	}
 	return removed, nil
 }
@@ -563,23 +563,29 @@ func (s *Spool) CheckWritable() error {
 	defer s.end()
 	s.transition.Lock()
 	defer s.transition.Unlock()
-	n, fd, e := s.createRandomFile(".sherpa-probe-", ".tmp")
+	n, fd, e := s.createRandomFile(".sherpa-upload-", ".upload.partial")
 	if e != nil {
 		return classifyStorage(e, "collector spool not writable")
 	}
+	cleanup := func(primary error) error {
+		if fd >= 0 {
+			_ = s.ops.close(fd)
+			fd = -1
+		}
+		if s.ops.unlinkat(s.dirFD, n, 0) != nil || s.ops.fsync(s.dirFD) != nil {
+			return errors.New("collector spool not writable")
+		}
+		return primary
+	}
 	if e = s.ops.fsync(fd); e != nil {
-		_ = s.ops.close(fd)
-		_ = s.ops.unlinkat(s.dirFD, n, 0)
-		return classifyStorage(e, "collector spool not writable")
+		return cleanup(classifyStorage(e, "collector spool not writable"))
 	}
 	if e = s.ops.close(fd); e != nil {
-		_ = s.ops.unlinkat(s.dirFD, n, 0)
-		return classifyStorage(e, "collector spool not writable")
+		fd = -1
+		return cleanup(classifyStorage(e, "collector spool not writable"))
 	}
-	if s.ops.unlinkat(s.dirFD, n, 0) != nil || s.ops.fsync(s.dirFD) != nil {
-		return errors.New("collector spool not writable")
-	}
-	return nil
+	fd = -1
+	return cleanup(nil)
 }
 
 func (s *Spool) createRandomFile(pre, suf string) (string, int, error) {

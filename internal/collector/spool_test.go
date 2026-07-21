@@ -404,6 +404,113 @@ func TestSpoolCheckWritableUsesMode0600Probe(t *testing.T) {
 	}
 }
 
+func TestSpoolCheckWritableUsesRecoverablePartialGrammar(t *testing.T) {
+	ops := defaultSpoolOps()
+	baseOpen := ops.openat
+	created := ""
+	ops.openat = func(fd int, name string, flags int, mode uint32) (int, error) {
+		if flags&unix.O_CREAT != 0 {
+			created = name
+		}
+		return baseOpen(fd, name, flags, mode)
+	}
+	spool := openTestSpool(t, ops)
+	if err := spool.CheckWritable(); err != nil {
+		t.Fatal(err)
+	}
+	if !validUploadPartialName(created) {
+		t.Fatalf("probe name is not recoverable: %q", created)
+	}
+}
+
+func TestSpoolCheckWritableReportsCleanupFailures(t *testing.T) {
+	t.Run("unlink", func(t *testing.T) {
+		ops := defaultSpoolOps()
+		ops.unlinkat = func(int, string, int) error { return unix.EIO }
+		spool := openTestSpool(t, ops)
+		if err := spool.CheckWritable(); err == nil || err.Error() != "collector spool not writable" {
+			t.Fatalf("error = %v", err)
+		}
+		entries, err := os.ReadDir(spool.path)
+		if err != nil || len(entries) != 1 || !validUploadPartialName(entries[0].Name()) {
+			t.Fatalf("entries=%v error=%v", entryNames(entries), err)
+		}
+	})
+	t.Run("directory sync", func(t *testing.T) {
+		ops := defaultSpoolOps()
+		calls := 0
+		ops.fsync = func(fd int) error {
+			calls++
+			if calls == 2 {
+				return unix.EIO
+			}
+			return unix.Fsync(fd)
+		}
+		spool := openTestSpool(t, ops)
+		if err := spool.CheckWritable(); err == nil || err.Error() != "collector spool not writable" {
+			t.Fatalf("error = %v", err)
+		}
+		if calls != 2 {
+			t.Fatalf("fsync calls = %d", calls)
+		}
+	})
+}
+
+func TestSpoolCleanupSyncsEachRemovalBeforeLaterFailure(t *testing.T) {
+	spool := openTestSpoolWithAge(t, defaultSpoolOps(), time.Hour)
+	now := time.Now()
+	for _, token := range []string{"0123456789abcdef0123456789abcdef", "1123456789abcdef0123456789abcdef"} {
+		path := filepath.Join(spool.path, ".sherpa-upload-"+token+".upload.partial")
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	baseUnlink := spool.ops.unlinkat
+	unlinks := 0
+	syncs := 0
+	spool.ops.unlinkat = func(fd int, name string, flags int) error {
+		unlinks++
+		if unlinks == 2 {
+			return unix.EIO
+		}
+		return baseUnlink(fd, name, flags)
+	}
+	spool.ops.fsync = func(fd int) error {
+		syncs++
+		return unix.Fsync(fd)
+	}
+	removed, err := spool.cleanupStalePartialsAt(now)
+	if err == nil || err.Error() != "collector spool cleanup failed" {
+		t.Fatalf("removed=%d error=%v", removed, err)
+	}
+	if removed != 1 || unlinks != 2 || syncs != 1 {
+		t.Fatalf("removed=%d unlinks=%d syncs=%d", removed, unlinks, syncs)
+	}
+}
+
+func TestSpoolCleanupDoesNotCountUnsyncedRemoval(t *testing.T) {
+	spool := openTestSpoolWithAge(t, defaultSpoolOps(), time.Hour)
+	now := time.Now()
+	path := filepath.Join(spool.path, ".sherpa-upload-0123456789abcdef0123456789abcdef.upload.partial")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	spool.ops.fsync = func(int) error { return unix.EIO }
+	removed, err := spool.cleanupStalePartialsAt(now)
+	if err == nil || err.Error() != "collector spool cleanup failed" {
+		t.Fatalf("removed=%d error=%v", removed, err)
+	}
+	if removed != 0 {
+		t.Fatalf("unsynced removals reported = %d", removed)
+	}
+}
+
 func TestSpoolDiskFullClassifiesAsInsufficientStorage(t *testing.T) {
 	ops := defaultSpoolOps()
 	ops.statfs = func(_ int, _ *unix.Statfs_t) error { return errors.New("raw-path-and-device-canary") }

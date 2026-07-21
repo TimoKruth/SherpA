@@ -225,6 +225,272 @@ func TestLedgerStrictJSONBoundsAndStaticEntries(t *testing.T) {
 	}
 }
 
+func TestLedgerStrictJSONRejectsDuplicateAndCaseVariantKeys(t *testing.T) {
+	ledger := openTestLedger(t, defaultLedgerOps())
+	record := validTestRecord(time.Now().UTC().Truncate(time.Second))
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := record.ReceivedAt.Add(time.Minute)
+	withStored := record
+	withStored.StoredAt = &stored
+	storedRaw, err := json.Marshal(withStored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		body   []byte
+		canary string
+	}{
+		{
+			name:   "duplicate object ID",
+			body:   []byte(`{"object_id":"private-duplicate-canary",` + strings.TrimPrefix(string(raw), "{")),
+			canary: "private-duplicate-canary",
+		},
+		{
+			name: "duplicate optional field",
+			body: []byte(`{"stored_at":null,` + strings.TrimPrefix(string(storedRaw), "{")),
+		},
+		{
+			name: "mixed case key",
+			body: []byte(strings.Replace(string(raw), `"object_id"`, `"Object_ID"`, 1)),
+		},
+		{
+			name: "upper case key",
+			body: []byte(strings.Replace(string(raw), `"object_id"`, `"OBJECT_ID"`, 1)),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(ledger.path, testDigestHex+".json")
+			if err := os.WriteFile(path, tc.body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := ledger.Get(record.ObjectID)
+			if err == nil || err.Error() != "collector ledger record invalid" {
+				t.Fatalf("error = %v", err)
+			}
+			if tc.canary != "" && strings.Contains(err.Error(), tc.canary) {
+				t.Fatalf("error exposed private value: %v", err)
+			}
+		})
+	}
+}
+
+func TestLedgerStrictJSONAcceptsVariedFieldOrder(t *testing.T) {
+	ledger := openTestLedger(t, defaultLedgerOps())
+	record := validTestRecord(time.Now().UTC().Truncate(time.Second))
+	received, err := json.Marshal(record.ReceivedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"retry_count":0,"encrypted_size":2,"archive_name":"sherpa-` + testDigestHex + `","received_at":` + string(received) + `,"object_id":"sha256:` + testDigestHex + `","compressed_size":1}`)
+	if err := os.WriteFile(filepath.Join(ledger.path, testDigestHex+".json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := ledger.Get(record.ObjectID)
+	if err != nil || !found || !reflect.DeepEqual(got, record) {
+		t.Fatalf("record = %#v found=%v err=%v", got, found, err)
+	}
+}
+
+func TestOpenLedgerRecoversExactTemporaryFilesDurably(t *testing.T) {
+	dir := newPrivateDir(t)
+	temp := ".sherpa-ledger-0123456789abcdef0123456789abcdef.tmp"
+	nonmatching := temp + ".extra"
+	for _, name := range []string{temp, nonmatching} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var events []string
+	ops := defaultLedgerOps()
+	baseUnlink := ops.unlinkat
+	ops.unlinkat = func(fd int, name string, flags int) error {
+		events = append(events, "unlink:"+name)
+		return baseUnlink(fd, name, flags)
+	}
+	ops.fsync = func(fd int) error {
+		events = append(events, "sync")
+		return unix.Fsync(fd)
+	}
+	ledger, err := openLedger(dir, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	if want := []string{"unlink:" + temp, "sync"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, temp)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary remains: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, nonmatching)); err != nil {
+		t.Fatalf("nonmatching entry removed: %v", err)
+	}
+}
+
+func TestOpenLedgerRejectsUnsafeMatchingTemporaryBeforeOpen(t *testing.T) {
+	dir := newPrivateDir(t)
+	name := ".sherpa-ledger-0123456789abcdef0123456789abcdef.tmp"
+	if err := unix.Mkfifo(filepath.Join(dir, name), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ops := defaultLedgerOps()
+	opened := false
+	baseOpen := ops.openat
+	ops.openat = func(fd int, got string, flags int, mode uint32) (int, error) {
+		if got == name {
+			opened = true
+		}
+		return baseOpen(fd, got, flags, mode)
+	}
+	if _, err := openLedger(dir, ops); err == nil || err.Error() != "collector ledger recovery failed" {
+		t.Fatalf("error = %v", err)
+	}
+	if opened {
+		t.Fatal("unsafe temporary was operationally opened")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
+		t.Fatalf("unsafe temporary changed: %v", err)
+	}
+}
+
+func TestOpenLedgerRecoverySyncsEachRemovalBeforeLaterFailure(t *testing.T) {
+	dir := newPrivateDir(t)
+	for _, token := range []string{"0123456789abcdef0123456789abcdef", "1123456789abcdef0123456789abcdef"} {
+		if err := os.WriteFile(filepath.Join(dir, ".sherpa-ledger-"+token+".tmp"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ops := defaultLedgerOps()
+	baseUnlink := ops.unlinkat
+	unlinks := 0
+	syncs := 0
+	ops.unlinkat = func(fd int, name string, flags int) error {
+		unlinks++
+		if unlinks == 2 {
+			return unix.EIO
+		}
+		return baseUnlink(fd, name, flags)
+	}
+	ops.fsync = func(fd int) error {
+		syncs++
+		return unix.Fsync(fd)
+	}
+	if _, err := openLedger(dir, ops); err == nil || err.Error() != "collector ledger recovery failed" {
+		t.Fatalf("error = %v", err)
+	}
+	if unlinks != 2 || syncs != 1 {
+		t.Fatalf("unlinks=%d syncs=%d", unlinks, syncs)
+	}
+}
+
+func TestLedgerPutFailureCleansTemporaryDurably(t *testing.T) {
+	t.Run("successful cleanup", func(t *testing.T) {
+		var events []string
+		ops := defaultLedgerOps()
+		ops.fsync = func(fd int) error {
+			events = append(events, "sync")
+			return unix.Fsync(fd)
+		}
+		ops.rename = func(int, string, int, string) error {
+			events = append(events, "rename")
+			return unix.EIO
+		}
+		baseUnlink := ops.unlinkat
+		ops.unlinkat = func(fd int, name string, flags int) error {
+			events = append(events, "unlink")
+			return baseUnlink(fd, name, flags)
+		}
+		ledger := openTestLedger(t, ops)
+		err := ledger.Put(validTestRecord(time.Now().UTC()))
+		if err == nil || err.Error() != "collector ledger replacement failed" {
+			t.Fatalf("error = %v", err)
+		}
+		if want := []string{"sync", "rename", "unlink", "sync"}; !reflect.DeepEqual(events, want) {
+			t.Fatalf("events = %v, want %v", events, want)
+		}
+	})
+	t.Run("unlink failure", func(t *testing.T) {
+		ops := defaultLedgerOps()
+		ops.rename = func(int, string, int, string) error { return unix.EIO }
+		ops.unlinkat = func(int, string, int) error { return unix.EIO }
+		ledger := openTestLedger(t, ops)
+		err := ledger.Put(validTestRecord(time.Now().UTC()))
+		if err == nil || err.Error() != "collector ledger cleanup failed" {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("cleanup sync failure", func(t *testing.T) {
+		ops := defaultLedgerOps()
+		ops.rename = func(int, string, int, string) error { return unix.EIO }
+		calls := 0
+		ops.fsync = func(fd int) error {
+			calls++
+			if calls == 2 {
+				return unix.EIO
+			}
+			return unix.Fsync(fd)
+		}
+		ledger := openTestLedger(t, ops)
+		err := ledger.Put(validTestRecord(time.Now().UTC()))
+		if err == nil || err.Error() != "collector ledger cleanup failed" {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("file sync failure still cleans", func(t *testing.T) {
+		ops := defaultLedgerOps()
+		calls := 0
+		ops.fsync = func(fd int) error {
+			calls++
+			if calls == 1 {
+				return unix.EIO
+			}
+			return unix.Fsync(fd)
+		}
+		ledger := openTestLedger(t, ops)
+		err := ledger.Put(validTestRecord(time.Now().UTC()))
+		if err == nil || err.Error() != "collector ledger synchronization failed" {
+			t.Fatalf("error = %v", err)
+		}
+		entries, readErr := os.ReadDir(ledger.path)
+		if readErr != nil || len(entries) != 0 || calls != 2 {
+			t.Fatalf("entries=%v calls=%d error=%v", entryNames(entries), calls, readErr)
+		}
+	})
+}
+
+func TestLedgerCreateTempReturnsModeFailureAndPutClassifiesIt(t *testing.T) {
+	t.Run("returns actual mode error", func(t *testing.T) {
+		ops := defaultLedgerOps()
+		ops.forceMode = func(int) error { return unix.EPERM }
+		ledger := openTestLedger(t, ops)
+		name, fd, err := ledger.createTemp()
+		if !errors.Is(err, unix.EPERM) || name != "" || fd != -1 {
+			t.Fatalf("name=%q fd=%d error=%v", name, fd, err)
+		}
+	})
+	t.Run("cleans unsafe created mode", func(t *testing.T) {
+		ops := defaultLedgerOps()
+		ops.forceMode = func(fd int) error {
+			if err := unix.Fchmod(fd, 0o640); err != nil {
+				return err
+			}
+			return unix.EPERM
+		}
+		ledger := openTestLedger(t, ops)
+		if err := ledger.Put(validTestRecord(time.Now().UTC())); err == nil || err.Error() != "collector ledger temporary unsafe" {
+			t.Fatalf("Put error = %v", err)
+		}
+		entries, err := os.ReadDir(ledger.path)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("temporary residue=%v error=%v", entryNames(entries), err)
+		}
+	})
+}
+
 func TestLedgerPostRenameSyncFailureIsTerminal(t *testing.T) {
 	ops := defaultLedgerOps()
 	calls := 0
