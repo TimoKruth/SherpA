@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import hashlib
 import importlib.util
 import io
 import json
@@ -9,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -237,6 +239,131 @@ class LeakageGateTests(unittest.TestCase):
         if scanner == "filesystem":
             return self.write_filesystem(root, path, body, member_type, linkname)
         return self.write_image_save(root, path, body, member_type, linkname)
+
+    def test_reviewed_msgpack_nul_records_require_exact_path_key_digest_and_terminator(self):
+        normalized_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so"
+        arm64_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-aarch64-linux-gnu.so"
+        amd64_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-x86_64-linux-gnu.so"
+        record = b"public-prefix strict_map_key=public-one strict_map_key=public-two\x00"
+        digest = hashlib.sha256(record).hexdigest()
+        allowlist = {normalized_path: {"strict_map_key": frozenset({digest})}}
+
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256",
+            allowlist,
+            create=True,
+        ):
+            for path in (arm64_path, amd64_path):
+                with self.subTest(accepted_path=path):
+                    CHECKS_MODULE.check_file_contents(record, path)
+
+            rejected = (
+                ("opt/borg/lib/python3.13/site-packages/msgpack/moved/_cmsgpack.cpython-313-aarch64-linux-gnu.so", record),
+                ("opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-riscv64-linux-gnu.so", record),
+                (arm64_path, record[:-1] + b"-changed\x00"),
+                (arm64_path, record[:-1]),
+            )
+            for path, body in rejected:
+                with self.subTest(rejected_path=path, terminated=body.endswith(b"\x00")):
+                    with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                        CHECKS_MODULE.check_file_contents(body, path)
+                    diagnostic = str(failure.exception)
+                    self.assertIn("secret-like assignment", diagnostic)
+                    self.assertIn(path, diagnostic)
+                    self.assertNotIn("public-one", diagnostic)
+                    self.assertNotIn(body.decode("ascii"), diagnostic)
+
+        changed_key_record = b"public-prefix strict_map_secret=public-one\x00"
+        changed_key_allowlist = {
+            normalized_path: {
+                "strict_map_secret": frozenset({hashlib.sha256(changed_key_record).hexdigest()}),
+            },
+        }
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256",
+            changed_key_allowlist,
+            create=True,
+        ):
+            with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                CHECKS_MODULE.check_file_contents(changed_key_record, arm64_path)
+            self.assertIn("secret-like assignment", str(failure.exception))
+            self.assertNotIn("public-one", str(failure.exception))
+
+    def test_reviewed_msgpack_record_with_multiple_matches_is_hashed_once(self):
+        normalized_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so"
+        path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-aarch64-linux-gnu.so"
+        record = b"strict_map_key=public-one and strict_map_key=public-two\x00"
+        original_sha256 = CHECKS_MODULE.hashlib.sha256
+        digest = original_sha256(record).hexdigest()
+        allowlist = {normalized_path: {"strict_map_key": frozenset({digest})}}
+        hash_calls = 0
+
+        def counting_sha256(data=b""):
+            nonlocal hash_calls
+            hash_calls += 1
+            return original_sha256(data)
+
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256",
+            allowlist,
+            create=True,
+        ), mock.patch.object(CHECKS_MODULE.hashlib, "sha256", side_effect=counting_sha256):
+            CHECKS_MODULE.check_file_contents(record, path)
+        self.assertEqual(hash_calls, 1, "complete NUL record was hashed more than once")
+
+    def test_reviewed_msgpack_records_are_checked_in_export_and_every_saved_layer(self):
+        normalized_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so"
+        path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-aarch64-linux-gnu.so"
+        record = b"public-prefix strict_map_key=public-one strict_map_key=public-two\x00"
+        allowlist = {
+            normalized_path: {
+                "strict_map_key": frozenset({hashlib.sha256(record).hexdigest()}),
+            },
+        }
+        benign_layer = [("opt/application/public.txt", b"public fixture\n", tarfile.REGTYPE, "")]
+
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256",
+            allowlist,
+            create=True,
+        ), tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            CHECKS_MODULE.check_filesystem(self.write_filesystem(root, path, record))
+            layers = [[(path, record, tarfile.REGTYPE, "")], [(path, record, tarfile.REGTYPE, "")], [(path, record, tarfile.REGTYPE, "")]]
+            CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers))
+
+            for layer_index in range(3):
+                with self.subTest(changed_layer=layer_index):
+                    changed = record[:-1] + b"-changed\x00"
+                    layers = [benign_layer, benign_layer, benign_layer]
+                    layers[layer_index] = [(path, changed, tarfile.REGTYPE, "")]
+                    with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                        CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers))
+                    diagnostic = str(failure.exception)
+                    self.assertIn("secret-like assignment", diagnostic)
+                    self.assertIn(path, diagnostic)
+                    self.assertNotIn("public-one", diagnostic)
+                    self.assertNotIn(changed.decode("ascii"), diagnostic)
+
+    def test_production_msgpack_record_allowlist_is_exact(self):
+        normalized_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so"
+        expected = {
+            normalized_path: {
+                "strict_map_key": frozenset({
+                    "d63020dcc481de704039ce44faf1ca726f0d3e70765b2900c0886eb5d6f21525",
+                    "0cf91e3e6f10e36b6bb7698c7a1561a80ace0d9a28b672d3e8560d79487d5b03",
+                    "c4ac930f2245301678e8afab2a124d54ecdc1c4ee7393ca3cd71a677781ca24b",
+                }),
+            },
+        }
+        self.assertEqual(
+            getattr(CHECKS_MODULE, "ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256", {}),
+            expected,
+        )
 
     def test_secret_like_history_assignment_is_rejected_without_printing_value(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -1114,3 +1114,98 @@ Changed files:
 The exact diff was reviewed for hidden prefix/suffix rescans, regex restart behavior, extra whole-file allocations, `str`/`bytes` divergence, CR/LF/NUL boundary handling, cross-record matches, exact-allowlist bypasses, and diagnostic disclosure. No finite token or assignment-key threshold was introduced, and all prior bounds and fail-closed controls remain active.
 
 No Docker, Go suite, race suite, VPS, Railway, Traefik, Hetzner, Storage Box, or other external infrastructure was accessed. Task 10 is not marked complete; independent re-review remains required.
+
+# Task 10 Reviewed msgpack Binary-Record Collision Fix
+
+## Scope and root cause
+
+This focused correction started from exact HEAD `c1e0080b114e8fd852aeb97a3a00ddff8a79ef48`. The exact-HEAD Docker smoke had already built local image `sha256:81aa978d8fdab9a1ece1f0374188c073f6cc336826089a8c33a53934c2a1bd05`, verified OCI revision `c1e0080b114e8fd852aeb97a3a00ddff8a79ef48`, runtime user `10001:10001`, and both pinned Borg integration tests, then rejected the compiled msgpack 1.2.1 extension as a secret-like assignment.
+
+Independent artifact review established that the four `strict_map_key` detector matches are stable non-secret compiled-extension records shared by the official CPython 3.13 manylinux2014 x86_64 and aarch64 msgpack 1.2.1 wheels. Three complete terminating-NUL record digests were reviewed:
+
+```text
+d63020dcc481de704039ce44faf1ca726f0d3e70765b2900c0886eb5d6f21525
+0cf91e3e6f10e36b6bb7698c7a1561a80ace0d9a28b672d3e8560d79487d5b03
+c4ac930f2245301678e8afab2a124d54ecdc1c4ee7393ca3cd71a677781ca24b
+```
+
+The Dockerfile and plan-mandated local-artifact Borg 1.4.5 pip installation were not changed.
+
+## Strict RED evidence
+
+Four focused regressions were added before production changes. They cover exact aarch64/x86_64 acceptance, moved and unknown architecture paths, modified records, changed keys, missing NUL termination, one hash for two matches in one record, merged export and every saved layer, non-disclosing diagnostics, and the exact production digest set.
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py <4 focused msgpack tests>
+Ran 4 tests in 0.007s
+FAILED (failures=1, errors=4)
+(exit 1)
+```
+
+The errors were the intended current-code `CheckFailure` rejections of exact reviewed records for both deployment paths, direct multi-match scanning, and exported-filesystem scanning. The failure showed that the production allowlist was absent. No diagnostic disclosed a test value or complete record.
+
+## Implementation
+
+- Added a distinct binary-assignment exception; the broad regular `runtime_assignment_allowed` source allowlist remains unchanged.
+- Normalized only the exact CPython 3.13 aarch64 and x86_64 compiled-msgpack paths to one reviewed key. Moved paths and all other architecture suffixes fail closed.
+- Required the exact key `strict_map_key` plus one of the three reviewed SHA-256 digests of the complete record including its terminating NUL.
+- Unterminated records, byte changes, prefixes or suffixes that change the complete record, changed keys, and unknown digests remain rejected.
+- Added a monotonically advancing NUL-record iterator alongside the already ordered assignment matches. Each candidate complete record is sliced and hashed at most once, and the digest is reused for additional matches in that record. No backward scan, per-match prefix scan, record-bound list, or second whole-file representation was added.
+- Preserved all previous private-header, age, Bearer, link, bounds, merged-filesystem, saved-layer, exact-source allowlist, and non-disclosure checks.
+
+## GREEN evidence
+
+Focused GREEN:
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py <4 focused msgpack tests>
+Ran 4 tests in 0.014s
+OK
+```
+
+Complete scanner suite in all required modes:
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py
+Ran 62 tests in 29.802s
+OK
+
+$ PYTHONOPTIMIZE=1 python3 -I deploy/collector/smoke_checks_test.py
+Ran 62 tests in 30.228s
+OK
+
+$ python3 -I -O deploy/collector/smoke_checks_test.py
+Ran 62 tests in 30.012s
+OK
+```
+
+Static verification:
+
+```text
+$ python3 -m py_compile deploy/collector/smoke_checks.py deploy/collector/smoke_checks_test.py
+(exit 0; no output)
+
+$ git diff --check
+(exit 0; no output)
+```
+
+## Existing-image focused validation
+
+The corrected working-tree scanner was exercised read-only against the already-built exact-HEAD local image, without rebuilding it. The compiled extension was exported from a temporary `--rm` container and scanned at its exact normalized path:
+
+```text
+id=sha256:81aa978d8fdab9a1ece1f0374188c073f6cc336826089a8c33a53934c2a1bd05 revision=c1e0080b114e8fd852aeb97a3a00ddff8a79ef48 user=10001:10001
+reviewed msgpack scan passed: path=opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-aarch64-linux-gnu.so bytes=1472904
+```
+
+This is focused validation of the prior image with the corrected working-tree scanner, not a final exact-commit Docker smoke. The final Docker build/smoke must be rerun only after this correction is committed and independently reviewed.
+
+## Changed files and self-review
+
+Changed files:
+
+- `deploy/collector/smoke_checks.py`
+- `deploy/collector/smoke_checks_test.py`
+- `.superpowers/sdd/task-10-report.md`
+
+The exact diff was reviewed for broad source exemptions, path or architecture overmatching, missing NUL termination, digest/key ambiguity, repeated hashing for multiple matches, hidden quadratic work, diagnostic disclosure, and regression of prior scanners. No concern or requirement deviation remains. Task 10 is not marked complete; the final exact-commit Docker smoke remains pending.

@@ -275,6 +275,24 @@ ALLOWED_NUL_PRIVATE_RECORD_SHA256 = {
         "fccc1f9804eb2ef9bbb97f3d74a3780389da2bf378f88ae270fe317c0f6140c9",
     }),
 }
+# msgpack 1.2.1 wheels for the two deployment architectures contain these
+# reviewed complete NUL-delimited records. The exception remains exact to the
+# normalized compiled-extension path, assignment key, and record digest.
+ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256 = {
+    "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so": {
+        "strict_map_key": frozenset({
+            "d63020dcc481de704039ce44faf1ca726f0d3e70765b2900c0886eb5d6f21525",
+            "0cf91e3e6f10e36b6bb7698c7a1561a80ace0d9a28b672d3e8560d79487d5b03",
+            "c4ac930f2245301678e8afab2a124d54ecdc1c4ee7393ca3cd71a677781ca24b",
+        }),
+    },
+}
+NUL_ASSIGNMENT_PATH_NORMALIZATION = {
+    "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-aarch64-linux-gnu.so":
+        "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so",
+    "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-x86_64-linux-gnu.so":
+        "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so",
+}
 AGE_PRIVATE_IDENTITY = re.compile(rb"(?:^|[\x00\r\n])AGE-SECRET-KEY-1[0-9A-Z]+(?:$|[\x00\r\n])")
 LINK_AGE_PRIVATE_IDENTITY = re.compile(rb"AGE-SECRET-KEY-1[0-9A-Z]+")
 PROHIBITED_PATH = re.compile(
@@ -773,6 +791,17 @@ def normalize_nul_private_record_path(path):
     return path
 
 
+def nul_terminated_record_bounds(data):
+    start = 0
+    while True:
+        terminator = data.find(b"\x00", start)
+        if terminator < 0:
+            return
+        end = terminator + 1
+        yield start, end
+        start = end
+
+
 def nul_private_record_allowed(data, path, match):
     record_end = data.find(b"\x00", match.end() - 1)
     if record_end < 0:
@@ -801,10 +830,25 @@ def check_file_contents(data, path, location="exported regular file"):
         and not standalone_bearer_credential_found(data, STANDALONE_BEARER_BYTES),
         f"bearer credential found in {location}: {path}",
     )
+    record_bounds = iter(nul_terminated_record_bounds(data))
+    current_record = next(record_bounds, None)
+    current_record_digest = None
+    normalized_assignment_path = NUL_ASSIGNMENT_PATH_NORMALIZATION.get(path, path)
+    reviewed_assignment_hashes = ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256.get(normalized_assignment_path, {})
     for match in ASSIGNMENT_BYTES.finditer(data):
         key = match.group(1).decode("ascii", errors="ignore")
-        if sensitive_assignment_key(key) and not runtime_assignment_allowed(path, key):
-            raise CheckFailure(f"secret-like assignment found in {location}: {path}")
+        if not sensitive_assignment_key(key) or runtime_assignment_allowed(path, key):
+            continue
+        while current_record is not None and match.start() >= current_record[1]:
+            current_record = next(record_bounds, None)
+            current_record_digest = None
+        allowed_hashes = reviewed_assignment_hashes.get(key, ()) if key == "strict_map_key" else ()
+        if current_record is not None and current_record[0] <= match.start() < current_record[1] and allowed_hashes:
+            if current_record_digest is None:
+                current_record_digest = hashlib.sha256(data[current_record[0]:current_record[1]]).hexdigest()
+            if current_record_digest in allowed_hashes:
+                continue
+        raise CheckFailure(f"secret-like assignment found in {location}: {path}")
 
 
 def check_link_contents(data, path, location):
