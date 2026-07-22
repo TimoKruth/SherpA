@@ -240,6 +240,7 @@ ALLOWED_NUL_PRIVATE_RECORD_SHA256 = {
     }),
 }
 AGE_PRIVATE_IDENTITY = re.compile(rb"(?:^|[\x00\r\n])AGE-SECRET-KEY-1[0-9A-Z]+(?:$|[\x00\r\n])")
+LINK_AGE_PRIVATE_IDENTITY = re.compile(rb"AGE-SECRET-KEY-1[0-9A-Z]+")
 PROHIBITED_PATH = re.compile(
     r"(^|/)(?:\.env(?:\.[^/]*)?|runtime\.env|compose(?:\.[^/]*)?\.override\.ya?ml|"
     r"age-identity(?:\.txt)?|storage-ssh-key|upload-token|borg-repository|known_hosts|"
@@ -762,6 +763,19 @@ def check_file_contents(data, path, location="exported regular file"):
             raise CheckFailure(f"secret-like assignment found in {location}: {path}")
 
 
+def check_link_contents(data, path, location):
+    for sentinel in SAFE_SENTINELS:
+        require(sentinel.encode() not in data, f"safe secret sentinel found in {location}: {path}")
+    for header in PRIVATE_HEADERS:
+        require(header not in data, f"private-key material found in {location}: {path}")
+    require(LINK_AGE_PRIVATE_IDENTITY.search(data) is None, f"age private identity found in {location}: {path}")
+    require(BEARER_CREDENTIAL_BYTES.search(data) is None, f"bearer credential found in {location}: {path}")
+    for match in ASSIGNMENT_BYTES.finditer(data):
+        key = match.group(1).decode("ascii", errors="ignore")
+        if sensitive_assignment_key(key):
+            raise CheckFailure(f"secret-like assignment found in {location}: {path}")
+
+
 def normalize_tar_path(name):
     while name.startswith("./"):
         name = name[2:]
@@ -781,7 +795,7 @@ def check_link_target(member, path, location):
         PROHIBITED_PATH.search(target_path) is None,
         f"prohibited deployment artifact found in {location}: {path}",
     )
-    check_file_contents(target, path, location)
+    check_link_contents(target, path, location)
 
 
 def check_filesystem(archive_path):

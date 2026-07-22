@@ -221,6 +221,11 @@ class LeakageGateTests(unittest.TestCase):
                 image_save.addfile(info, io.BytesIO(payload))
         return save_path
 
+    def write_scanner_archive(self, scanner, root, path, body=b"", member_type=tarfile.REGTYPE, linkname=""):
+        if scanner == "filesystem":
+            return self.write_filesystem(root, path, body, member_type, linkname)
+        return self.write_image_save(root, path, body, member_type, linkname)
+
     def test_secret_like_history_assignment_is_rejected_without_printing_value(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -520,6 +525,126 @@ class LeakageGateTests(unittest.TestCase):
             result = run_checks("filesystem", archive_path)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn(sentinel, result.stdout + result.stderr)
+
+    def test_allowlisted_member_paths_do_not_allow_sensitive_link_assignments(self):
+        for scanner in ("filesystem", "layers"):
+            for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(scanner=scanner, link_type=link_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    value = f"safe-review-allowlisted-{scanner}-{link_type.decode()}"
+                    target = f"../secret={value}"
+                    archive_path = self.write_scanner_archive(
+                        scanner,
+                        root,
+                        "etc/ssl/openssl.cnf",
+                        member_type=link_type,
+                        linkname=target,
+                    )
+                    result = run_checks(scanner, archive_path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("secret-like assignment", result.stderr)
+                    self.assertIn("link target", result.stderr)
+                    self.assertNotIn(target, result.stdout + result.stderr)
+                    self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_path_prefixed_private_material_in_link_targets_is_rejected(self):
+        materials = [
+            (header.decode(), "private-key material")
+            for header in CHECKS_MODULE.PRIVATE_HEADERS
+        ]
+        materials.append(("AGE-SECRET-KEY-1TESTFIXTURE", "age private identity"))
+        for scanner in ("filesystem", "layers"):
+            for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                for prefix in ("../", "./", "/"):
+                    for material, message in materials:
+                        with self.subTest(
+                            scanner=scanner,
+                            link_type=link_type,
+                            prefix=prefix,
+                            material=material,
+                        ), tempfile.TemporaryDirectory() as temporary:
+                            root = Path(temporary)
+                            target = f"{prefix}{material}\nQUJDREVGR0g="
+                            archive_path = self.write_scanner_archive(
+                                scanner,
+                                root,
+                                "usr/local/bin/runtime-link",
+                                member_type=link_type,
+                                linkname=target,
+                            )
+                            result = run_checks(scanner, archive_path)
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn(message, result.stderr)
+                            self.assertIn("link target", result.stderr)
+                            self.assertNotIn(target, result.stdout + result.stderr)
+                            self.assertNotIn(material, result.stdout + result.stderr)
+
+    def test_bearer_link_targets_are_rejected_without_printing_material(self):
+        for scanner in ("filesystem", "layers"):
+            for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(scanner=scanner, link_type=link_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    value = f"safe-review-bearer-{scanner}-{link_type.decode()}"
+                    target = f"../Authorization: Bearer {value}"
+                    archive_path = self.write_scanner_archive(
+                        scanner,
+                        root,
+                        "usr/local/bin/runtime-link",
+                        member_type=link_type,
+                        linkname=target,
+                    )
+                    result = run_checks(scanner, archive_path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("bearer credential", result.stderr)
+                    self.assertIn("link target", result.stderr)
+                    self.assertNotIn(target, result.stdout + result.stderr)
+                    self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_nul_delimited_link_assignments_are_rejected_without_printing_material(self):
+        for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+            with self.subTest(link_type=link_type):
+                value = f"safe-review-nul-link-{link_type.decode()}"
+                member = tarfile.TarInfo("usr/local/bin/runtime-link")
+                member.type = link_type
+                member.linkname = f"../UPLOAD_TOKEN={value}\x00suffix"
+                with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                    CHECKS_MODULE.check_link_target(member, member.name, "fixture link target")
+                self.assertIn("secret-like assignment", str(failure.exception))
+                self.assertNotIn(member.linkname, str(failure.exception))
+                self.assertNotIn(value, str(failure.exception))
+
+    def test_oversized_link_targets_are_rejected_without_printing_targets(self):
+        target = "../" + "a" * CHECKS_MODULE.MAX_LINK_TARGET_SCAN_BYTES
+        for scanner in ("filesystem", "layers"):
+            for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(scanner=scanner, link_type=link_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    archive_path = self.write_scanner_archive(
+                        scanner,
+                        root,
+                        "usr/local/bin/runtime-link",
+                        member_type=link_type,
+                        linkname=target,
+                    )
+                    result = run_checks(scanner, archive_path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("bounded scan limit", result.stderr)
+                    self.assertIn("link target", result.stderr)
+                    self.assertNotIn(target, result.stdout + result.stderr)
+
+    def test_regular_file_exact_assignment_allowlist_still_applies(self):
+        body = b"secret=public-openssl-configuration-reference\n"
+        for scanner in ("filesystem", "layers"):
+            with self.subTest(scanner=scanner), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive_path = self.write_scanner_archive(
+                    scanner,
+                    root,
+                    "etc/ssl/openssl.cnf",
+                    body=body,
+                )
+                result = run_checks(scanner, archive_path)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_secret_bearing_link_targets_are_rejected_without_printing_values(self):
         scanners = ("filesystem", "layers")
