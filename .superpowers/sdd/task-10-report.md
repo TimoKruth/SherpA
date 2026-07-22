@@ -1209,3 +1209,96 @@ Changed files:
 - `.superpowers/sdd/task-10-report.md`
 
 The exact diff was reviewed for broad source exemptions, path or architecture overmatching, missing NUL termination, digest/key ambiguity, repeated hashing for multiple matches, hidden quadratic work, diagnostic disclosure, and regression of prior scanners. No concern or requirement deviation remains. Task 10 is not marked complete; the final exact-commit Docker smoke remains pending.
+
+# Task 10 Binary Assignment Record Gate Isolation Fix
+
+## Scope and root cause
+
+This focused correction started from exact HEAD `bf490e98b43b906fce3139ed96cf9dc47f539f1d`. The reviewed binary-assignment gate classified broad source allowlist entries before locating the assignment's containing NUL record. Consequently, a complete terminating-NUL `strict_map_key=...` record at either already reviewed source path bypassed the exact compiled-path, key, and digest gate:
+
+- `opt/borg/lib/python3.13/site-packages/msgpack/fallback.py`
+- `opt/borg/lib/python3.13/site-packages/borg/helpers/msgpack.py`
+
+The bypass affected direct scanning, the merged exported filesystem, and every recoverable saved image layer.
+
+## Strict RED evidence
+
+Four focused regressions were added before the production edit. They cover both reviewed source paths, a test-patched exact approved record digest, a modified unknown digest, direct scanning, merged export, each of three saved layers, non-disclosing diagnostics, exact compiled-extension acceptance, and preservation of ordinary unterminated textual source assignments.
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py LeakageGateTests.test_reviewed_source_paths_cannot_allow_complete_nul_assignment_records_directly LeakageGateTests.test_reviewed_source_paths_cannot_allow_complete_nul_assignment_records_in_export LeakageGateTests.test_reviewed_source_paths_cannot_allow_complete_nul_assignment_records_in_any_saved_layer LeakageGateTests.test_reviewed_source_paths_still_allow_ordinary_unterminated_text_assignments
+Ran 4 tests in 0.039s
+FAILED (failures=20)
+(exit 1)
+```
+
+The 20 failures were the intended existing bypass: moved exact-digest and unknown-digest complete NUL records were accepted through the broad reviewed-source allowlist in direct, exported-filesystem, and every-saved-layer scans. The ordinary non-NUL textual assignment positive case passed during RED. No diagnostic disclosed the assigned value or complete record.
+
+## Implementation
+
+- Sensitive assignments are now advanced to and classified against their containing complete terminating-NUL record before any broad textual source allowlist lookup.
+- Assignments inside complete NUL records can be accepted only by the existing exact normalized compiled-msgpack path, exact `strict_map_key`, and exact complete-record digest gate.
+- `runtime_assignment_allowed` is consulted only when no terminating NUL contains the assignment, preserving ordinary textual records and the unterminated tail.
+- The assignment and NUL-record iterators remain monotonically forward-only. Record digests remain cached once per record and reused for multiple matches.
+- No backward search, path wildcard, broad binary exemption, record-bound list, second whole-file representation, or new key/value threshold was added.
+- Existing 64 MiB per-file and 1 GiB total bounds, Bearer/private-header/age/link protections, merged export, saved-layer coverage, exact source allowlists, and non-disclosing diagnostics remain unchanged.
+
+## GREEN evidence
+
+Focused GREEN:
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py <4 focused binary-isolation tests>
+Ran 4 tests in 0.040s
+OK
+```
+
+Complete scanner suite in all required modes:
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py
+Ran 66 tests in 29.915s
+OK
+
+$ PYTHONOPTIMIZE=1 python3 -I deploy/collector/smoke_checks_test.py
+Ran 66 tests in 30.500s
+OK
+
+$ python3 -I -O deploy/collector/smoke_checks_test.py
+Ran 66 tests in 29.899s
+OK
+```
+
+Static verification:
+
+```text
+$ python3 -m py_compile deploy/collector/smoke_checks.py deploy/collector/smoke_checks_test.py
+(exit 0; no output)
+
+$ git diff --check
+(exit 0; no output)
+```
+
+## Existing-image focused validation
+
+The corrected working-tree scanner was exercised read-only against the existing local `sherpa-collector:test` image without rebuilding it:
+
+```text
+image=sha256:81aa978d8fdab9a1ece1f0374188c073f6cc336826089a8c33a53934c2a1bd05 revision=c1e0080b114e8fd852aeb97a3a00ddff8a79ef48 user=10001:10001
+reviewed compiled msgpack passed: bytes=1472904
+reviewed source-path NUL probes rejected without disclosure: paths=2
+```
+
+The real aarch64 compiled extension still passes at its exact normalized path. The reproduced NUL record now rejects at both broadly reviewed `.py` paths without printing its value or complete record.
+
+## Self-review and pending gate
+
+Focused boundary probes passed for an exact reviewed assignment in the first, middle, and final complete NUL records and for an ordinary reviewed-source assignment in the unterminated tail:
+
+```text
+self-review probes passed: first/middle/final complete records=3 unterminated_tail=1
+```
+
+The exact diff was reviewed for complete-record classification, broad textual allowlist preservation, exact binary-gate isolation, multiple matches per record, one-hash caching, monotonic iteration, bounded memory/time behavior, and diagnostic disclosure. No concern or requirement deviation remains.
+
+No image rebuild, final Docker smoke, Go suite, race suite, VPS, Railway, Traefik, Hetzner, Storage Box, or external infrastructure operation was performed. Task 10 is not marked complete; the final exact-commit Docker build/smoke remains pending after commit and independent review.

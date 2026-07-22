@@ -837,17 +837,20 @@ def check_file_contents(data, path, location="exported regular file"):
     reviewed_assignment_hashes = ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256.get(normalized_assignment_path, {})
     for match in ASSIGNMENT_BYTES.finditer(data):
         key = match.group(1).decode("ascii", errors="ignore")
-        if not sensitive_assignment_key(key) or runtime_assignment_allowed(path, key):
+        if not sensitive_assignment_key(key):
             continue
         while current_record is not None and match.start() >= current_record[1]:
             current_record = next(record_bounds, None)
             current_record_digest = None
-        allowed_hashes = reviewed_assignment_hashes.get(key, ()) if key == "strict_map_key" else ()
-        if current_record is not None and current_record[0] <= match.start() < current_record[1] and allowed_hashes:
-            if current_record_digest is None:
-                current_record_digest = hashlib.sha256(data[current_record[0]:current_record[1]]).hexdigest()
-            if current_record_digest in allowed_hashes:
-                continue
+        if current_record is not None and current_record[0] <= match.start() < current_record[1]:
+            allowed_hashes = reviewed_assignment_hashes.get(key, ()) if key == "strict_map_key" else ()
+            if allowed_hashes:
+                if current_record_digest is None:
+                    current_record_digest = hashlib.sha256(data[current_record[0]:current_record[1]]).hexdigest()
+                if current_record_digest in allowed_hashes:
+                    continue
+        elif runtime_assignment_allowed(path, key):
+            continue
         raise CheckFailure(f"secret-like assignment found in {location}: {path}")
 
 

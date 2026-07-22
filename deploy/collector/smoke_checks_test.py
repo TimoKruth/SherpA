@@ -291,6 +291,118 @@ class LeakageGateTests(unittest.TestCase):
             self.assertIn("secret-like assignment", str(failure.exception))
             self.assertNotIn("public-one", str(failure.exception))
 
+    def test_reviewed_source_paths_cannot_allow_complete_nul_assignment_records_directly(self):
+        normalized_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so"
+        compiled_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-aarch64-linux-gnu.so"
+        source_paths = (
+            "opt/borg/lib/python3.13/site-packages/msgpack/fallback.py",
+            "opt/borg/lib/python3.13/site-packages/borg/helpers/msgpack.py",
+        )
+        record = b"binary-prefix strict_map_key=credential-value\x00"
+        unknown_record = b"binary-prefix strict_map_key=credential-value-modified\x00"
+        allowlist = {
+            normalized_path: {
+                "strict_map_key": frozenset({hashlib.sha256(record).hexdigest()}),
+            },
+        }
+
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256",
+            allowlist,
+        ):
+            CHECKS_MODULE.check_file_contents(record, compiled_path)
+            for path in source_paths:
+                for body in (record, unknown_record):
+                    with self.subTest(path=path, approved_digest=body is record):
+                        with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                            CHECKS_MODULE.check_file_contents(body, path)
+                        diagnostic = str(failure.exception)
+                        self.assertIn("secret-like assignment", diagnostic)
+                        self.assertIn(path, diagnostic)
+                        self.assertNotIn("credential-value", diagnostic)
+                        self.assertNotIn(body.decode("ascii"), diagnostic)
+
+    def test_reviewed_source_paths_cannot_allow_complete_nul_assignment_records_in_export(self):
+        normalized_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so"
+        source_paths = (
+            "opt/borg/lib/python3.13/site-packages/msgpack/fallback.py",
+            "opt/borg/lib/python3.13/site-packages/borg/helpers/msgpack.py",
+        )
+        record = b"binary-prefix strict_map_key=credential-value\x00"
+        unknown_record = b"binary-prefix strict_map_key=credential-value-modified\x00"
+        allowlist = {
+            normalized_path: {
+                "strict_map_key": frozenset({hashlib.sha256(record).hexdigest()}),
+            },
+        }
+
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256",
+            allowlist,
+        ):
+            for path in source_paths:
+                for body in (record, unknown_record):
+                    with self.subTest(path=path, approved_digest=body is record), tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                            CHECKS_MODULE.check_filesystem(self.write_filesystem(root, path, body))
+                        diagnostic = str(failure.exception)
+                        self.assertIn("secret-like assignment", diagnostic)
+                        self.assertIn(path, diagnostic)
+                        self.assertNotIn("credential-value", diagnostic)
+                        self.assertNotIn(body.decode("ascii"), diagnostic)
+
+    def test_reviewed_source_paths_cannot_allow_complete_nul_assignment_records_in_any_saved_layer(self):
+        normalized_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so"
+        source_paths = (
+            "opt/borg/lib/python3.13/site-packages/msgpack/fallback.py",
+            "opt/borg/lib/python3.13/site-packages/borg/helpers/msgpack.py",
+        )
+        record = b"binary-prefix strict_map_key=credential-value\x00"
+        unknown_record = b"binary-prefix strict_map_key=credential-value-modified\x00"
+        allowlist = {
+            normalized_path: {
+                "strict_map_key": frozenset({hashlib.sha256(record).hexdigest()}),
+            },
+        }
+        benign_layer = [("opt/application/public.txt", b"public fixture\n", tarfile.REGTYPE, "")]
+
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256",
+            allowlist,
+        ):
+            for path in source_paths:
+                for body in (record, unknown_record):
+                    for layer_index in range(3):
+                        with self.subTest(
+                            path=path,
+                            approved_digest=body is record,
+                            layer=layer_index,
+                        ), tempfile.TemporaryDirectory() as temporary:
+                            root = Path(temporary)
+                            layers = [benign_layer, benign_layer, benign_layer]
+                            layers[layer_index] = [(path, body, tarfile.REGTYPE, "")]
+                            with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                                CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers))
+                            diagnostic = str(failure.exception)
+                            self.assertIn("secret-like assignment", diagnostic)
+                            self.assertIn(path, diagnostic)
+                            self.assertNotIn("credential-value", diagnostic)
+                            self.assertNotIn(body.decode("ascii"), diagnostic)
+
+    def test_reviewed_source_paths_still_allow_ordinary_unterminated_text_assignments(self):
+        source_paths = (
+            "opt/borg/lib/python3.13/site-packages/msgpack/fallback.py",
+            "opt/borg/lib/python3.13/site-packages/borg/helpers/msgpack.py",
+        )
+        body = b"strict_map_key=public-source-default\n"
+        for path in source_paths:
+            with self.subTest(path=path):
+                CHECKS_MODULE.check_file_contents(body, path)
+
     def test_reviewed_msgpack_record_with_multiple_matches_is_hashed_once(self):
         normalized_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so"
         path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-aarch64-linux-gnu.so"
