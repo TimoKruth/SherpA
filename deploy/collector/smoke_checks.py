@@ -137,19 +137,18 @@ AUTHORIZATION_CREDENTIAL = re.compile(
     re.IGNORECASE,
 )
 STANDALONE_BEARER = re.compile(
-    r"(?<![A-Za-z0-9_.-])bearer\s+([^\s\"']+)",
+    r"(?<![A-Za-z0-9_.-])bearer\s+[^\s\x00]+",
     re.IGNORECASE,
 )
-BENIGN_BEARER_FOLLOWERS = frozenset({
-    "authentication",
-    "authorization",
-    "credential",
-    "credentials",
-    "scheme",
-    "schemes",
-    "token",
-    "tokens",
+BENIGN_BEARER_CONTEXT_LINES = frozenset({
+    "The bearer authentication scheme is supported.",
+    "A bearer token is carried in an authorization header.",
+    "The bearer of this certificate may present it.",
+    "print('bearer authentication handler')",
 })
+BENIGN_BEARER_CONTEXT_LINES_BYTES = frozenset(
+    line.encode("ascii") for line in BENIGN_BEARER_CONTEXT_LINES
+)
 ALLOWED_ENVIRONMENT = {
     "PATH": "/opt/borg/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "GPG_KEY": "7169605F62C751356D054A26A821E680E5FA6305",
@@ -178,13 +177,18 @@ def sensitive_assignment_key(key):
     return SENSITIVE_KEY.search(key) is not None or GENERIC_KEY.search(key) is not None
 
 
+def bearer_context_line(text, position):
+    separators = (b"\x00", b"\r", b"\n") if isinstance(text, bytes) else ("\x00", "\r", "\n")
+    start = max(text.rfind(separator, 0, position) for separator in separators) + 1
+    ends = [end for separator in separators if (end := text.find(separator, position)) >= 0]
+    end = min(ends) if ends else len(text)
+    return text[start:end].strip()
+
+
 def standalone_bearer_credential_found(text, pattern):
+    benign_lines = BENIGN_BEARER_CONTEXT_LINES_BYTES if isinstance(text, bytes) else BENIGN_BEARER_CONTEXT_LINES
     for match in pattern.finditer(text):
-        follower = match.group(1)
-        if isinstance(follower, bytes):
-            follower = follower.decode("ascii", errors="ignore")
-        normalized = follower.rstrip(".,;:!?)]}").casefold()
-        if normalized not in BENIGN_BEARER_FOLLOWERS:
+        if bearer_context_line(text, match.start()) not in benign_lines:
             return True
     return False
 
@@ -284,7 +288,7 @@ AUTHORIZATION_CREDENTIAL_BYTES = re.compile(
     re.IGNORECASE,
 )
 STANDALONE_BEARER_BYTES = re.compile(
-    rb"(?<![A-Za-z0-9_.-])bearer\s+([^\s\"']+)",
+    rb"(?<![A-Za-z0-9_.-])bearer\s+[^\s\x00]+",
     re.IGNORECASE,
 )
 MAX_FILE_SCAN_BYTES = 64 * 1024 * 1024

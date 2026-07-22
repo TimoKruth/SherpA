@@ -708,6 +708,101 @@ class LeakageGateTests(unittest.TestCase):
                     self.assertIn("bearer credential", str(failure.exception))
                     self.assertNotIn(target, str(failure.exception))
 
+    def test_quoted_and_vocabulary_bearer_credentials_are_rejected_directly(self):
+        fixtures = (
+            'Bearer "safe-review-value"',
+            "Bearer 'safe-review-value'",
+            "Bearer token",
+            "Bearer TOKEN,",
+        )
+        for text in fixtures:
+            with self.subTest(text=text):
+                with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                    CHECKS_MODULE.check_assignments(text, "image history")
+                self.assertIn("bearer credential", str(failure.exception))
+                self.assertNotIn(text.split(" ", 1)[1], str(failure.exception))
+                with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                    CHECKS_MODULE.check_file_contents(text.encode(), "opt/application/cache.bin")
+                self.assertIn("bearer credential", str(failure.exception))
+                self.assertNotIn(text.split(" ", 1)[1], str(failure.exception))
+
+        for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+            for target in fixtures:
+                with self.subTest(link_type=link_type, target=target):
+                    member = tarfile.TarInfo("usr/local/bin/runtime-link")
+                    member.type = link_type
+                    member.linkname = f"../{target}"
+                    with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                        CHECKS_MODULE.check_link_target(member, member.name, "fixture link target")
+                    self.assertIn("bearer credential", str(failure.exception))
+                    self.assertNotIn(member.linkname, str(failure.exception))
+                    self.assertNotIn("safe-review-value", str(failure.exception))
+
+    def test_quoted_and_vocabulary_bearer_credentials_are_rejected_from_metadata(self):
+        fixtures = (
+            'Bearer "safe-review-value"',
+            "Bearer 'safe-review-value'",
+            "Bearer token",
+            "Bearer TOKEN,",
+        )
+        for text in fixtures:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                inspect_path = self.write_inspect(root, environment=APPROVED_ENV)
+                history_path = root / "history"
+                history_path.write_text(f"RUN review {text}\n", encoding="utf-8")
+                result = run_checks("metadata", inspect_path, history_path, SOURCE_URL, REVISION)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("bearer credential", result.stderr)
+                self.assertNotIn(text.split(" ", 1)[1], result.stdout + result.stderr)
+
+    def test_quoted_and_vocabulary_bearer_credentials_are_rejected_from_exported_filesystem(self):
+        fixtures = (
+            (tarfile.REGTYPE, b'prefix\x00Bearer "safe-review-value"\n', ""),
+            (tarfile.SYMTYPE, b"", "../Bearer token"),
+            (tarfile.LNKTYPE, b"", "/prefix\nBearer TOKEN,"),
+        )
+        for member_type, body, target in fixtures:
+            with self.subTest(member_type=member_type), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive_path = self.write_filesystem(
+                    root,
+                    "opt/application/cache.bin" if member_type == tarfile.REGTYPE else "usr/local/bin/runtime-link",
+                    body=body,
+                    member_type=member_type,
+                    linkname=target,
+                )
+                result = run_checks("filesystem", archive_path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("bearer credential", result.stderr)
+                material = body.decode(errors="ignore") if body else target
+                credential = material.rsplit("Bearer ", 1)[1].splitlines()[0]
+                self.assertNotIn(credential, result.stdout + result.stderr)
+                if target:
+                    self.assertNotIn(target, result.stdout + result.stderr)
+
+    def test_quoted_and_vocabulary_bearer_credentials_are_rejected_from_every_saved_layer(self):
+        malicious_members = (
+            ("tmp/deleted-cache.bin", b"Bearer 'safe-review-value'", tarfile.REGTYPE, ""),
+            ("usr/local/bin/runtime-symlink", b"", tarfile.SYMTYPE, "../Bearer token"),
+            ("usr/local/bin/runtime-hardlink", b"", tarfile.LNKTYPE, "/prefix\nBearer TOKEN,"),
+        )
+        benign_layer = [("opt/application/public.txt", b"public fixture\n", tarfile.REGTYPE, "")]
+        for layer_index, malicious in enumerate(malicious_members):
+            with self.subTest(layer=layer_index, member_type=malicious[2]), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                layers = [benign_layer, benign_layer, benign_layer]
+                layers[layer_index] = [malicious]
+                save_path = self.write_image_save_layers(root, layers)
+                result = run_checks("layers", save_path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("bearer credential", result.stderr)
+                material = malicious[1].decode(errors="ignore") if malicious[1] else malicious[3]
+                credential = material.rsplit("Bearer ", 1)[1].splitlines()[0]
+                self.assertNotIn(credential, result.stdout + result.stderr)
+                if malicious[3]:
+                    self.assertNotIn(malicious[3], result.stdout + result.stderr)
+
     def test_standalone_bearer_credentials_are_rejected_from_exported_filesystem(self):
         fixtures = (
             (tarfile.REGTYPE, b"prefix\x00Bearer safe-review-standalone-filesystem-regular\n", ""),
@@ -755,9 +850,13 @@ class LeakageGateTests(unittest.TestCase):
         body = (
             b"The bearer authentication scheme is supported.\n"
             b"A bearer token is carried in an authorization header.\n"
+            b"The bearer of this certificate may present it.\n"
             b"print('bearer authentication handler')\n"
         )
-        CHECKS_MODULE.check_file_contents(body, "opt/application/public.txt")
+        try:
+            CHECKS_MODULE.check_file_contents(body, "opt/application/public.txt")
+        except CHECKS_MODULE.CheckFailure as error:
+            self.fail(str(error))
         for scanner in ("filesystem", "layers"):
             with self.subTest(scanner=scanner), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
