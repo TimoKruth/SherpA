@@ -14,7 +14,7 @@ registry:
 	CGO_ENABLED=0 GOFLAGS="$(GOFLAGS) -trimpath" go build -o dist/registry ./cmd/registry
 
 collector-image:
-	docker build --file deploy/collector/Dockerfile --build-arg SOURCE_REVISION="$$(git rev-parse HEAD)" --tag sherpa-collector:local .
+	bash deploy/collector/smoke_build.sh --build-only sherpa-collector:local
 
 collector-smoke:
 	bash deploy/collector/smoke_build.sh
