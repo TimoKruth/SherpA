@@ -311,6 +311,18 @@ def check_layout(root, expected_uid, expected_gid):
         require(info.st_uid == expected_uid and info.st_gid == expected_gid, f"bind directory ownership is not exact: {relative}")
 
 
+def check_bind(inspect_path, expected_source):
+    data = load_json(inspect_path)
+    require(isinstance(data, list) and len(data) == 1, "runtime inspection shape is not exact")
+    mounts = data[0].get("Mounts") or []
+    matching = [mount for mount in mounts if mount.get("Destination") == "/data"]
+    require(len(matching) == 1, "runtime data mount count is not exact")
+    mount = matching[0]
+    require(mount.get("Type") == "bind", "runtime data mount is not a bind mount")
+    require(os.path.realpath(mount.get("Source", "")) == os.path.realpath(expected_source), "runtime data bind source is not exact")
+    require(mount.get("RW") is True, "runtime data bind is not writable")
+
+
 def main(argv):
     require(len(argv) >= 2, "missing smoke check command")
     command = argv[1]
@@ -329,6 +341,9 @@ def main(argv):
     elif command == "layout":
         require(len(argv) == 5, "layout check arguments are invalid")
         check_layout(argv[2], int(argv[3]), int(argv[4]))
+    elif command == "bind":
+        require(len(argv) == 4, "bind check arguments are invalid")
+        check_bind(argv[2], argv[3])
     else:
         raise CheckFailure("unknown smoke check command")
 

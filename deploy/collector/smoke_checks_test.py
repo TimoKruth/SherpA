@@ -86,6 +86,23 @@ class ProvenanceTests(unittest.TestCase):
             self.assertFalse((destination / ".git").exists())
 
 
+class RuntimeMountTests(unittest.TestCase):
+    def test_runtime_data_mount_is_an_exact_writable_bind(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            data.mkdir()
+            inspect_path = root / "runtime.json"
+            inspect_path.write_text(json.dumps([{"Mounts": [{
+                "Type": "bind",
+                "Source": str(data),
+                "Destination": "/data",
+                "RW": True,
+            }]}]), encoding="utf-8")
+            result = run_checks("bind", inspect_path, data)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class ComposeGateTests(unittest.TestCase):
     def test_python_optimization_cannot_disable_a_failing_compose_gate(self):
         with tempfile.TemporaryDirectory() as temporary:

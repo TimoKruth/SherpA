@@ -271,7 +271,8 @@ docker exec "$container" /bin/sh -ceu ': > /data/.write-probe; rm /data/.write-p
 for directory in /data/spool /data/state /data/borg /data/borg/cache /data/borg/config /data/borg/security; do
   [[ "$(docker exec "$container" stat -c '%a:%u:%g' "$directory")" == "700:10001:10001" ]] || fail "collector data directory is not private and runtime-owned: $directory"
 done
-[[ "$(docker inspect --format '{{json .HostConfig.Binds}}' "$container")" == *"$work_dir/data:/data:rw"* ]] || fail "collector runtime does not use the exact data bind mount"
+docker inspect "$container" >"$work_dir/runtime.inspect.json"
+python3 -I "$source_dir/deploy/collector/smoke_checks.py" bind "$work_dir/runtime.inspect.json" "$work_dir/data"
 [[ "$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$container")" == '["ALL"]' ]] || fail "collector runtime does not drop all capabilities"
 [[ "$(docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container")" == '["no-new-privileges:true"]' ]] || fail "collector runtime does not enable no-new-privileges"
 [[ "$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$container")" == '{}' ]] || fail "collector runtime publishes a host port"
