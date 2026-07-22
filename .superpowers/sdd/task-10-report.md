@@ -1017,3 +1017,100 @@ Changed files:
 The exact diff was reviewed for quoted/unmatched-token bypasses, vocabulary collisions, overbroad prose exemptions, data disclosure, unbounded behavior, and archive-path realism. The exception is deliberately exact and record-scoped rather than a value-word allowlist. All previous scanner regressions remain GREEN.
 
 No Docker, Go suite, race suite, VPS, Railway, Traefik, Hetzner, Storage Box, or other external infrastructure was accessed. No concern or requirement deviation remains; another independent re-review is still required before Task 10 is considered complete.
+
+# Task 10 Fifth Independent-Review Linear Bearer Record Scan Fix
+
+## Scope and strict RED
+
+This focused correction removes the quadratic prefix rescans from standalone Bearer benign-record classification while preserving the exact four-record allowlist and all prior scanner protections. Starting HEAD was `585b4ebda5f47f113dc1e5587a30659b86cff8d9`.
+
+A deterministic regression was added before production changes. It uses `str` and `bytes` subclasses that count the prefix range passed to `rfind`, repeats exact reviewed newline/NUL-delimited benign records, and retains functional checks for outer whitespace trimming, newline/NUL boundaries, exact benign acceptance, and appended-material rejection.
+
+Exact RED command and result:
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py LeakageGateTests.test_repeated_benign_bearer_records_do_not_rescan_prefixes
+test_repeated_benign_bearer_records_do_not_rescan_prefixes (__main__.LeakageGateTests) ...
+======================================================================
+FAIL: test_repeated_benign_bearer_records_do_not_rescan_prefixes (__main__.LeakageGateTests) (text_type='PrefixCountingStr')
+AssertionError: 5069376 not less than or equal to 79476 : standalone Bearer scan repeatedly rescanned already-checked prefixes
+
+======================================================================
+FAIL: test_repeated_benign_bearer_records_do_not_rescan_prefixes (__main__.LeakageGateTests) (text_type='PrefixCountingBytes')
+AssertionError: 5069376 not less than or equal to 79476 : standalone Bearer scan repeatedly rescanned already-checked prefixes
+
+Ran 1 test in 0.004s
+FAILED (failures=2)
+(exit 1)
+```
+
+The failure was the intended O(n²) work-count defect in both supported input types, not a timing threshold or functional-classification failure.
+
+## Implementation rationale
+
+- Replaced per-match backward/forward whole-input searches with a lazy newline/NUL/CR record-bound iterator.
+- The separator iterator and standalone Bearer matcher each advance only forward through the bounded input.
+- Record content is sliced only for the record containing a match; no boundary list or second full-file representation is allocated.
+- The record containing the start of a cross-boundary match is still used, preserving the previous fail-closed behavior.
+- `str` and `bytes` use separate compiled separator patterns and retain the same exact four benign records after outer whitespace trimming.
+- Quoted credentials, vocabulary-equal credentials, punctuation/case variants, prefixes, suffixes, metadata/history, links, merged filesystems, and every saved layer retain the prior rejection behavior and value-free diagnostics.
+
+## GREEN evidence
+
+Focused GREEN:
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py LeakageGateTests.test_repeated_benign_bearer_records_do_not_rescan_prefixes
+test_repeated_benign_bearer_records_do_not_rescan_prefixes (__main__.LeakageGateTests) ... ok
+
+Ran 1 test in 0.001s
+OK
+```
+
+Complete 58-test scanner suite in all required modes:
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py
+Ran 58 tests in 29.645s
+OK
+
+$ PYTHONOPTIMIZE=1 python3 -I deploy/collector/smoke_checks_test.py
+Ran 58 tests in 29.276s
+OK
+
+$ python3 -I -O deploy/collector/smoke_checks_test.py
+Ran 58 tests in 29.138s
+OK
+```
+
+Static verification:
+
+```text
+$ python3 -m py_compile deploy/collector/smoke_checks.py deploy/collector/smoke_checks_test.py
+(exit 0; no output)
+
+$ git diff --check
+(exit 0; no output)
+```
+
+Bounded local scaling evidence used 12 scans per sample and the median of seven samples; it is directional evidence rather than a precise benchmark:
+
+```text
+small_bytes=376000 small_seconds=0.128568
+large_bytes=752000 large_seconds=0.258415
+large_to_small_ratio=2.010
+```
+
+The 2x input completed in approximately 2.01x the time rather than the prior approximately 4x growth.
+
+## Changed files and self-review
+
+Changed files:
+
+- `deploy/collector/smoke_checks.py`
+- `deploy/collector/smoke_checks_test.py`
+- `.superpowers/sdd/task-10-report.md`
+
+The exact diff was reviewed for hidden prefix/suffix rescans, regex restart behavior, extra whole-file allocations, `str`/`bytes` divergence, CR/LF/NUL boundary handling, cross-record matches, exact-allowlist bypasses, and diagnostic disclosure. No finite token or assignment-key threshold was introduced, and all prior bounds and fail-closed controls remain active.
+
+No Docker, Go suite, race suite, VPS, Railway, Traefik, Hetzner, Storage Box, or other external infrastructure was accessed. Task 10 is not marked complete; independent re-review remains required.

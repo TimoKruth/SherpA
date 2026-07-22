@@ -149,6 +149,8 @@ BENIGN_BEARER_CONTEXT_LINES = frozenset({
 BENIGN_BEARER_CONTEXT_LINES_BYTES = frozenset(
     line.encode("ascii") for line in BENIGN_BEARER_CONTEXT_LINES
 )
+BEARER_RECORD_SEPARATOR = re.compile(r"[\x00\r\n]")
+BEARER_RECORD_SEPARATOR_BYTES = re.compile(rb"[\x00\r\n]")
 ALLOWED_ENVIRONMENT = {
     "PATH": "/opt/borg/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "GPG_KEY": "7169605F62C751356D054A26A821E680E5FA6305",
@@ -177,18 +179,23 @@ def sensitive_assignment_key(key):
     return SENSITIVE_KEY.search(key) is not None or GENERIC_KEY.search(key) is not None
 
 
-def bearer_context_line(text, position):
-    separators = (b"\x00", b"\r", b"\n") if isinstance(text, bytes) else ("\x00", "\r", "\n")
-    start = max(text.rfind(separator, 0, position) for separator in separators) + 1
-    ends = [end for separator in separators if (end := text.find(separator, position)) >= 0]
-    end = min(ends) if ends else len(text)
-    return text[start:end].strip()
+def bearer_record_bounds(text):
+    separator_pattern = BEARER_RECORD_SEPARATOR_BYTES if isinstance(text, bytes) else BEARER_RECORD_SEPARATOR
+    start = 0
+    for separator in separator_pattern.finditer(text):
+        yield start, separator.start()
+        start = separator.end()
+    yield start, len(text)
 
 
 def standalone_bearer_credential_found(text, pattern):
     benign_lines = BENIGN_BEARER_CONTEXT_LINES_BYTES if isinstance(text, bytes) else BENIGN_BEARER_CONTEXT_LINES
+    records = iter(bearer_record_bounds(text))
+    record_start, record_end = next(records)
     for match in pattern.finditer(text):
-        if bearer_context_line(text, match.start()) not in benign_lines:
+        while record_end < match.start():
+            record_start, record_end = next(records)
+        if text[record_start:record_end].strip() not in benign_lines:
             return True
     return False
 

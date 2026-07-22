@@ -864,6 +864,59 @@ class LeakageGateTests(unittest.TestCase):
                 result = run_checks(scanner, archive_path)
                 self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_repeated_benign_bearer_records_do_not_rescan_prefixes(self):
+        class PrefixCountingStr(str):
+            def __new__(cls, value):
+                instance = super().__new__(cls, value)
+                instance.prefix_search_work = 0
+                return instance
+
+            def rfind(self, sub, start=0, end=None):
+                if end is None:
+                    end = len(self)
+                self.prefix_search_work += end - start
+                return super().rfind(sub, start, end)
+
+        class PrefixCountingBytes(bytes):
+            def __new__(cls, value):
+                instance = super().__new__(cls, value)
+                instance.prefix_search_work = 0
+                return instance
+
+            def rfind(self, sub, start=0, end=None):
+                if end is None:
+                    end = len(self)
+                self.prefix_search_work += end - start
+                return super().rfind(sub, start, end)
+
+        benign = tuple(sorted(CHECKS_MODULE.BENIGN_BEARER_CONTEXT_LINES))
+        records = [f" \t{benign[index % len(benign)]}\t " for index in range(256)]
+        for text_type, separator in ((PrefixCountingStr, "\n\x00"), (PrefixCountingBytes, b"\n\x00")):
+            encoded_records = records if text_type is PrefixCountingStr else [record.encode("ascii") for record in records]
+            text = text_type(separator.join(encoded_records))
+            with self.subTest(text_type=text_type.__name__):
+                self.assertFalse(
+                    CHECKS_MODULE.standalone_bearer_credential_found(text, CHECKS_MODULE.STANDALONE_BEARER if text_type is PrefixCountingStr else CHECKS_MODULE.STANDALONE_BEARER_BYTES)
+                )
+                self.assertLessEqual(
+                    text.prefix_search_work,
+                    len(text) * 6,
+                    "standalone Bearer scan repeatedly rescanned already-checked prefixes",
+                )
+
+        for separator in ("\n", "\x00"):
+            with self.subTest(separator=repr(separator)):
+                exact_record = f" \t{benign[0]}\t "
+                self.assertFalse(
+                    CHECKS_MODULE.standalone_bearer_credential_found(exact_record, CHECKS_MODULE.STANDALONE_BEARER)
+                )
+                self.assertTrue(
+                    CHECKS_MODULE.standalone_bearer_credential_found(
+                        separator.join((exact_record, f"{benign[0]} appended-credential")),
+                        CHECKS_MODULE.STANDALONE_BEARER,
+                    )
+                )
+
     def test_bearer_link_targets_are_rejected_without_printing_material(self):
         for scanner in ("filesystem", "layers"):
             for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
