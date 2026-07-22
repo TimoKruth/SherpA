@@ -259,6 +259,7 @@ BEARER_CREDENTIAL_BYTES = re.compile(
 )
 MAX_FILE_SCAN_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_SCAN_BYTES = 1024 * 1024 * 1024
+MAX_LINK_TARGET_SCAN_BYTES = 64 * 1024
 
 ALLOWED_RUNTIME_ASSIGNMENT_KEYS = {
     "etc/group": {"_ssh"},
@@ -741,32 +742,46 @@ def nul_private_record_allowed(data, path, match):
     return digest in ALLOWED_NUL_PRIVATE_RECORD_SHA256.get(normalized_path, ())
 
 
-def check_file_contents(data, path):
+def check_file_contents(data, path, location="exported regular file"):
     for sentinel in SAFE_SENTINELS:
-        require(sentinel.encode() not in data, f"safe secret sentinel found in exported regular file: {path}")
+        require(sentinel.encode() not in data, f"safe secret sentinel found in {location}: {path}")
     for header in PRIVATE_HEADERS:
         line_pattern = rb"(?:^|[\r\n])" + re.escape(header) + rb"\r?\n"
-        require(re.search(line_pattern, data) is None, f"private-key material found in exported regular file: {path}")
+        require(re.search(line_pattern, data) is None, f"private-key material found in {location}: {path}")
         nul_pattern = rb"\x00" + re.escape(header) + rb"\r?\n[A-Za-z0-9+/=]{7,}(?:$|[\x00\r\n])"
         for match in re.finditer(nul_pattern, data):
             require(
                 nul_private_record_allowed(data, path, match),
-                f"private-key material found in exported regular file: {path}",
+                f"private-key material found in {location}: {path}",
             )
-    require(AGE_PRIVATE_IDENTITY.search(data) is None, f"age private identity found in exported regular file: {path}")
-    require(BEARER_CREDENTIAL_BYTES.search(data) is None, f"bearer credential found in exported regular file: {path}")
-    if b"\x00" in data:
-        return
+    require(AGE_PRIVATE_IDENTITY.search(data) is None, f"age private identity found in {location}: {path}")
+    require(BEARER_CREDENTIAL_BYTES.search(data) is None, f"bearer credential found in {location}: {path}")
     for match in ASSIGNMENT_BYTES.finditer(data):
         key = match.group(1).decode("ascii", errors="ignore")
         if sensitive_assignment_key(key) and not runtime_assignment_allowed(path, key):
-            raise CheckFailure(f"secret-like assignment found in exported regular file: {path}")
+            raise CheckFailure(f"secret-like assignment found in {location}: {path}")
 
 
 def normalize_tar_path(name):
     while name.startswith("./"):
         name = name[2:]
     return name.lstrip("/")
+
+
+def check_link_target(member, path, location):
+    if not (member.issym() or member.islnk()):
+        return
+    try:
+        target = member.linkname.encode("utf-8", errors="surrogateescape")
+    except UnicodeError as error:
+        raise CheckFailure(f"cannot scan {location}: {path}") from error
+    require(len(target) <= MAX_LINK_TARGET_SCAN_BYTES, f"{location} exceeds bounded scan limit: {path}")
+    target_path = normalize_tar_path(member.linkname)
+    require(
+        PROHIBITED_PATH.search(target_path) is None,
+        f"prohibited deployment artifact found in {location}: {path}",
+    )
+    check_file_contents(target, path, location)
 
 
 def check_filesystem(archive_path):
@@ -788,6 +803,7 @@ def check_filesystem(archive_path):
             require(re.search(r"(^|/)(testdata|fixtures)(/|$)", lowered) is None, f"SherpA test fixture found: {path}")
             require("recoveryarchive/testfixture" not in lowered, f"recovery fixture found: {path}")
             require(PROHIBITED_PATH.search(path) is None, f"prohibited deployment artifact found: {path}")
+            check_link_target(member, path, "exported filesystem link target")
             if not member.isfile():
                 continue
             require(COMPILER_PATH.search(path) is None, f"compiler or build tool found: {path}")
@@ -835,10 +851,11 @@ def check_layers(image_save_path):
                 raise CheckFailure("saved image layer archive is malformed") from error
             with layer:
                 for member in layer:
-                    if not member.isfile():
-                        continue
                     path = normalize_tar_path(member.name)
                     require(PROHIBITED_PATH.search(path) is None, f"prohibited deployment artifact found in image layer: {path}")
+                    check_link_target(member, path, "image layer link target")
+                    if not member.isfile():
+                        continue
                     require(member.size <= MAX_FILE_SCAN_BYTES, f"image-layer regular file exceeds bounded scan limit: {path}")
                     scanned += member.size
                     require(scanned <= MAX_TOTAL_SCAN_BYTES, "saved image layers exceed bounded content scan limit")

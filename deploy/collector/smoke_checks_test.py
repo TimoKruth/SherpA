@@ -191,22 +191,27 @@ class LeakageGateTests(unittest.TestCase):
         }}}]), encoding="utf-8")
         return path
 
-    def write_filesystem(self, root, path, body):
+    def add_tar_member(self, archive, path, body=b"", member_type=tarfile.REGTYPE, linkname=""):
+        info = tarfile.TarInfo(path)
+        info.type = member_type
+        info.linkname = linkname
+        info.mode = 0o600
+        if member_type == tarfile.REGTYPE:
+            info.size = len(body)
+            archive.addfile(info, io.BytesIO(body))
+        else:
+            archive.addfile(info)
+
+    def write_filesystem(self, root, path, body=b"", member_type=tarfile.REGTYPE, linkname=""):
         archive_path = root / "image.tar"
         with tarfile.open(archive_path, "w") as archive:
-            info = tarfile.TarInfo(path)
-            info.size = len(body)
-            info.mode = 0o600
-            archive.addfile(info, io.BytesIO(body))
+            self.add_tar_member(archive, path, body, member_type, linkname)
         return archive_path
 
-    def write_image_save(self, root, path, body):
+    def write_image_save(self, root, path, body=b"", member_type=tarfile.REGTYPE, linkname=""):
         layer_path = root / "layer.tar"
         with tarfile.open(layer_path, "w") as layer:
-            info = tarfile.TarInfo(path)
-            info.size = len(body)
-            info.mode = 0o600
-            layer.addfile(info, io.BytesIO(body))
+            self.add_tar_member(layer, path, body, member_type, linkname)
         manifest = json.dumps([{"Config": "config.json", "RepoTags": ["fixture:latest"], "Layers": ["layer.tar"]}]).encode()
         save_path = root / "image-save.tar"
         with tarfile.open(save_path, "w") as image_save:
@@ -301,6 +306,64 @@ class LeakageGateTests(unittest.TestCase):
                     CHECKS_MODULE.check_file_contents(body, "opt/application/cache.bin")
                 self.assertIn(message, str(failure.exception))
                 self.assertNotIn(body.decode(errors="ignore"), str(failure.exception))
+
+    def test_nul_delimited_sensitive_assignments_are_rejected_directly(self):
+        keys = (
+            "UPLOAD_TOKEN",
+            "DATABASE_PASSWORD",
+            "SECRET_KEY",
+            "OAUTH_CLIENT_SECRET",
+            "THIRD_PARTY_API_KEY",
+            "NEW_VENDOR_CREDENTIAL",
+        )
+        for key in keys:
+            with self.subTest(key=key):
+                value = f"safe-review-direct-{key.lower()}"
+                body = b"binary-prefix\x00" + f"{key}={value}".encode() + b"\x00binary-suffix"
+                with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                    CHECKS_MODULE.check_file_contents(body, "opt/application/cache.bin")
+                self.assertIn("secret-like assignment", str(failure.exception))
+                self.assertNotIn(value, str(failure.exception))
+
+    def test_nul_delimited_sensitive_assignments_are_rejected_from_exported_filesystem(self):
+        keys = (
+            "UPLOAD_TOKEN",
+            "DATABASE_PASSWORD",
+            "SECRET_KEY",
+            "OAUTH_CLIENT_SECRET",
+            "THIRD_PARTY_API_KEY",
+            "NEW_VENDOR_CREDENTIAL",
+        )
+        for key in keys:
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                value = f"safe-review-filesystem-{key.lower()}"
+                body = b"binary-prefix\x00" + f"{key}={value}".encode() + b"\x00binary-suffix"
+                archive_path = self.write_filesystem(root, "opt/application/cache.bin", body)
+                result = run_checks("filesystem", archive_path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("secret-like assignment", result.stderr)
+                self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_nul_delimited_sensitive_assignments_are_rejected_from_saved_layer(self):
+        keys = (
+            "UPLOAD_TOKEN",
+            "DATABASE_PASSWORD",
+            "SECRET_KEY",
+            "OAUTH_CLIENT_SECRET",
+            "THIRD_PARTY_API_KEY",
+            "NEW_VENDOR_CREDENTIAL",
+        )
+        for key in keys:
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                value = f"safe-review-layer-{key.lower()}"
+                body = b"binary-prefix\x00" + f"{key}={value}".encode() + b"\x00binary-suffix"
+                save_path = self.write_image_save(root, "tmp/deleted-cache.bin", body)
+                result = run_checks("layers", save_path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("secret-like assignment", result.stderr)
+                self.assertNotIn(value, result.stdout + result.stderr)
 
     def test_all_nul_delimited_private_headers_are_rejected_from_exported_filesystem(self):
         for header in CHECKS_MODULE.PRIVATE_HEADERS:
@@ -457,6 +520,107 @@ class LeakageGateTests(unittest.TestCase):
             result = run_checks("filesystem", archive_path)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn(sentinel, result.stdout + result.stderr)
+
+    def test_secret_bearing_link_targets_are_rejected_without_printing_values(self):
+        scanners = ("filesystem", "layers")
+        link_types = (tarfile.SYMTYPE, tarfile.LNKTYPE)
+        for scanner in scanners:
+            for link_type in link_types:
+                with self.subTest(scanner=scanner, link_type=link_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    value = f"safe-review-{scanner}-{link_type.decode()}-link-secret"
+                    target = f"../runtime/UPLOAD_TOKEN={value}"
+                    if scanner == "filesystem":
+                        archive_path = self.write_filesystem(
+                            root, "usr/local/bin/runtime-link", member_type=link_type, linkname=target
+                        )
+                    else:
+                        archive_path = self.write_image_save(
+                            root, "usr/local/bin/runtime-link", member_type=link_type, linkname=target
+                        )
+                    result = run_checks(scanner, archive_path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("link target", result.stderr)
+                    self.assertNotIn(target, result.stdout + result.stderr)
+                    self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_secret_sentinel_link_targets_are_rejected_without_printing_values(self):
+        target = "../runtime/safe-review-file-sentinel"
+        for scanner in ("filesystem", "layers"):
+            for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(scanner=scanner, link_type=link_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    if scanner == "filesystem":
+                        archive_path = self.write_filesystem(
+                            root, "usr/local/bin/runtime-link", member_type=link_type, linkname=target
+                        )
+                    else:
+                        archive_path = self.write_image_save(
+                            root, "usr/local/bin/runtime-link", member_type=link_type, linkname=target
+                        )
+                    result = run_checks(scanner, archive_path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("link target", result.stderr)
+                    self.assertNotIn(target, result.stdout + result.stderr)
+
+    def test_prohibited_artifact_link_targets_are_rejected_without_printing_targets(self):
+        target = "../run/secrets/upload-token"
+        for scanner in ("filesystem", "layers"):
+            for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(scanner=scanner, link_type=link_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    if scanner == "filesystem":
+                        archive_path = self.write_filesystem(
+                            root, "usr/local/bin/runtime-link", member_type=link_type, linkname=target
+                        )
+                    else:
+                        archive_path = self.write_image_save(
+                            root, "usr/local/bin/runtime-link", member_type=link_type, linkname=target
+                        )
+                    result = run_checks(scanner, archive_path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("prohibited deployment artifact", result.stderr)
+                    self.assertIn("link target", result.stderr)
+                    self.assertNotIn(target, result.stdout + result.stderr)
+
+    def test_prohibited_paths_are_rejected_for_every_tar_member_type(self):
+        member_types = (tarfile.REGTYPE, tarfile.DIRTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE)
+        for scanner in ("filesystem", "layers"):
+            for member_type in member_types:
+                with self.subTest(scanner=scanner, member_type=member_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    kwargs = {
+                        "body": b"public fixture\n" if member_type == tarfile.REGTYPE else b"",
+                        "member_type": member_type,
+                        "linkname": "../usr/bin/python3" if member_type in (tarfile.SYMTYPE, tarfile.LNKTYPE) else "",
+                    }
+                    if scanner == "filesystem":
+                        archive_path = self.write_filesystem(root, "run/config/upload-token", **kwargs)
+                    else:
+                        archive_path = self.write_image_save(root, "run/config/upload-token", **kwargs)
+                    result = run_checks(scanner, archive_path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("prohibited deployment artifact", result.stderr)
+
+    def test_benign_relative_runtime_links_are_accepted(self):
+        fixtures = (
+            (tarfile.SYMTYPE, "usr/bin/python3", "python3.13"),
+            (tarfile.LNKTYPE, "usr/bin/python-copy", "usr/bin/python3.13"),
+        )
+        for scanner in ("filesystem", "layers"):
+            for member_type, path, target in fixtures:
+                with self.subTest(scanner=scanner, member_type=member_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    if scanner == "filesystem":
+                        archive_path = self.write_filesystem(
+                            root, path, member_type=member_type, linkname=target
+                        )
+                    else:
+                        archive_path = self.write_image_save(
+                            root, path, member_type=member_type, linkname=target
+                        )
+                    result = run_checks(scanner, archive_path)
+                    self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_smoke_scans_saved_image_layers(self):
         source = SMOKE.read_text(encoding="utf-8")
