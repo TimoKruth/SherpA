@@ -105,8 +105,24 @@ printf '%s\n' 'example.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISafeCollecto
 printf '%s\n' 'safe-smoke-upload-token' >"$work_dir/secrets/upload-token"
 printf '%s\n' 'safe-smoke-storage-key' >"$work_dir/secrets/storage-ssh-key"
 printf '%s\n' '/data/repository' >"$work_dir/secrets/borg-repository"
+chmod 0755 "$work_dir/config"
 chmod 0644 "$work_dir/config/age-recipient" "$work_dir/config/known_hosts"
 chmod 0600 "$work_dir/secrets/upload-token" "$work_dir/secrets/storage-ssh-key" "$work_dir/secrets/borg-repository"
+docker run --rm --user 0:0 --entrypoint /bin/sh \
+  --mount "type=bind,src=$work_dir/config,dst=/fixture/config" \
+  --mount "type=bind,src=$work_dir/secrets,dst=/fixture/secrets" \
+  "$image" -ceu '
+    chown -R 10001:10001 /fixture/config /fixture/secrets
+    chmod 0755 /fixture/config
+    chmod 0700 /fixture/secrets
+    chmod 0644 /fixture/config/age-recipient /fixture/config/known_hosts
+    chmod 0600 /fixture/secrets/upload-token /fixture/secrets/storage-ssh-key /fixture/secrets/borg-repository
+  '
+docker run --rm --user 0:0 --entrypoint python3 \
+  --mount "type=bind,src=$work_dir/config,dst=/fixture/config" \
+  --mount "type=bind,src=$work_dir/secrets,dst=/fixture/secrets" \
+  --mount "type=bind,src=$source_dir/deploy/collector/smoke_checks.py,dst=/tmp/smoke_checks.py,readonly" \
+  "$image" -I /tmp/smoke_checks.py runtime-files /fixture 10001 10001
 
 progress "Validate rendered Compose contract"
 SOURCE_REVISION="$source_revision" docker compose --project-directory "$work_dir" -f "$work_dir/compose.yaml" config >"$work_dir/compose.rendered.yaml"
@@ -132,6 +148,8 @@ progress "Export and scan complete image filesystem"
 docker create --name "$inspect_container" "$image" >/dev/null
 docker export "$inspect_container" >"$work_dir/image.tar"
 python3 -I "$source_dir/deploy/collector/smoke_checks.py" filesystem "$work_dir/image.tar"
+docker image save "$image" >"$work_dir/image.save.tar"
+python3 -I "$source_dir/deploy/collector/smoke_checks.py" layers "$work_dir/image.save.tar"
 docker run --rm --entrypoint /bin/sh "$image" -ceu '
   for command in go gcc cc clang make cmake pkg-config curl git fusermount fusermount3; do
     ! command -v "$command" >/dev/null 2>&1

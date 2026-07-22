@@ -128,7 +128,9 @@ SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 GENERIC_KEY = re.compile(r"(?:^|[_.-])key(?:$|[_.-])", re.IGNORECASE)
-ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]{1,127})=([^\s\x00]{1,4096})")
+ASSIGNMENT = re.compile(
+    r"(?=(?<![A-Za-z0-9_.-])[\"']?([A-Za-z_][A-Za-z0-9_.-]{1,127})[\"']?\s*(?:=|:)\s*([^\s\x00]{1,4096}))"
+)
 ALLOWED_ENVIRONMENT = {
     "PATH": "/opt/borg/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "GPG_KEY": "7169605F62C751356D054A26A821E680E5FA6305",
@@ -222,7 +224,9 @@ COMPILER_PATH = re.compile(
     r"(^|/)(?:([^/]+-)?(?:gcc|g\+\+|cc|c\+\+)(?:-[0-9.]+)?|clang(?:-[0-9.]+)?|"
     r"go|make|cmake|pkg-config|curl|fusermount3?)$"
 )
-ASSIGNMENT_BYTES = re.compile(rb"(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]{1,127})=([^\s\x00]{1,4096})")
+ASSIGNMENT_BYTES = re.compile(
+    rb"(?=(?<![A-Za-z0-9_.-])[\"']?([A-Za-z_][A-Za-z0-9_.-]{1,127})[\"']?\s*(?:=|:)\s*([^\s\x00]{1,4096}))"
+)
 MAX_FILE_SCAN_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_SCAN_BYTES = 1024 * 1024 * 1024
 
@@ -231,9 +235,7 @@ def skip_runtime_assignment_scan(path):
     lowered = path.lower()
     return (
         lowered == "etc/security/namespace.init"
-        or lowered.startswith(("bin/", "sbin/", "lib/", "usr/bin/", "usr/sbin/", "usr/lib/", "usr/share/"))
-        or re.search(r"^usr/local/(?:lib|include)/python[0-9.]+/", lowered) is not None
-        or re.search(r"^opt/borg/lib/python[0-9.]+/site-packages/", lowered) is not None
+        or lowered.startswith(("bin/", "sbin/", "etc/", "lib/", "opt/borg/", "usr/bin/", "usr/sbin/", "usr/lib/", "usr/share/", "usr/local/include/", "usr/local/lib/", "usr/local/share/", "var/"))
     )
 
 
@@ -253,6 +255,12 @@ def check_file_contents(data, path):
             raise CheckFailure(f"secret-like assignment found in exported regular file: {path}")
 
 
+def normalize_tar_path(name):
+    while name.startswith("./"):
+        name = name[2:]
+    return name.lstrip("/")
+
+
 def check_filesystem(archive_path):
     scanned = 0
     try:
@@ -261,7 +269,7 @@ def check_filesystem(archive_path):
         raise CheckFailure("cannot open exported image filesystem") from error
     with archive:
         for member in archive:
-            path = member.name.lstrip("./")
+            path = normalize_tar_path(member.name)
             lowered = path.lower()
             require(not (member.isfile() and member.mode & 0o6000), f"setuid/setgid file found: {path}")
             require("security.capability" not in " ".join(member.pax_headers).lower(), f"file capability found: {path}")
@@ -288,6 +296,51 @@ def check_filesystem(archive_path):
             check_file_contents(data, path)
 
 
+def check_layers(image_save_path):
+    scanned = 0
+    try:
+        image_save = tarfile.open(image_save_path)
+    except (OSError, tarfile.TarError) as error:
+        raise CheckFailure("cannot open saved image layers") from error
+    with image_save:
+        manifest_member = image_save.getmember("manifest.json")
+        manifest_handle = image_save.extractfile(manifest_member)
+        require(manifest_handle is not None, "saved image manifest is unreadable")
+        try:
+            manifest = json.load(manifest_handle)
+        except (ValueError, TypeError) as error:
+            raise CheckFailure("saved image manifest is malformed") from error
+        require(isinstance(manifest, list) and len(manifest) == 1, "saved image manifest shape is not exact")
+        layers = manifest[0].get("Layers") or []
+        require(isinstance(layers, list) and layers, "saved image has no layers")
+        for layer_name in layers:
+            require(isinstance(layer_name, str), "saved image layer name is malformed")
+            try:
+                layer_member = image_save.getmember(layer_name)
+            except KeyError as error:
+                raise CheckFailure("saved image layer is unavailable") from error
+            layer_handle = image_save.extractfile(layer_member)
+            require(layer_handle is not None, "saved image layer is unreadable")
+            try:
+                layer = tarfile.open(fileobj=layer_handle, mode="r|*")
+            except tarfile.TarError as error:
+                raise CheckFailure("saved image layer archive is malformed") from error
+            with layer:
+                for member in layer:
+                    if not member.isfile():
+                        continue
+                    path = normalize_tar_path(member.name)
+                    require(PROHIBITED_PATH.search(path) is None, f"prohibited deployment artifact found in image layer: {path}")
+                    require(member.size <= MAX_FILE_SCAN_BYTES, f"image-layer regular file exceeds bounded scan limit: {path}")
+                    scanned += member.size
+                    require(scanned <= MAX_TOTAL_SCAN_BYTES, "saved image layers exceed bounded content scan limit")
+                    extracted = layer.extractfile(member)
+                    require(extracted is not None, f"cannot read image-layer regular file: {path}")
+                    data = extracted.read(MAX_FILE_SCAN_BYTES + 1)
+                    require(len(data) == member.size, f"cannot completely scan image-layer regular file: {path}")
+                    check_file_contents(data, path)
+
+
 DATA_DIRECTORIES = (
     "spool",
     "state",
@@ -311,6 +364,14 @@ def check_layout(root, expected_uid, expected_gid):
         require(info.st_uid == expected_uid and info.st_gid == expected_gid, f"bind directory ownership is not exact: {relative}")
 
 
+def canonical_bind_source(path):
+    if path.startswith("/host_mnt/private/"):
+        path = path[len("/host_mnt"):]
+    elif path.startswith("/host_mnt/"):
+        path = path[len("/host_mnt"):]
+    return os.path.realpath(path)
+
+
 def check_bind(inspect_path, expected_source):
     data = load_json(inspect_path)
     require(isinstance(data, list) and len(data) == 1, "runtime inspection shape is not exact")
@@ -319,8 +380,35 @@ def check_bind(inspect_path, expected_source):
     require(len(matching) == 1, "runtime data mount count is not exact")
     mount = matching[0]
     require(mount.get("Type") == "bind", "runtime data mount is not a bind mount")
-    require(os.path.realpath(mount.get("Source", "")) == os.path.realpath(expected_source), "runtime data bind source is not exact")
+    require(canonical_bind_source(mount.get("Source", "")) == os.path.realpath(expected_source), "runtime data bind source is not exact")
     require(mount.get("RW") is True, "runtime data bind is not writable")
+
+
+RUNTIME_PATHS = {
+    "config": (0o755, None),
+    "secrets": (0o700, None),
+    "config/age-recipient": (0o644, "file"),
+    "config/known_hosts": (0o644, "file"),
+    "secrets/upload-token": (0o600, "file"),
+    "secrets/storage-ssh-key": (0o600, "file"),
+    "secrets/borg-repository": (0o600, "file"),
+}
+
+
+def check_runtime_files(root, expected_uid, expected_gid):
+    root = os.path.realpath(root)
+    for relative, (expected_mode, kind) in RUNTIME_PATHS.items():
+        path = os.path.join(root, relative)
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise CheckFailure(f"required runtime fixture is unavailable: {relative}") from error
+        if kind == "file":
+            require(stat.S_ISREG(info.st_mode), f"runtime fixture is not a regular file: {relative}")
+        else:
+            require(stat.S_ISDIR(info.st_mode), f"runtime fixture is not a directory: {relative}")
+        require(stat.S_IMODE(info.st_mode) == expected_mode, f"runtime fixture mode is not exact: {relative}")
+        require(info.st_uid == expected_uid and info.st_gid == expected_gid, f"runtime fixture ownership is not exact: {relative}")
 
 
 def main(argv):
@@ -338,12 +426,18 @@ def main(argv):
     elif command == "filesystem":
         require(len(argv) == 3, "filesystem check arguments are invalid")
         check_filesystem(argv[2])
+    elif command == "layers":
+        require(len(argv) == 3, "layers check arguments are invalid")
+        check_layers(argv[2])
     elif command == "layout":
         require(len(argv) == 5, "layout check arguments are invalid")
         check_layout(argv[2], int(argv[3]), int(argv[4]))
     elif command == "bind":
         require(len(argv) == 4, "bind check arguments are invalid")
         check_bind(argv[2], argv[3])
+    elif command == "runtime-files":
+        require(len(argv) == 5, "runtime-files check arguments are invalid")
+        check_runtime_files(argv[2], int(argv[3]), int(argv[4]))
     else:
         raise CheckFailure("unknown smoke check command")
 
