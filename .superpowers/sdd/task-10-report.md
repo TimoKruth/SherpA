@@ -1413,3 +1413,33 @@ Changed files:
 The exact diff was reviewed for bypasses, overbroad paths, platform ambiguity, repeated hashing, CLI argument mismatches, link-approval coupling, lower-layer replacement behavior, accidental data disclosure, unrelated edits, and changes to the msgpack, libgnutls, Dockerfile, Go, or Borg behavior. The three untracked `.DS_Store` files remain untouched.
 
 The full Docker smoke was intentionally not run because exact source construction ignores uncommitted code; the controller must run it after this commit. No Docker daemon image/container mutation, Go suite, race suite, VPS, Railway, Traefik, Hetzner, Storage Box, or other external infrastructure operation was performed. Task 10 and shared Task 79 are not marked complete, and `progress.md` was not edited.
+
+# Task 10 Complete Reviewed Binary Manifest Test Fix
+
+## Low finding and correction
+
+The independent review found that the prior manifest test bound only per-platform counts and sampled `collector`/`findmnt` entries. The remaining 82 platform-specific path, whole-file SHA-256, and reviewed-key approvals could therefore change without failing the test as long as each platform retained 43 paths.
+
+The focused correction adds a deterministic test helper that serializes every platform, literal path, whole-file SHA-256, and sorted reviewed-key set into compact sorted JSON and hashes the complete canonical record list. The manifest test now requires the reviewed complete digest `5d886c92672596892875a92468c00225c232ae006f5b31deb61dd2518a54ee09`. A mutation of the unsampled `linux/arm64` `usr/bin/getent` reviewed-key set proves that a change outside `collector`/`findmnt` changes the digest.
+
+No production manifest entry, scanner behavior, smoke script, Dockerfile, Go code, Docker image/container, or external infrastructure was changed or accessed.
+
+## Test evidence
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py LeakageGateTests.test_platform_binary_manifest_contains_exact_reviewed_candidate_entries
+Ran 1 test in 0.001s
+OK
+
+$ python3 deploy/collector/smoke_checks_test.py
+Ran 76 tests in 31.295s
+OK
+
+$ PYTHONOPTIMIZE=1 python3 deploy/collector/smoke_checks_test.py
+Ran 76 tests in 30.969s
+OK
+
+$ python3 -I -O deploy/collector/smoke_checks_test.py
+Ran 76 tests in 31.643s
+OK
+```

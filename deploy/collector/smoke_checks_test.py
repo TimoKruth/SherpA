@@ -45,6 +45,27 @@ def run_checks(*args, optimize=False):
     return subprocess.run(command, capture_output=True, text=True, check=False)
 
 
+def canonical_platform_manifest_sha256(manifest):
+    records = []
+    for platform, paths in manifest.items():
+        for path, hashes in paths.items():
+            for file_digest, keys in hashes.items():
+                records.append({
+                    "platform": platform,
+                    "path": path,
+                    "sha256": file_digest,
+                    "keys": sorted(keys),
+                })
+    records.sort(key=lambda record: (
+        record["platform"],
+        record["path"],
+        record["sha256"],
+        record["keys"],
+    ))
+    canonical = json.dumps(records, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
 class SmokeArchitectureTests(unittest.TestCase):
     def test_real_bind_mount_and_compose_startup_are_exercised(self):
         source = SMOKE.read_text(encoding="utf-8")
@@ -255,6 +276,22 @@ class LeakageGateTests(unittest.TestCase):
 
     def test_platform_binary_manifest_contains_exact_reviewed_candidate_entries(self):
         manifest = CHECKS_MODULE.REVIEWED_PLATFORM_BINARY_ASSIGNMENTS
+        expected_digest = "5d886c92672596892875a92468c00225c232ae006f5b31deb61dd2518a54ee09"
+        self.assertEqual(canonical_platform_manifest_sha256(manifest), expected_digest)
+
+        mutated = {
+            platform: {
+                path: dict(hashes)
+                for path, hashes in paths.items()
+            }
+            for platform, paths in manifest.items()
+        }
+        getent_digest, getent_keys = next(iter(mutated["linux/arm64"]["usr/bin/getent"].items()))
+        mutated["linux/arm64"]["usr/bin/getent"] = {
+            getent_digest: getent_keys | {"review-mutation"},
+        }
+        self.assertNotEqual(canonical_platform_manifest_sha256(mutated), expected_digest)
+
         self.assertEqual(set(manifest), {"linux/arm64", "linux/amd64"})
         self.assertEqual(len(manifest["linux/arm64"]), 43)
         self.assertEqual(len(manifest["linux/amd64"]), 43)
