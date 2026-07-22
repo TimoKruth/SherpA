@@ -18,6 +18,7 @@ fi
 
 suffix="$$-${RANDOM}"
 project="sherpa-collector-smoke-${suffix}"
+image_alias="${project}-collector"
 inspect_container="sherpa-collector-inspect-${suffix}"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/sherpa-collector-smoke.XXXXXX")"
 source_dir="$work_dir/source"
@@ -28,6 +29,7 @@ cleanup() {
     SOURCE_REVISION="${source_revision:-}" docker compose --project-directory "$work_dir" -f "$work_dir/compose.yaml" -p "$project" down --volumes --remove-orphans >/dev/null 2>&1 || true
   fi
   docker rm -f "$inspect_container" >/dev/null 2>&1 || true
+  docker image rm --force "$image_alias" >/dev/null 2>&1 || true
   rm -rf "$work_dir"
 }
 trap cleanup EXIT
@@ -250,9 +252,9 @@ docker run --rm --user 10001:10001 --entrypoint /bin/sh \
   '
 
 progress "Start real Compose service with exact bind mount"
-docker tag "$image" "${project}-collector"
-SOURCE_REVISION="$source_revision" docker compose --project-directory "$work_dir" -f "$work_dir/compose.yaml" -p "$project" up --detach --no-build collector
+docker tag "$image" "$image_alias"
 compose_started=true
+SOURCE_REVISION="$source_revision" docker compose --project-directory "$work_dir" -f "$work_dir/compose.yaml" -p "$project" up --detach --no-build collector
 container="$(SOURCE_REVISION="$source_revision" docker compose --project-directory "$work_dir" -f "$work_dir/compose.yaml" -p "$project" ps -q collector)"
 [[ -n "$container" ]] || fail "collector Compose container was not created"
 
