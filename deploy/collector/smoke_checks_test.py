@@ -97,6 +97,19 @@ class SmokeArchitectureTests(unittest.TestCase):
         self.assertIn('image_alias="${project}-collector"', source)
         self.assertIn('docker image rm --force "$image_alias"', source)
 
+    def test_pid_one_gate_uses_exact_image_command_without_host_process_paths(self):
+        source = SMOKE.read_text(encoding="utf-8")
+        self.assertIn(
+            """[[ "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" == '["/usr/local/bin/collector"]' ]]""",
+            source,
+        )
+        self.assertIn(
+            """[[ "$(docker image inspect --format '{{json .Config.Cmd}}' "$image")" == '["serve"]' ]]""",
+            source,
+        )
+        self.assertNotIn("/proc/1/exe", source)
+        self.assertNotIn("/proc/1/cmdline", source)
+
 
 class ProvenanceTests(unittest.TestCase):
     def test_archive_ignores_dirty_tracked_staged_and_relevant_untracked_sources(self):

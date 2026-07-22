@@ -283,8 +283,6 @@ for expected in \
   $'NoNewPrivs:\t1'; do
   grep -Fx "$expected" <<<"$pid_one_status" >/dev/null || fail "collector PID 1 security status is not exact"
 done
-[[ "$(docker exec "$container" readlink /proc/1/exe)" == "/usr/local/bin/collector" ]] || fail "collector serve is not PID 1"
-[[ "$(docker exec "$container" /bin/sh -c "tr '\\0' ' ' </proc/1/cmdline")" == "/usr/local/bin/collector serve " ]] || fail "collector PID 1 command is not exact"
 if docker exec "$container" /bin/sh -c ': > /rootfs-write-probe' >/dev/null 2>&1; then
   fail "collector root filesystem is writable"
 fi

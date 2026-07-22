@@ -1443,3 +1443,49 @@ $ python3 -I -O deploy/collector/smoke_checks_test.py
 Ran 76 tests in 31.643s
 OK
 ```
+
+# Task 10 Rosetta PID 1 Runtime-Path Correction
+
+## Root cause and RED
+
+On Docker Desktop cross-architecture `linux/amd64` execution, transparent Rosetta emulation can expose `/run/rosetta/rosetta` as `/proc/1/exe` even though image inspection still proves the exact collector entrypoint and `serve` command. The two runtime path/cmdline assertions were therefore redundant with exact `Config.Entrypoint`/`Config.Cmd` validation and false-failed after all required PID 1 UID/GID, capability, and `NoNewPrivs` checks passed.
+
+A focused source-contract regression was added first. It requires the exact image command metadata gates to remain and rejects smoke scripts that inspect host-runtime `/proc/1/exe` or `/proc/1/cmdline` paths.
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py SmokeArchitectureTests.test_pid_one_gate_uses_exact_image_command_without_host_process_paths
+Ran 1 test in 0.001s
+FAILED (failures=1)
+```
+
+The intended RED was `/proc/1/exe` still present in the smoke script; the same regression also requires `/proc/1/cmdline` to be absent.
+
+## Minimal GREEN and verification
+
+Removed only the two redundant `/proc/1/exe` and `/proc/1/cmdline` assertions. Exact image `Config.Entrypoint=["/usr/local/bin/collector"]` and `Config.Cmd=["serve"]` checks remain, as do PID 1 UID/GID, zero capability sets, `NoNewPrivs`, read-only root, writable `/data`, bind/layout, health, revision, filesystem/layer, Borg, Compose, and scanner gates.
+
+```text
+$ python3 -I deploy/collector/smoke_checks_test.py SmokeArchitectureTests.test_pid_one_gate_uses_exact_image_command_without_host_process_paths
+Ran 1 test in 0.000s
+OK
+
+$ python3 -I deploy/collector/smoke_checks_test.py
+Ran 77 tests in 30.345s
+OK
+
+$ PYTHONOPTIMIZE=1 python3 -I deploy/collector/smoke_checks_test.py
+Ran 77 tests in 30.332s
+OK
+
+$ python3 -I -O deploy/collector/smoke_checks_test.py
+Ran 77 tests in 30.724s
+OK
+
+$ bash -n deploy/collector/smoke_build.sh
+(exit 0; no output)
+
+$ git diff --check
+(exit 0; no output)
+```
+
+The Docker smoke was not rerun; the controller will rebuild and exercise the exact committed arm64 and amd64 candidates. No external infrastructure was accessed.
