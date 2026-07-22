@@ -130,12 +130,26 @@ SENSITIVE_KEY = re.compile(
 )
 GENERIC_KEY = re.compile(r"(?:^|[_.-])key(?:$|[_.-])", re.IGNORECASE)
 ASSIGNMENT = re.compile(
-    r"(?=(?<![A-Za-z0-9_.-])[\"']?([A-Za-z_][A-Za-z0-9_.-]{1,127})[\"']?\s*(?:=|:)\s*([^\s\x00]{1,4096}))"
+    r"(?=(?<![A-Za-z0-9_.-])[\"']?([A-Za-z_][A-Za-z0-9_.-]*)[\"']?\s*(?:=|:)\s*([^\s\x00]{1,4096}))"
 )
-BEARER_CREDENTIAL = re.compile(
+AUTHORIZATION_CREDENTIAL = re.compile(
     r"(?<![A-Za-z0-9_.-])(?:proxy[_.-]?)?authorization\s*(?:=|:)\s*(?:bearer|token)\s+[^\s\"']+",
     re.IGNORECASE,
 )
+STANDALONE_BEARER = re.compile(
+    r"(?<![A-Za-z0-9_.-])bearer\s+([^\s\"']+)",
+    re.IGNORECASE,
+)
+BENIGN_BEARER_FOLLOWERS = frozenset({
+    "authentication",
+    "authorization",
+    "credential",
+    "credentials",
+    "scheme",
+    "schemes",
+    "token",
+    "tokens",
+})
 ALLOWED_ENVIRONMENT = {
     "PATH": "/opt/borg/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "GPG_KEY": "7169605F62C751356D054A26A821E680E5FA6305",
@@ -164,8 +178,19 @@ def sensitive_assignment_key(key):
     return SENSITIVE_KEY.search(key) is not None or GENERIC_KEY.search(key) is not None
 
 
+def standalone_bearer_credential_found(text, pattern):
+    for match in pattern.finditer(text):
+        follower = match.group(1)
+        if isinstance(follower, bytes):
+            follower = follower.decode("ascii", errors="ignore")
+        normalized = follower.rstrip(".,;:!?)]}").casefold()
+        if normalized not in BENIGN_BEARER_FOLLOWERS:
+            return True
+    return False
+
+
 def check_assignments(text, context):
-    if BEARER_CREDENTIAL.search(text) is not None:
+    if AUTHORIZATION_CREDENTIAL.search(text) is not None or standalone_bearer_credential_found(text, STANDALONE_BEARER):
         raise CheckFailure(f"bearer credential found in {context}")
     for match in ASSIGNMENT.finditer(text):
         key = match.group(1)
@@ -252,10 +277,14 @@ COMPILER_PATH = re.compile(
     r"go|make|cmake|pkg-config|curl|fusermount3?)$"
 )
 ASSIGNMENT_BYTES = re.compile(
-    rb"(?=(?<![A-Za-z0-9_.-])[\"']?([A-Za-z_][A-Za-z0-9_.-]{1,127})[\"']?\s*(?:=|:)\s*([^\s\x00]{1,4096}))"
+    rb"(?=(?<![A-Za-z0-9_.-])[\"']?([A-Za-z_][A-Za-z0-9_.-]*)[\"']?\s*(?:=|:)\s*([^\s\x00]{1,4096}))"
 )
-BEARER_CREDENTIAL_BYTES = re.compile(
+AUTHORIZATION_CREDENTIAL_BYTES = re.compile(
     rb"(?<![A-Za-z0-9_.-])(?:proxy[_.-]?)?authorization\s*(?:=|:)\s*(?:bearer|token)\s+[^\s\"']+",
+    re.IGNORECASE,
+)
+STANDALONE_BEARER_BYTES = re.compile(
+    rb"(?<![A-Za-z0-9_.-])bearer\s+([^\s\"']+)",
     re.IGNORECASE,
 )
 MAX_FILE_SCAN_BYTES = 64 * 1024 * 1024
@@ -756,7 +785,11 @@ def check_file_contents(data, path, location="exported regular file"):
                 f"private-key material found in {location}: {path}",
             )
     require(AGE_PRIVATE_IDENTITY.search(data) is None, f"age private identity found in {location}: {path}")
-    require(BEARER_CREDENTIAL_BYTES.search(data) is None, f"bearer credential found in {location}: {path}")
+    require(
+        AUTHORIZATION_CREDENTIAL_BYTES.search(data) is None
+        and not standalone_bearer_credential_found(data, STANDALONE_BEARER_BYTES),
+        f"bearer credential found in {location}: {path}",
+    )
     for match in ASSIGNMENT_BYTES.finditer(data):
         key = match.group(1).decode("ascii", errors="ignore")
         if sensitive_assignment_key(key) and not runtime_assignment_allowed(path, key):
@@ -769,7 +802,11 @@ def check_link_contents(data, path, location):
     for header in PRIVATE_HEADERS:
         require(header not in data, f"private-key material found in {location}: {path}")
     require(LINK_AGE_PRIVATE_IDENTITY.search(data) is None, f"age private identity found in {location}: {path}")
-    require(BEARER_CREDENTIAL_BYTES.search(data) is None, f"bearer credential found in {location}: {path}")
+    require(
+        AUTHORIZATION_CREDENTIAL_BYTES.search(data) is None
+        and not standalone_bearer_credential_found(data, STANDALONE_BEARER_BYTES),
+        f"bearer credential found in {location}: {path}",
+    )
     for match in ASSIGNMENT_BYTES.finditer(data):
         key = match.group(1).decode("ascii", errors="ignore")
         if sensitive_assignment_key(key):

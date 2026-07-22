@@ -209,13 +209,25 @@ class LeakageGateTests(unittest.TestCase):
         return archive_path
 
     def write_image_save(self, root, path, body=b"", member_type=tarfile.REGTYPE, linkname=""):
-        layer_path = root / "layer.tar"
-        with tarfile.open(layer_path, "w") as layer:
-            self.add_tar_member(layer, path, body, member_type, linkname)
-        manifest = json.dumps([{"Config": "config.json", "RepoTags": ["fixture:latest"], "Layers": ["layer.tar"]}]).encode()
+        return self.write_image_save_layers(root, [[(path, body, member_type, linkname)]])
+
+    def write_image_save_layers(self, root, layers):
+        layer_payloads = []
+        for index, members in enumerate(layers):
+            layer_name = f"layer-{index}.tar"
+            layer_path = root / layer_name
+            with tarfile.open(layer_path, "w") as layer:
+                for path, body, member_type, linkname in members:
+                    self.add_tar_member(layer, path, body, member_type, linkname)
+            layer_payloads.append((layer_name, layer_path.read_bytes()))
+        manifest = json.dumps([{
+            "Config": "config.json",
+            "RepoTags": ["fixture:latest"],
+            "Layers": [name for name, _ in layer_payloads],
+        }]).encode()
         save_path = root / "image-save.tar"
         with tarfile.open(save_path, "w") as image_save:
-            for name, payload in [("manifest.json", manifest), ("config.json", b"{}"), ("layer.tar", layer_path.read_bytes())]:
+            for name, payload in [("manifest.json", manifest), ("config.json", b"{}"), *layer_payloads]:
                 info = tarfile.TarInfo(name)
                 info.size = len(payload)
                 image_save.addfile(info, io.BytesIO(payload))
@@ -369,6 +381,94 @@ class LeakageGateTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("secret-like assignment", result.stderr)
                 self.assertNotIn(value, result.stdout + result.stderr)
+
+    def test_long_sensitive_assignment_keys_are_rejected_directly(self):
+        fixtures = (
+            ("uPlOaD-tOkEn-" + "a" * (129 - len("uPlOaD-tOkEn-")), "="),
+            ("b" * 600 + ".Client-Secret." + "c" * 600, ":"),
+            ("d" * 32768 + "_UPLOAD_TOKEN", "="),
+        )
+        for key, separator in fixtures:
+            with self.subTest(length=len(key), separator=separator):
+                value = f"safe-review-long-direct-{len(key)}"
+                body = f"{key}{separator}{value}".encode()
+                with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                    CHECKS_MODULE.check_file_contents(body, "opt/application/cache.bin")
+                self.assertIn("secret-like assignment", str(failure.exception))
+                self.assertNotIn(value, str(failure.exception))
+                self.assertNotIn(key, str(failure.exception))
+
+    def test_long_sensitive_assignment_keys_are_rejected_by_direct_link_helper(self):
+        keys = (
+            "uPlOaD-tOkEn-" + "a" * (129 - len("uPlOaD-tOkEn-")),
+            "b" * 600 + ".Client-Secret." + "c" * 600,
+            "d" * 32768 + "_UPLOAD_TOKEN",
+        )
+        for key in keys:
+            for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(length=len(key), link_type=link_type):
+                    value = f"safe-review-long-link-{len(key)}-{link_type.decode()}"
+                    member = tarfile.TarInfo("usr/local/bin/runtime-link")
+                    member.type = link_type
+                    member.linkname = f"../runtime/{key}={value}"
+                    with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                        CHECKS_MODULE.check_link_target(member, member.name, "fixture link target")
+                    self.assertIn("secret-like assignment", str(failure.exception))
+                    self.assertNotIn(value, str(failure.exception))
+                    self.assertNotIn(key, str(failure.exception))
+
+    def test_long_sensitive_assignment_keys_are_rejected_from_exported_filesystem(self):
+        fixtures = (
+            "uPlOaD-tOkEn-" + "a" * (129 - len("uPlOaD-tOkEn-")),
+            "b" * 600 + ".Client-Secret." + "c" * 600,
+            "d" * 32768 + "_UPLOAD_TOKEN",
+        )
+        for key in fixtures:
+            for member_type in (tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(length=len(key), member_type=member_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    value = f"safe-review-long-filesystem-{len(key)}-{member_type.decode()}"
+                    assignment = f"{key}={value}"
+                    archive_path = self.write_filesystem(
+                        root,
+                        "opt/application/cache.bin" if member_type == tarfile.REGTYPE else "usr/local/bin/runtime-link",
+                        body=assignment.encode() if member_type == tarfile.REGTYPE else b"",
+                        member_type=member_type,
+                        linkname=f"../runtime/{assignment}" if member_type != tarfile.REGTYPE else "",
+                    )
+                    result = run_checks("filesystem", archive_path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("secret-like assignment", result.stderr)
+                    self.assertNotIn(value, result.stdout + result.stderr)
+                    self.assertNotIn(key, result.stdout + result.stderr)
+
+    def test_long_sensitive_assignment_keys_are_rejected_from_every_saved_layer(self):
+        keys = (
+            "uPlOaD-tOkEn-" + "a" * (129 - len("uPlOaD-tOkEn-")),
+            "b" * 600 + ".Client-Secret." + "c" * 600,
+            "d" * 32768 + "_UPLOAD_TOKEN",
+        )
+        benign_layer = [("opt/application/public.txt", b"public fixture\n", tarfile.REGTYPE, "")]
+        for layer_index, key in enumerate(keys):
+            for member_type in (tarfile.REGTYPE, tarfile.SYMTYPE, tarfile.LNKTYPE):
+                with self.subTest(layer=layer_index, length=len(key), member_type=member_type), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    value = f"safe-review-long-layer-{layer_index}-{member_type.decode()}"
+                    assignment = f"{key}={value}"
+                    malicious = [(
+                        "tmp/deleted-cache.bin" if member_type == tarfile.REGTYPE else "usr/local/bin/runtime-link",
+                        assignment.encode() if member_type == tarfile.REGTYPE else b"",
+                        member_type,
+                        f"../runtime/{assignment}" if member_type != tarfile.REGTYPE else "",
+                    )]
+                    layers = [benign_layer, benign_layer, benign_layer]
+                    layers[layer_index] = malicious
+                    save_path = self.write_image_save_layers(root, layers)
+                    result = run_checks("layers", save_path)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("secret-like assignment", result.stderr)
+                    self.assertNotIn(value, result.stdout + result.stderr)
+                    self.assertNotIn(key, result.stdout + result.stderr)
 
     def test_all_nul_delimited_private_headers_are_rejected_from_exported_filesystem(self):
         for header in CHECKS_MODULE.PRIVATE_HEADERS:
@@ -578,6 +678,92 @@ class LeakageGateTests(unittest.TestCase):
                             self.assertIn("link target", result.stderr)
                             self.assertNotIn(target, result.stdout + result.stderr)
                             self.assertNotIn(material, result.stdout + result.stderr)
+
+    def test_standalone_bearer_credentials_are_rejected_directly(self):
+        fixtures = (
+            b"Bearer safe-review-standalone-direct",
+            b"binary-prefix\x00bearer safe-review-standalone-nul\x00suffix",
+            b"first line\nBEARER safe-review-standalone-newline\n",
+            b"../Bearer safe-review-standalone-path",
+        )
+        for body in fixtures:
+            value = body.split(b"Bearer ")[-1].split(b"bearer ")[-1].split(b"BEARER ")[-1].split(b"\x00", 1)[0].split(b"\n", 1)[0]
+            with self.subTest(body=body[:24]):
+                with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                    CHECKS_MODULE.check_file_contents(body, "opt/application/cache.bin")
+                self.assertIn("bearer credential", str(failure.exception))
+                self.assertNotIn(value.decode(), str(failure.exception))
+        for link_type in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+            for target in (
+                "../Bearer safe-review-standalone-link-path",
+                "./prefix\nbearer safe-review-standalone-link-newline",
+                "/BEARER safe-review-standalone-link-absolute",
+            ):
+                with self.subTest(link_type=link_type, target=target[:24]):
+                    member = tarfile.TarInfo("usr/local/bin/runtime-link")
+                    member.type = link_type
+                    member.linkname = target
+                    with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                        CHECKS_MODULE.check_link_target(member, member.name, "fixture link target")
+                    self.assertIn("bearer credential", str(failure.exception))
+                    self.assertNotIn(target, str(failure.exception))
+
+    def test_standalone_bearer_credentials_are_rejected_from_exported_filesystem(self):
+        fixtures = (
+            (tarfile.REGTYPE, b"prefix\x00Bearer safe-review-standalone-filesystem-regular\n", ""),
+            (tarfile.SYMTYPE, b"", "../bearer safe-review-standalone-filesystem-symlink"),
+            (tarfile.LNKTYPE, b"", "/prefix\nBEARER safe-review-standalone-filesystem-hardlink"),
+        )
+        for member_type, body, target in fixtures:
+            with self.subTest(member_type=member_type), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive_path = self.write_filesystem(
+                    root,
+                    "opt/application/cache.bin" if member_type == tarfile.REGTYPE else "usr/local/bin/runtime-link",
+                    body=body,
+                    member_type=member_type,
+                    linkname=target,
+                )
+                result = run_checks("filesystem", archive_path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("bearer credential", result.stderr)
+                material = body.decode(errors="ignore") if body else target
+                self.assertNotIn(material, result.stdout + result.stderr)
+                self.assertNotIn("safe-review-standalone", result.stdout + result.stderr)
+
+    def test_standalone_bearer_credentials_are_rejected_from_every_saved_layer(self):
+        malicious_members = (
+            ("tmp/deleted-cache.bin", b"Bearer safe-review-standalone-layer-regular", tarfile.REGTYPE, ""),
+            ("usr/local/bin/runtime-symlink", b"", tarfile.SYMTYPE, "../bearer safe-review-standalone-layer-symlink"),
+            ("usr/local/bin/runtime-hardlink", b"", tarfile.LNKTYPE, "/prefix\nBEARER safe-review-standalone-layer-hardlink"),
+        )
+        benign_layer = [("opt/application/public.txt", b"public fixture\n", tarfile.REGTYPE, "")]
+        for layer_index, malicious in enumerate(malicious_members):
+            with self.subTest(layer=layer_index, member_type=malicious[2]), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                layers = [benign_layer, benign_layer, benign_layer]
+                layers[layer_index] = [malicious]
+                save_path = self.write_image_save_layers(root, layers)
+                result = run_checks("layers", save_path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("bearer credential", result.stderr)
+                self.assertNotIn("safe-review-standalone", result.stdout + result.stderr)
+                if malicious[3]:
+                    self.assertNotIn(malicious[3], result.stdout + result.stderr)
+
+    def test_benign_bearer_prose_and_code_remain_accepted(self):
+        body = (
+            b"The bearer authentication scheme is supported.\n"
+            b"A bearer token is carried in an authorization header.\n"
+            b"print('bearer authentication handler')\n"
+        )
+        CHECKS_MODULE.check_file_contents(body, "opt/application/public.txt")
+        for scanner in ("filesystem", "layers"):
+            with self.subTest(scanner=scanner), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                archive_path = self.write_scanner_archive(scanner, root, "opt/application/public.txt", body)
+                result = run_checks(scanner, archive_path)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_bearer_link_targets_are_rejected_without_printing_material(self):
         for scanner in ("filesystem", "layers"):
