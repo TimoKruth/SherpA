@@ -30,6 +30,20 @@ def load_json(path):
         raise CheckFailure(f"cannot load required JSON: {Path(path).name}") from error
 
 
+ALLOWED_IMAGE_PLATFORMS = frozenset({"linux/arm64", "linux/amd64"})
+
+
+def image_platform(inspect_path):
+    image_data = load_json(inspect_path)
+    require(isinstance(image_data, list) and len(image_data) == 1, "image platform inspection shape is not exact")
+    try:
+        platform = f"{image_data[0]['Os']}/{image_data[0]['Architecture']}"
+    except (KeyError, TypeError) as error:
+        raise CheckFailure("image platform metadata is missing or malformed") from error
+    require(platform in ALLOWED_IMAGE_PLATFORMS, "image platform is not approved")
+    return platform
+
+
 def check_compose(path, root, revision):
     config = load_json(path)
     try:
@@ -293,6 +307,106 @@ NUL_ASSIGNMENT_PATH_NORMALIZATION = {
     "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-x86_64-linux-gnu.so":
         "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so",
 }
+# These exact whole-file artifacts and keys were reviewed from the pinned arm64
+# and amd64 candidate images. They must not be regenerated or self-approved from
+# the image under test; apt, pip, compiler, or source changes fail closed by hash.
+_REVIEWED_PLATFORM_BINARY_ASSIGNMENTS = r"""
+linux/arm64|usr/bin/findmnt|ac1f580590b440a028e684b633589fd87e782f0c1a4b1937449edb33a41c7668|key
+linux/arm64|usr/bin/getent|fa93701168c7dbf756abb4144cd5bda19cb7a5efb6f3b961408a8d2f666004db|database
+linux/arm64|usr/bin/gpgv|26999f2766739b3df31c6c355856440bbd7377a5a19ebcf3f6cfe4cfb3c42f69|cache_public_key,encode_session_key,key,ret_found_key,secret
+linux/arm64|usr/bin/localedef|428a1a57253e62aa2939bd47ef1a021d6e6406ee0ff6b643dda04842f137b1f4|last_token
+linux/arm64|usr/bin/lsblk|8a797bb55c2d950f07eaf5955378fff8c219abf898eac53a88e816e84dbf55c2|key
+linux/arm64|usr/bin/lsfd|5c04a9b1ed3d62ef76b9a869d68395633c2839ca7ce949559b485f97ef01320b|token
+linux/arm64|usr/bin/lsirq|c348ce945c0844b38e3a94c2fb3fd95c6ad03760e9630a3f81f0a303281f69dc|key
+linux/arm64|usr/bin/lsmem|335e347d7eb9cc8ed8651a405f024dec0bf72a4589deed254fb85f2f0baf1653|key
+linux/arm64|usr/bin/openssl|bc840e25ecb71ae7e84aed1e61980481b246fddb718159484f5a68ce1e199d09|key
+linux/arm64|usr/bin/partx|b818aec5520fb5762e89e5942d9c55a1ad9dfe2c4eef37f661e9feb007dcf435|key
+linux/arm64|usr/bin/passwd|bc0b502346f44eff9bf08cfd121b280684652a7e8eb4e78cba6404d32892ebf0|passwd
+linux/arm64|usr/bin/perl|a87e4138d1e33d240bd31be3dd5ec59017f729b7aa9bd6b3dc012dfcab85d69b|MG_PRIVATE,PRIVATE
+linux/arm64|usr/bin/ssh|78e7a4963fe15f37f40b5e700bbfcda1831e1978ac32bf3a2ee4d200cce255fe|input_userauth_passwd_changereq,key,ssh,ssh_selinux_getctxbyname,token
+linux/arm64|usr/bin/ssh-add|265f00d9c611a124200efe86ea8d37ec5559dd05692829ca676dedeb386bb7a0|key,ssh_selinux_getctxbyname,sshkey_write
+linux/arm64|usr/bin/ssh-agent|22d8527e1ecb96dd7d2db4cb4058bfe85bda2f7b3f5869828afdfa91271db092|AUTH_SOCKET,key
+linux/arm64|usr/bin/ssh-keygen|6fc50fe603c9e2ba36fbbecb81601d938160d16b96e146901f75b1b18578b0c7|key,ssh,ssh_selinux_getctxbyname
+linux/arm64|usr/bin/ssh-keyscan|94d75d14207aefee285e300f59553d7a75a4bd7bf8f10efbd5e867f77c3c0590|ssh_selinux_getctxbyname
+linux/arm64|usr/lib/aarch64-linux-gnu/libc.so.6|e4ac8ae1d81e4865e3aadedb962879cf9415903b3f2ba81ec75e9962b86ab8b0|auth_unix.c
+linux/arm64|usr/lib/aarch64-linux-gnu/libcrypto.so.3|6ca49d148cc9fff2ee82e46019f508d736cef6b3f15f2f5cbbc86457df9b05ce|Private-Key,Proxy-Authorization,Public-Key,recommended-private-length
+linux/arm64|usr/lib/aarch64-linux-gnu/libdb-5.3.so|d2350d17e88d6693eff10fd95ad01581728609ac3017aead4d8c3952bf9f3232|database,key
+linux/arm64|usr/lib/aarch64-linux-gnu/libext2fs.so.2.4|9102d31c6278d7804dcf4d55e528711e4205ed6887b323251fb69e3067647a6b|key.dptr,key_len
+linux/arm64|usr/lib/aarch64-linux-gnu/libfido2.so.1.12.0|5923ae7a5dab03af586433f325eac850f448a9a786ce57f9c2d50c5c283ca255|key,key_len
+linux/arm64|usr/lib/aarch64-linux-gnu/libgcrypt.so.20.4.1|01c8f6929c4c5853f8204a727e2be5fc3f7cef3f850e2818558800aa5f78c80e|check_secret_key
+linux/arm64|usr/lib/aarch64-linux-gnu/libgnutls.so.30.34.3|a28310df0a36465608473face05bf89b87759804bd0df83b161d564b9804b3fc|get_challenge_password,get_key_usage,get_private_key_usage_period,get_subject_key_id,gnutls_x509_ext_import_authority_key_id,gnutls_x509_ext_import_key_purposes,gnutls_x509_key_purpose_get,gnutls_x509_key_purpose_init,key,password
+linux/arm64|usr/lib/aarch64-linux-gnu/libkrb5.so.3.3|9521937afd55582d7714f7e20b5bf1ba53016221cb069edec49a3c2d58cdbe60|key
+linux/arm64|usr/lib/aarch64-linux-gnu/libnsl.so.1|358d5eaf9adc3443cc28a0f5ee2e17a70c8bf99e471267c765c4c0fc1e523536|auth_name,auth_type
+linux/arm64|usr/lib/aarch64-linux-gnu/libsqlite3.so.0.8.6|1da497e08d6343387879262c2be006e4801cb32d94f2868966747c1c5a6d1ede|database,key,token
+linux/arm64|usr/lib/aarch64-linux-gnu/libssl.so.3|9e171264a6651d714938e83d81277d16524c150a36eaa59ce56e79b9cdbea7ce|secret
+linux/arm64|usr/lib/aarch64-linux-gnu/libsystemd.so.0.35.0|e38e0c11131d330c9a49a4a7f9437f8cf9d6a198355a47ecff02bc4aabe52171|key,p.b.key
+linux/arm64|usr/lib/aarch64-linux-gnu/libudev.so.1.7.5|215857660d2d9ff00d8d653188fc9bd77b25cb2492d275be4b25fe500981da95|key,p.b.key
+linux/arm64|usr/lib/aarch64-linux-gnu/security/pam_unix.so|bf595555d3f0c80572ff96f3c1c65b17cdd2c2da18b1fb76e85b63709504e21a|pam_unix_auth
+linux/arm64|usr/lib/apt/methods/http|1b2ae08e1853d682e7f472c4d96773bb4b237dd4a64189c21c729e79a7c70cfc|Authorization,Proxy-Authorization
+linux/arm64|usr/local/bin/collector|e917ddad769cb4fad2334bcdffd69bf86bb710c18cb4595ff6f738189afe18e7|key,key_sharebufio.Scanner,readage-renameBORG_REPO,stringBORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK
+linux/arm64|usr/local/lib/libpython3.13.so.1.0|6883e73be69e1d09eff85be6670ba90c55b4e738735c5be2b172e6fbec4083a1|key,pwd.struct_passwd
+linux/arm64|usr/local/lib/python3.13/lib-dynload/_bisect.cpython-313-aarch64-linux-gnu.so|c1935e52815bbeb478d2f97037b9b4d615735688cb0f0d98d41489771831eb45|key
+linux/arm64|usr/local/lib/python3.13/lib-dynload/_blake2.cpython-313-aarch64-linux-gnu.so|0d64ecbbb59f84cb89f03ecce00546dfe3af0b0acb1bb69a5b3c868ec9db2f5a|key
+linux/arm64|usr/local/lib/python3.13/lib-dynload/_ssl.cpython-313-aarch64-linux-gnu.so|40958d71011666176cd49eec9541e8cf945a59fff803e32ed818201e6bdeccfc|password
+linux/arm64|usr/local/lib/python3.13/lib-dynload/_testinternalcapi.cpython-313-aarch64-linux-gnu.so|e5eba77f5329236282b7b5702f34860c4912d48b32f8eca670891bceb517561e|key
+linux/arm64|usr/local/lib/python3.13/lib-dynload/_testlimitedcapi.cpython-313-aarch64-linux-gnu.so|34972ab94fce264df466aec7186ad7d490e2361a64ec45c13c5b8a9bada6246d|key
+linux/arm64|usr/local/lib/python3.13/lib-dynload/_zoneinfo.cpython-313-aarch64-linux-gnu.so|e47979dd85142bc935b7d22a407deb47158949cc7997f13997060dd53aeed413|key
+linux/arm64|usr/sbin/groupadd|82c9c3b90b84eff2b8db5661b9e6b1f3477f6d072320dc19f7378c5657ce9285|KEY
+linux/arm64|usr/sbin/update-passwd|058c54987dd2415faae2cc638bf9e57bd86d7011d55863727aaeaa71c4ba9ed8|passwd,passwd-entry
+linux/arm64|usr/sbin/useradd|ffaf805bf21df9095643578dfaf06a7b0420502aad01eb5a2c61d14f8409952e|KEY
+linux/amd64|usr/bin/findmnt|c20246863774b36e928b0447bd255fac51925d60c123ac187b7c1a5ccf8f3eb3|key
+linux/amd64|usr/bin/getent|1a8ece7c471cf0782699fbcbeaa10a21b6b6c9b7f775724c843144117fa85f5f|database
+linux/amd64|usr/bin/gpgv|e82416f3ae002b63c0731f311519c55fc9e7d3c8bdadbd64239833298f09a2cf|cache_public_key,encode_session_key,key,ret_found_key,secret
+linux/amd64|usr/bin/localedef|23c436bbc2924bfc98e95f7f0084dbdd8020039dbb96fe67b6485f65150a1a84|last_token
+linux/amd64|usr/bin/lsblk|37c411674a512a38473f625b93a43914a540834fa5671916b0baa0475d2df3d0|key
+linux/amd64|usr/bin/lsfd|86d85b4cd89da4d1313cd3fb72e35e025614359fcee4336b8643d4743dd894fb|token
+linux/amd64|usr/bin/lsirq|790e1459772d1747da63350d978c5475bdf5316cb18d22749a6b79d8a142687d|key
+linux/amd64|usr/bin/lsmem|e4960401262f9ae0a596c54e5fb1a953fe2727ec368126c8d6f6beeb244919cc|key
+linux/amd64|usr/bin/openssl|b2eca5aab93387bfd865ba65df16b904458229093a380bf03f391b1e10658304|key
+linux/amd64|usr/bin/partx|c492c820371ab8bb9e1afc91e9df2866b78c0ee7ca86ec5801f212a632e144f2|key
+linux/amd64|usr/bin/passwd|d30cd42625b51cb54c49edc5b0b3348d6a438539446af3752a6af10393c4f2d2|passwd
+linux/amd64|usr/bin/perl|f01fa7776dc21c9e4b5f60b2d231ca4d96dab958b8d06aff611cb1c16f871574|MG_PRIVATE,PRIVATE
+linux/amd64|usr/bin/ssh|04f2ff5f506a3f332e7adeb1478a4c551ae74acdd328e6fb5c2495664d4064e6|input_userauth_passwd_changereq,key,ssh,ssh_selinux_getctxbyname,token
+linux/amd64|usr/bin/ssh-add|1e02d3fca3c8d72570c11ded9681dcacd4775a33560786a27c489b9e4388ec06|key,ssh_selinux_getctxbyname,sshkey_write
+linux/amd64|usr/bin/ssh-agent|165e70f42cf6a147ae2101fae05a4503791d95ac9de7cca7974577316d963829|AUTH_SOCKET,key
+linux/amd64|usr/bin/ssh-keygen|2843cd46c617cf771c32e6f8a2a11585d83510ec528e3aeff8f7a7f0445420ba|key,ssh,ssh_selinux_getctxbyname
+linux/amd64|usr/bin/ssh-keyscan|9475d0851a26a4f494dc7d40240b68b04874543cbd30f54195ff9af055aaf848|ssh_selinux_getctxbyname
+linux/amd64|usr/lib/apt/methods/http|84b045df697f0b111ed712f64f30009b5c02218e96d3a65f8e76c7bbb6481f96|Proxy-Authorization
+linux/amd64|usr/lib/x86_64-linux-gnu/libc.so.6|6b4a45352fd0c540a9c7c718f35ce8c8e46a4e482f9d3885a910c32d1a0e1421|auth_unix.c
+linux/amd64|usr/lib/x86_64-linux-gnu/libcrypto.so.3|72db1b3de8b7dfbaba4c056135f408da555f9d5e137c82129478e07e769f8070|Private-Key,Proxy-Authorization,Public-Key,recommended-private-length
+linux/amd64|usr/lib/x86_64-linux-gnu/libdb-5.3.so|3601dc1fc553a861cee3f969d9a384e0b157dcddc75e59c4efcd08ee836c601f|database,key
+linux/amd64|usr/lib/x86_64-linux-gnu/libext2fs.so.2.4|dc840deeb5e4348fc46b8390527359309b230b53329cae237d2cc95f77699380|key.dptr,key_len
+linux/amd64|usr/lib/x86_64-linux-gnu/libfido2.so.1.12.0|07d78f307e9509e9c46ad8a35d80360db2c8d20d54f776f33617431ba87e5587|key,key_len
+linux/amd64|usr/lib/x86_64-linux-gnu/libgcrypt.so.20.4.1|14d0ad938ee07d31ad774567059ac3bb1139e692c6ad21a1450785e880eeb1e8|check_secret_key
+linux/amd64|usr/lib/x86_64-linux-gnu/libgnutls.so.30.34.3|779b25d20249988bea2c1aa6bbeb218f5ae7ea8a9d30ce4f54ea37372965cc4b|get_challenge_password,get_key_usage,get_private_key_usage_period,get_subject_key_id,gnutls_x509_ext_import_authority_key_id,gnutls_x509_ext_import_key_purposes,gnutls_x509_key_purpose_get,gnutls_x509_key_purpose_init,key,password
+linux/amd64|usr/lib/x86_64-linux-gnu/libkrb5.so.3.3|47b51d738881cbab3825dfcf8eb69fc64922a60d67609bb55b3f46e69276d572|key
+linux/amd64|usr/lib/x86_64-linux-gnu/libnsl.so.1|60d61ad427637c39f7ad032b08eb97039eef67728f05cad4bc9a458904dbe68c|auth_name,auth_type
+linux/amd64|usr/lib/x86_64-linux-gnu/libsqlite3.so.0.8.6|2e6eef9a727f081f0d453b4e5e6cbd8b9ef8b6f86cbf7681cbad444d3b0b55c8|database,key,token
+linux/amd64|usr/lib/x86_64-linux-gnu/libssl.so.3|9aec161fdbc82d3e4280f5084843118939f1f4acc53c98ec963de03cfe812fad|secret
+linux/amd64|usr/lib/x86_64-linux-gnu/libsystemd.so.0.35.0|3880319ae776b622ad3c89201984065905d10271f78ef3a4db2ee0604a61256b|key,p.b.key
+linux/amd64|usr/lib/x86_64-linux-gnu/libudev.so.1.7.5|99a5e38f8b45ec2729e5bc24d2d8e2f04d260a2455431a1f9d61f500b31060dd|key,p.b.key
+linux/amd64|usr/lib/x86_64-linux-gnu/security/pam_unix.so|f4ef9b05d76c72ff807e82929e745ae34e769f0caab1e357163ebc63eb1621b1|pam_unix_auth
+linux/amd64|usr/local/bin/collector|63d0152d9c0869cb5d7aeebf0c7a0017a20809db978daecf48844baf466d3463|key,key_sharebufio.Scanner,readage-renameBORG_REPO,stringBORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK
+linux/amd64|usr/local/lib/libpython3.13.so.1.0|1c99db6c082a0ff2acb4af8b87dc6b43349056ee22dfc573bd7353ffd05fc8ef|key,pwd.struct_passwd
+linux/amd64|usr/local/lib/python3.13/lib-dynload/_bisect.cpython-313-x86_64-linux-gnu.so|ab1941e87f927eed2683dd5a84166d403b5678ae0131ac79869cf62f8ca7bf53|key
+linux/amd64|usr/local/lib/python3.13/lib-dynload/_blake2.cpython-313-x86_64-linux-gnu.so|c6e5cffe5c51f94349f372afba720ea96a9712ac2034130eae1a820517c5b5e3|key
+linux/amd64|usr/local/lib/python3.13/lib-dynload/_ssl.cpython-313-x86_64-linux-gnu.so|d298b3f52be4313e30205871ae60fbaad8ebdd9d82b70e2d0a5a946879552ef5|password
+linux/amd64|usr/local/lib/python3.13/lib-dynload/_testinternalcapi.cpython-313-x86_64-linux-gnu.so|f96713e47308c325fc70c5b972d1415c1e75a88f05cc534b80a9f8827e87967a|key
+linux/amd64|usr/local/lib/python3.13/lib-dynload/_testlimitedcapi.cpython-313-x86_64-linux-gnu.so|ea1ad228552abbb4119fcf20bea8ae281df058b4e608d62eca4dbf6c53b1a876|key
+linux/amd64|usr/local/lib/python3.13/lib-dynload/_zoneinfo.cpython-313-x86_64-linux-gnu.so|386f7826aeb220d1505a7c7dea820fbc16752e88651d50465a083ae5d8aa533b|key
+linux/amd64|usr/sbin/groupadd|8261929420f9eb93885df8a8dee887005b72ee0d373141e224722cd5618617c1|KEY
+linux/amd64|usr/sbin/update-passwd|565e3e900a4b6d2a1359e803a5d644c5096692b6e31077c352da4f833f2f553f|passwd,passwd-entry
+linux/amd64|usr/sbin/useradd|a4019d514585c2c4b9c6be4bc97e6983d910a41956da428cc744577e72cdc5ff|KEY
+"""
+REVIEWED_PLATFORM_BINARY_ASSIGNMENTS = {"linux/arm64": {}, "linux/amd64": {}}
+for line in _REVIEWED_PLATFORM_BINARY_ASSIGNMENTS.splitlines():
+    if not line:
+        continue
+    platform, path, digest, keys = line.split("|", 3)
+    REVIEWED_PLATFORM_BINARY_ASSIGNMENTS[platform][path] = {
+        digest: frozenset(keys.split(",")),
+    }
+del _REVIEWED_PLATFORM_BINARY_ASSIGNMENTS
 AGE_PRIVATE_IDENTITY = re.compile(rb"(?:^|[\x00\r\n])AGE-SECRET-KEY-1[0-9A-Z]+(?:$|[\x00\r\n])")
 LINK_AGE_PRIVATE_IDENTITY = re.compile(rb"AGE-SECRET-KEY-1[0-9A-Z]+")
 PROHIBITED_PATH = re.compile(
@@ -812,7 +926,7 @@ def nul_private_record_allowed(data, path, match):
     return digest in ALLOWED_NUL_PRIVATE_RECORD_SHA256.get(normalized_path, ())
 
 
-def check_file_contents(data, path, location="exported regular file"):
+def check_file_contents(data, path, platform=None, location="exported regular file"):
     for sentinel in SAFE_SENTINELS:
         require(sentinel.encode() not in data, f"safe secret sentinel found in {location}: {path}")
     for header in PRIVATE_HEADERS:
@@ -835,10 +949,14 @@ def check_file_contents(data, path, location="exported regular file"):
     current_record_digest = None
     normalized_assignment_path = NUL_ASSIGNMENT_PATH_NORMALIZATION.get(path, path)
     reviewed_assignment_hashes = ALLOWED_NUL_ASSIGNMENT_RECORD_SHA256.get(normalized_assignment_path, {})
+    platform_path_hashes = REVIEWED_PLATFORM_BINARY_ASSIGNMENTS.get(platform, {}).get(path)
+    file_digest = None
     for match in ASSIGNMENT_BYTES.finditer(data):
         key = match.group(1).decode("ascii", errors="ignore")
         if not sensitive_assignment_key(key):
             continue
+        if platform_path_hashes is not None and file_digest is None:
+            file_digest = hashlib.sha256(data).hexdigest()
         while current_record is not None and match.start() >= current_record[1]:
             current_record = next(record_bounds, None)
             current_record_digest = None
@@ -848,6 +966,10 @@ def check_file_contents(data, path, location="exported regular file"):
                 if current_record_digest is None:
                     current_record_digest = hashlib.sha256(data[current_record[0]:current_record[1]]).hexdigest()
                 if current_record_digest in allowed_hashes:
+                    continue
+            if platform_path_hashes is not None:
+                allowed_keys = platform_path_hashes.get(file_digest, ())
+                if key in allowed_keys:
                     continue
         elif runtime_assignment_allowed(path, key):
             continue
@@ -893,7 +1015,8 @@ def check_link_target(member, path, location):
     check_link_contents(target, path, location)
 
 
-def check_filesystem(archive_path):
+def check_filesystem(archive_path, platform):
+    require(platform in ALLOWED_IMAGE_PLATFORMS, "exported filesystem platform is not approved")
     scanned = 0
     try:
         archive = tarfile.open(archive_path)
@@ -926,10 +1049,11 @@ def check_filesystem(archive_path):
             require(extracted is not None, f"cannot read exported regular file: {path}")
             data = extracted.read(MAX_FILE_SCAN_BYTES + 1)
             require(len(data) == member.size, f"cannot completely scan exported regular file: {path}")
-            check_file_contents(data, path)
+            check_file_contents(data, path, platform)
 
 
-def check_layers(image_save_path):
+def check_layers(image_save_path, platform):
+    require(platform in ALLOWED_IMAGE_PLATFORMS, "saved image layers platform is not approved")
     scanned = 0
     try:
         image_save = tarfile.open(image_save_path)
@@ -972,7 +1096,7 @@ def check_layers(image_save_path):
                     require(extracted is not None, f"cannot read image-layer regular file: {path}")
                     data = extracted.read(MAX_FILE_SCAN_BYTES + 1)
                     require(len(data) == member.size, f"cannot completely scan image-layer regular file: {path}")
-                    check_file_contents(data, path)
+                    check_file_contents(data, path, platform, "image-layer regular file")
 
 
 DATA_DIRECTORIES = (
@@ -1057,12 +1181,15 @@ def main(argv):
     elif command == "metadata":
         require(len(argv) == 6, "metadata check arguments are invalid")
         check_metadata(argv[2], argv[3], argv[4], argv[5])
+    elif command == "platform":
+        require(len(argv) == 3, "platform check arguments are invalid")
+        print(image_platform(argv[2]))
     elif command == "filesystem":
-        require(len(argv) == 3, "filesystem check arguments are invalid")
-        check_filesystem(argv[2])
+        require(len(argv) == 4, "filesystem check arguments are invalid")
+        check_filesystem(argv[2], argv[3])
     elif command == "layers":
-        require(len(argv) == 3, "layers check arguments are invalid")
-        check_layers(argv[2])
+        require(len(argv) == 4, "layers check arguments are invalid")
+        check_layers(argv[2], argv[3])
     elif command == "layout":
         require(len(argv) == 5, "layout check arguments are invalid")
         check_layout(argv[2], int(argv[3]), int(argv[4]))

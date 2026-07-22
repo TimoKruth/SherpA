@@ -1302,3 +1302,114 @@ self-review probes passed: first/middle/final complete records=3 unterminated_ta
 The exact diff was reviewed for complete-record classification, broad textual allowlist preservation, exact binary-gate isolation, multiple matches per record, one-hash caching, monotonic iteration, bounded memory/time behavior, and diagnostic disclosure. No concern or requirement deviation remains.
 
 No image rebuild, final Docker smoke, Go suite, race suite, VPS, Railway, Traefik, Hetzner, Storage Box, or external infrastructure operation was performed. Task 10 is not marked complete; the final exact-commit Docker build/smoke remains pending after commit and independent review.
+
+# Task 10 Platform-Aware Reviewed Binary Manifest Fix
+
+## Scope and starting point
+
+This correction started from exact commit `52c4993b3e703d1f5c96686386314d19fc34425c`. It converts the supplied reviewed arm64 and amd64 merged-filesystem and saved-layer collision evidence into a checked-in, platform-aware static assignment policy. It supports exactly `linux/arm64` and `linux/amd64`, includes the exact per-platform `usr/local/bin/collector` artifacts, and leaves the existing msgpack record exception and libgnutls private-record exception unchanged.
+
+The source evidence was limited to:
+
+- `/tmp/sherpa-arm64-collisions.json`
+- `/tmp/sherpa-amd64-collisions.json`
+- `/tmp/sherpa-arm64-layer-collisions.json`
+- `/tmp/sherpa-amd64-layer-collisions.json`
+
+No manifest entry was generated from a new build or from the image under test. A separate exact comparison after implementation confirmed 43 path/hash/key entries for each platform against both the reviewed merged-filesystem evidence and the reviewed saved-layer evidence.
+
+## Strict RED evidence
+
+Ten focused tests were added before production changes:
+
+- `test_platform_binary_manifest_contains_exact_reviewed_candidate_entries`
+- `test_platform_binary_assignments_are_accepted_directly_and_by_both_scanners`
+- `test_platform_binary_assignment_approval_is_exact_and_fail_closed`
+- `test_complete_nul_binary_record_cannot_use_broad_textual_source_allowlist`
+- `test_platform_binary_approval_cannot_bypass_earlier_content_gates`
+- `test_link_targets_never_consult_regular_file_platform_approvals`
+- `test_platform_binary_whole_file_hash_is_lazy_and_once_per_candidate_call`
+- `test_modified_lower_layer_is_rejected_before_approved_replacement`
+- `test_image_platform_requires_exact_nonsecret_inspect_metadata`
+- `test_smoke_derives_and_passes_exact_image_platform_to_scanners`
+
+The exact focused command was:
+
+```text
+$ python3 deploy/collector/smoke_checks_test.py LeakageGateTests.test_platform_binary_manifest_contains_exact_reviewed_candidate_entries LeakageGateTests.test_platform_binary_assignments_are_accepted_directly_and_by_both_scanners LeakageGateTests.test_platform_binary_assignment_approval_is_exact_and_fail_closed LeakageGateTests.test_complete_nul_binary_record_cannot_use_broad_textual_source_allowlist LeakageGateTests.test_platform_binary_approval_cannot_bypass_earlier_content_gates LeakageGateTests.test_link_targets_never_consult_regular_file_platform_approvals LeakageGateTests.test_platform_binary_whole_file_hash_is_lazy_and_once_per_candidate_call LeakageGateTests.test_modified_lower_layer_is_rejected_before_approved_replacement LeakageGateTests.test_image_platform_requires_exact_nonsecret_inspect_metadata LeakageGateTests.test_smoke_derives_and_passes_exact_image_platform_to_scanners
+(exit nonzero)
+```
+
+The expected RED failures showed the missing feature rather than test setup defects: the static platform manifest and platform command did not exist; reviewed platform artifacts were rejected; the old `check_file_contents` interface did not accept platform identity; the filesystem and saved-layer scanners did not propagate platform identity; the smoke script did not derive the image platform; and lazy candidate whole-file hash call counts were not met. Existing safety behavior already rejected several negative fixtures during RED, while the focused suite as a whole remained RED for the absent platform-aware approval path.
+
+## Implementation
+
+- Added exact Docker inspect platform derivation from `Os` and `Architecture`, accepting only `linux/arm64` and `linux/amd64` and rejecting malformed, missing, or other metadata without printing it.
+- Added an exact static mapping of platform to normalized literal path to whole-file SHA-256 to reviewed assignment keys. New entries use no regex, prefix, suffix, `<arch>`, or vendor-tree normalization.
+- Passed the validated platform to both merged-filesystem and saved-layer scanners; both scanner entry points also reject unsupported platform arguments directly.
+- Kept the check ordering unchanged: safe sentinels; private-key headers and the existing exact libgnutls NUL-record logic; age private identity; Authorization/standalone Bearer; then assignments.
+- Kept forward-only complete-NUL record classification. The existing msgpack exact path/key/record-digest gate remains first within complete records. The new binary gate additionally requires the exact platform, path, whole-file digest, and assignment key. Broad textual runtime/source allowlists remain available only outside complete NUL records.
+- Whole-file SHA-256 remains lazy: clean files and noncandidate platform/path pairs do not call it; a candidate file with one or more sensitive assignments calls it exactly once per file check, with no approval cache across calls, files, or layers.
+- Link target scanning remains independent and never consults regular-file platform approvals.
+- Saved layers continue to be scanned independently in order, so an unapproved lower-layer artifact fails before a later approved replacement can hide it.
+- Diagnostics remain limited to category, location, and normalized path; matched values and record bodies are never included.
+- Updated `smoke_build.sh` to derive the exact image platform from the existing inspect JSON and pass it to both scanners. The Dockerfile, Go source/literals, and mandated Borg 1.4.5 local-artifact installation block were not changed.
+
+During self-review, two test-strength issues were corrected without changing production behavior: acceptance now exercises the checked-in production `findmnt` path/hash/key entries for both platforms, and the unreviewed-key rejection now uses an exact approved whole-file digest while omitting only that sensitive key from the reviewed set.
+
+## GREEN evidence
+
+Fresh focused GREEN after the test-strength corrections:
+
+```text
+$ python3 deploy/collector/smoke_checks_test.py LeakageGateTests.test_platform_binary_manifest_contains_exact_reviewed_candidate_entries LeakageGateTests.test_platform_binary_assignments_are_accepted_directly_and_by_both_scanners LeakageGateTests.test_platform_binary_assignment_approval_is_exact_and_fail_closed LeakageGateTests.test_complete_nul_binary_record_cannot_use_broad_textual_source_allowlist LeakageGateTests.test_platform_binary_approval_cannot_bypass_earlier_content_gates LeakageGateTests.test_link_targets_never_consult_regular_file_platform_approvals LeakageGateTests.test_platform_binary_whole_file_hash_is_lazy_and_once_per_candidate_call LeakageGateTests.test_modified_lower_layer_is_rejected_before_approved_replacement LeakageGateTests.test_image_platform_requires_exact_nonsecret_inspect_metadata LeakageGateTests.test_smoke_derives_and_passes_exact_image_platform_to_scanners
+Ran 10 tests in 1.116s
+OK
+```
+
+Fresh complete scanner verification in all required modes:
+
+```text
+$ python3 deploy/collector/smoke_checks_test.py
+Ran 76 tests in 32.711s
+OK
+
+$ PYTHONOPTIMIZE=1 python3 deploy/collector/smoke_checks_test.py
+Ran 76 tests in 31.548s
+OK
+
+$ python3 -I -O deploy/collector/smoke_checks_test.py
+Ran 76 tests in 31.268s
+OK
+```
+
+Static and evidence verification:
+
+```text
+$ bash -n deploy/collector/smoke_build.sh
+(exit 0; no output)
+
+$ git diff --check
+(exit 0; no output)
+
+$ <exact manifest comparison against both reviewed merged-filesystem evidence files>
+linux/arm64: exact reviewed manifest match (43 paths)
+linux/amd64: exact reviewed manifest match (43 paths)
+
+$ <exact manifest comparison against both reviewed saved-layer evidence files>
+linux/arm64: exact reviewed layer manifest match (43 paths)
+linux/amd64: exact reviewed layer manifest match (43 paths)
+```
+
+## Changed files, self-review, and pending controller gate
+
+Changed files:
+
+- `deploy/collector/smoke_checks.py`
+- `deploy/collector/smoke_checks_test.py`
+- `deploy/collector/smoke_build.sh`
+- `.superpowers/sdd/task-10-report.md`
+
+The exact diff was reviewed for bypasses, overbroad paths, platform ambiguity, repeated hashing, CLI argument mismatches, link-approval coupling, lower-layer replacement behavior, accidental data disclosure, unrelated edits, and changes to the msgpack, libgnutls, Dockerfile, Go, or Borg behavior. The three untracked `.DS_Store` files remain untouched.
+
+The full Docker smoke was intentionally not run because exact source construction ignores uncommitted code; the controller must run it after this commit. No Docker daemon image/container mutation, Go suite, race suite, VPS, Railway, Traefik, Hetzner, Storage Box, or other external infrastructure operation was performed. Task 10 and shared Task 79 are not marked complete, and `progress.md` was not edited.

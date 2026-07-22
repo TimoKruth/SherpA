@@ -145,13 +145,14 @@ configured_user="$(docker image inspect --format '{{.Config.User}}' "$image")"
 docker image inspect "$image" >"$work_dir/image.inspect.json"
 docker history --no-trunc --format '{{.CreatedBy}}' "$image" >"$work_dir/image.history"
 python3 -I "$source_dir/deploy/collector/smoke_checks.py" metadata "$work_dir/image.inspect.json" "$work_dir/image.history" "$source_url" "$source_revision"
+image_platform="$(python3 -I "$source_dir/deploy/collector/smoke_checks.py" platform "$work_dir/image.inspect.json")"
 
 progress "Export and scan complete image filesystem"
 docker create --name "$inspect_container" "$image" >/dev/null
 docker export "$inspect_container" >"$work_dir/image.tar"
-python3 -I "$source_dir/deploy/collector/smoke_checks.py" filesystem "$work_dir/image.tar"
+python3 -I "$source_dir/deploy/collector/smoke_checks.py" filesystem "$work_dir/image.tar" "$image_platform"
 docker image save "$image" >"$work_dir/image.save.tar"
-python3 -I "$source_dir/deploy/collector/smoke_checks.py" layers "$work_dir/image.save.tar"
+python3 -I "$source_dir/deploy/collector/smoke_checks.py" layers "$work_dir/image.save.tar" "$image_platform"
 docker run --rm --entrypoint /bin/sh "$image" -ceu '
   for command in go gcc cc clang make cmake pkg-config curl git fusermount fusermount3; do
     ! command -v "$command" >/dev/null 2>&1

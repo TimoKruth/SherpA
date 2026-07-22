@@ -19,6 +19,7 @@ SMOKE = HERE / "smoke_build.sh"
 MAKEFILE = ROOT / "Makefile"
 REVISION = "a" * 40
 SOURCE_URL = "https://github.com/TimoKruth/SherpA"
+DEFAULT_PLATFORM = "linux/arm64"
 APPROVED_ENV = [
     "PATH=/opt/borg/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
@@ -34,6 +35,9 @@ CHECKS_SPEC.loader.exec_module(CHECKS_MODULE)
 
 
 def run_checks(*args, optimize=False):
+    args = list(args)
+    if args and args[0] in ("filesystem", "layers") and len(args) == 2:
+        args.append(DEFAULT_PLATFORM)
     command = [sys.executable, "-I"]
     if optimize:
         command.append("-O")
@@ -240,6 +244,250 @@ class LeakageGateTests(unittest.TestCase):
             return self.write_filesystem(root, path, body, member_type, linkname)
         return self.write_image_save(root, path, body, member_type, linkname)
 
+    def reviewed_platform_manifest(self, platform, path, body, keys):
+        return {
+            platform: {
+                path: {
+                    hashlib.sha256(body).hexdigest(): frozenset(keys),
+                },
+            },
+        }
+
+    def test_platform_binary_manifest_contains_exact_reviewed_candidate_entries(self):
+        manifest = CHECKS_MODULE.REVIEWED_PLATFORM_BINARY_ASSIGNMENTS
+        self.assertEqual(set(manifest), {"linux/arm64", "linux/amd64"})
+        self.assertEqual(len(manifest["linux/arm64"]), 43)
+        self.assertEqual(len(manifest["linux/amd64"]), 43)
+        self.assertEqual(
+            manifest["linux/arm64"]["usr/local/bin/collector"],
+            {
+                "e917ddad769cb4fad2334bcdffd69bf86bb710c18cb4595ff6f738189afe18e7": frozenset({
+                    "key",
+                    "key_sharebufio.Scanner",
+                    "readage-renameBORG_REPO",
+                    "stringBORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK",
+                }),
+            },
+        )
+        self.assertEqual(
+            manifest["linux/amd64"]["usr/local/bin/collector"],
+            {
+                "63d0152d9c0869cb5d7aeebf0c7a0017a20809db978daecf48844baf466d3463": frozenset({
+                    "key",
+                    "key_sharebufio.Scanner",
+                    "readage-renameBORG_REPO",
+                    "stringBORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK",
+                }),
+            },
+        )
+        for platform, expected_hash in (
+            ("linux/arm64", "ac1f580590b440a028e684b633589fd87e782f0c1a4b1937449edb33a41c7668"),
+            ("linux/amd64", "c20246863774b36e928b0447bd255fac51925d60c123ac187b7c1a5ccf8f3eb3"),
+        ):
+            with self.subTest(platform=platform):
+                self.assertEqual(
+                    manifest[platform]["usr/bin/findmnt"],
+                    {expected_hash: frozenset({"key"})},
+                )
+                self.assertTrue(all("<arch>" not in path for path in manifest[platform]))
+
+    def test_platform_binary_assignments_are_accepted_directly_and_by_both_scanners(self):
+        path = "usr/bin/findmnt"
+        body = b"binary key=public-reference\x00"
+        reviewed_hashes = {
+            "linux/arm64": "ac1f580590b440a028e684b633589fd87e782f0c1a4b1937449edb33a41c7668",
+            "linux/amd64": "c20246863774b36e928b0447bd255fac51925d60c123ac187b7c1a5ccf8f3eb3",
+        }
+        for platform, reviewed_hash in reviewed_hashes.items():
+            with self.subTest(platform=platform), mock.patch.object(
+                CHECKS_MODULE.hashlib,
+                "sha256",
+            ) as sha256, tempfile.TemporaryDirectory() as temporary:
+                sha256.return_value.hexdigest.return_value = reviewed_hash
+                root = Path(temporary)
+                CHECKS_MODULE.check_file_contents(body, path, platform)
+                CHECKS_MODULE.check_filesystem(self.write_filesystem(root, path, body), platform)
+                CHECKS_MODULE.check_layers(self.write_image_save(root, path, body), platform)
+                self.assertEqual(sha256.call_count, 3)
+
+    def test_platform_binary_assignment_approval_is_exact_and_fail_closed(self):
+        path = "usr/bin/findmnt"
+        platform = "linux/arm64"
+        body = b"binary key=public-one secret=public-two\x00"
+        manifest = self.reviewed_platform_manifest(platform, path, body, {"key"})
+        rejected = (
+            (platform, "usr/bin/moved-findmnt", body, "key", "moved path"),
+            (platform, path, body[:-2] + b"X\x00", "key", "modified body"),
+            ("linux/riscv64", path, body, "key", "unknown platform"),
+            ("linux/amd64", path, body, "key", "wrong platform"),
+            (platform, path, body, "secret", "unreviewed key"),
+        )
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "REVIEWED_PLATFORM_BINARY_ASSIGNMENTS",
+            manifest,
+            create=True,
+        ):
+            for inspected_platform, inspected_path, inspected_body, _, case in rejected:
+                with self.subTest(case=case):
+                    with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                        CHECKS_MODULE.check_file_contents(inspected_body, inspected_path, inspected_platform)
+                    diagnostic = str(failure.exception)
+                    self.assertIn("secret-like assignment", diagnostic)
+                    self.assertIn(inspected_path, diagnostic)
+                    self.assertNotIn("public-one", diagnostic)
+                    self.assertNotIn(inspected_body.decode("ascii"), diagnostic)
+
+    def test_complete_nul_binary_record_cannot_use_broad_textual_source_allowlist(self):
+        path = "usr/local/lib/python3.13/http/server.py"
+        body = b"binary authorization=public-reference\x00"
+        with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+            CHECKS_MODULE.check_file_contents(body, path, DEFAULT_PLATFORM)
+        self.assertIn("secret-like assignment", str(failure.exception))
+        self.assertIn(path, str(failure.exception))
+        self.assertNotIn("public-reference", str(failure.exception))
+
+    def test_platform_binary_approval_cannot_bypass_earlier_content_gates(self):
+        platform = "linux/arm64"
+        path = "usr/bin/findmnt"
+        fixtures = {
+            "sentinel": (b"key=public\x00safe-review-file-sentinel", "safe secret sentinel"),
+            "private": (b"key=public\x00-----BEGIN PRIVATE KEY-----\npayload\n", "private-key material"),
+            "age": (b"key=public\x00AGE-SECRET-KEY-1TESTFIXTURE\n", "age private identity"),
+            "bearer": (b"key=public\x00Authorization: Bearer private-value\n", "bearer credential"),
+        }
+        for case, (body, expected) in fixtures.items():
+            manifest = self.reviewed_platform_manifest(platform, path, body, {"key", "Authorization"})
+            with self.subTest(case=case), mock.patch.object(
+                CHECKS_MODULE,
+                "REVIEWED_PLATFORM_BINARY_ASSIGNMENTS",
+                manifest,
+                create=True,
+            ):
+                with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                    CHECKS_MODULE.check_file_contents(body, path, platform)
+                self.assertIn(expected, str(failure.exception))
+                self.assertNotIn("private-value", str(failure.exception))
+
+    def test_link_targets_never_consult_regular_file_platform_approvals(self):
+        platform = "linux/arm64"
+        path = "usr/bin/findmnt"
+        target = b"key=private-link-value\x00"
+        manifest = self.reviewed_platform_manifest(platform, path, target, {"key"})
+        member = tarfile.TarInfo(path)
+        member.type = tarfile.SYMTYPE
+        member.linkname = target.decode("ascii")
+        original_sha256 = CHECKS_MODULE.hashlib.sha256
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "REVIEWED_PLATFORM_BINARY_ASSIGNMENTS",
+            manifest,
+            create=True,
+        ), mock.patch.object(CHECKS_MODULE.hashlib, "sha256", wraps=original_sha256) as sha256:
+            with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                CHECKS_MODULE.check_link_target(member, path, "fixture link target")
+        self.assertEqual(sha256.call_count, 0)
+        self.assertIn("secret-like assignment", str(failure.exception))
+        self.assertNotIn("private-link-value", str(failure.exception))
+
+    def test_platform_binary_whole_file_hash_is_lazy_and_once_per_candidate_call(self):
+        platform = "linux/arm64"
+        path = "usr/bin/findmnt"
+        accepted = b"key=public-one\x00token=public-two\x00"
+        rejected = b"key=public-one\x00secret=public-two\x00"
+        manifest = self.reviewed_platform_manifest(platform, path, accepted, {"key", "token"})
+        original_sha256 = CHECKS_MODULE.hashlib.sha256
+
+        cases = (
+            (b"public fixture\n", path, False, 0, "clean candidate"),
+            (accepted, "usr/bin/not-reviewed", False, 0, "noncandidate path"),
+            (accepted, path, True, 1, "accepted candidate"),
+            (rejected, path, False, 1, "rejected candidate"),
+        )
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "REVIEWED_PLATFORM_BINARY_ASSIGNMENTS",
+            manifest,
+            create=True,
+        ):
+            for body, inspected_path, accepted_case, expected_calls, case in cases:
+                hash_calls = 0
+
+                def counting_sha256(data=b""):
+                    nonlocal hash_calls
+                    hash_calls += 1
+                    return original_sha256(data)
+
+                with self.subTest(case=case), mock.patch.object(
+                    CHECKS_MODULE.hashlib,
+                    "sha256",
+                    side_effect=counting_sha256,
+                ):
+                    if accepted_case or not any(
+                        CHECKS_MODULE.sensitive_assignment_key(match.group(1).decode("ascii"))
+                        for match in CHECKS_MODULE.ASSIGNMENT_BYTES.finditer(body)
+                    ):
+                        CHECKS_MODULE.check_file_contents(body, inspected_path, platform)
+                    else:
+                        with self.assertRaises(CHECKS_MODULE.CheckFailure):
+                            CHECKS_MODULE.check_file_contents(body, inspected_path, platform)
+                self.assertEqual(hash_calls, expected_calls)
+
+    def test_modified_lower_layer_is_rejected_before_approved_replacement(self):
+        platform = "linux/arm64"
+        path = "usr/bin/findmnt"
+        approved = b"key=public-approved\x00"
+        modified = b"key=public-modified\x00"
+        manifest = self.reviewed_platform_manifest(platform, path, approved, {"key"})
+        with mock.patch.object(
+            CHECKS_MODULE,
+            "REVIEWED_PLATFORM_BINARY_ASSIGNMENTS",
+            manifest,
+            create=True,
+        ), tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            layers = [
+                [(path, modified, tarfile.REGTYPE, "")],
+                [(path, approved, tarfile.REGTYPE, "")],
+            ]
+            with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
+                CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers), platform)
+        self.assertIn("secret-like assignment", str(failure.exception))
+        self.assertIn(path, str(failure.exception))
+        self.assertNotIn("public-modified", str(failure.exception))
+
+    def test_image_platform_requires_exact_nonsecret_inspect_metadata(self):
+        invalid = (
+            ({}, "missing"),
+            ({"Os": "linux"}, "missing architecture"),
+            ({"Architecture": "arm64"}, "missing OS"),
+            ({"Os": "linux", "Architecture": "riscv64"}, "unknown architecture"),
+            ({"Os": "darwin", "Architecture": "arm64"}, "unknown OS"),
+            ({"Os": "linux-secret-marker", "Architecture": "amd64-secret-marker"}, "metadata leak"),
+        )
+        for metadata, case in invalid:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "inspect.json"
+                path.write_text(json.dumps([metadata]), encoding="utf-8")
+                result = run_checks("platform", path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("platform", result.stderr)
+                self.assertNotIn("secret-marker", result.stdout + result.stderr)
+
+        for architecture in ("arm64", "amd64"):
+            with self.subTest(architecture=architecture), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "inspect.json"
+                path.write_text(json.dumps([{"Os": "linux", "Architecture": architecture}]), encoding="utf-8")
+                result = run_checks("platform", path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), f"linux/{architecture}")
+
+    def test_smoke_derives_and_passes_exact_image_platform_to_scanners(self):
+        source = SMOKE.read_text(encoding="utf-8")
+        self.assertIn('image_platform="$(python3 -I "$source_dir/deploy/collector/smoke_checks.py" platform "$work_dir/image.inspect.json")"', source)
+        self.assertIn('smoke_checks.py" filesystem "$work_dir/image.tar" "$image_platform"', source)
+        self.assertIn('smoke_checks.py" layers "$work_dir/image.save.tar" "$image_platform"', source)
+
     def test_reviewed_msgpack_nul_records_require_exact_path_key_digest_and_terminator(self):
         normalized_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-<arch>-linux-gnu.so"
         arm64_path = "opt/borg/lib/python3.13/site-packages/msgpack/_cmsgpack.cpython-313-aarch64-linux-gnu.so"
@@ -347,7 +595,7 @@ class LeakageGateTests(unittest.TestCase):
                     with self.subTest(path=path, approved_digest=body is record), tempfile.TemporaryDirectory() as temporary:
                         root = Path(temporary)
                         with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
-                            CHECKS_MODULE.check_filesystem(self.write_filesystem(root, path, body))
+                            CHECKS_MODULE.check_filesystem(self.write_filesystem(root, path, body), DEFAULT_PLATFORM)
                         diagnostic = str(failure.exception)
                         self.assertIn("secret-like assignment", diagnostic)
                         self.assertIn(path, diagnostic)
@@ -386,7 +634,7 @@ class LeakageGateTests(unittest.TestCase):
                             layers = [benign_layer, benign_layer, benign_layer]
                             layers[layer_index] = [(path, body, tarfile.REGTYPE, "")]
                             with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
-                                CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers))
+                                CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers), DEFAULT_PLATFORM)
                             diagnostic = str(failure.exception)
                             self.assertIn("secret-like assignment", diagnostic)
                             self.assertIn(path, diagnostic)
@@ -444,9 +692,9 @@ class LeakageGateTests(unittest.TestCase):
             create=True,
         ), tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            CHECKS_MODULE.check_filesystem(self.write_filesystem(root, path, record))
+            CHECKS_MODULE.check_filesystem(self.write_filesystem(root, path, record), DEFAULT_PLATFORM)
             layers = [[(path, record, tarfile.REGTYPE, "")], [(path, record, tarfile.REGTYPE, "")], [(path, record, tarfile.REGTYPE, "")]]
-            CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers))
+            CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers), DEFAULT_PLATFORM)
 
             for layer_index in range(3):
                 with self.subTest(changed_layer=layer_index):
@@ -454,7 +702,7 @@ class LeakageGateTests(unittest.TestCase):
                     layers = [benign_layer, benign_layer, benign_layer]
                     layers[layer_index] = [(path, changed, tarfile.REGTYPE, "")]
                     with self.assertRaises(CHECKS_MODULE.CheckFailure) as failure:
-                        CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers))
+                        CHECKS_MODULE.check_layers(self.write_image_save_layers(root, layers), DEFAULT_PLATFORM)
                     diagnostic = str(failure.exception)
                     self.assertIn("secret-like assignment", diagnostic)
                     self.assertIn(path, diagnostic)
