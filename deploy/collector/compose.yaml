@@ -1,0 +1,47 @@
+services:
+  collector:
+    build:
+      context: ./source
+      dockerfile: deploy/collector/Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION}
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    cpus: "1.0"
+    mem_limit: 1g
+    expose:
+      - "8080"
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m
+    volumes:
+      - ./data:/data
+      - ./config/age-recipient:/run/config/age-recipient:ro
+      - ./config/known_hosts:/run/config/known_hosts:ro
+      - ./secrets/upload-token:/run/secrets/upload-token:ro
+      - ./secrets/storage-ssh-key:/run/secrets/storage-ssh-key:ro
+      - ./secrets/borg-repository:/run/secrets/borg-repository:ro
+    env_file:
+      - ./runtime.env
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/collector", "healthcheck", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.sherpa-collector.rule=Host(`sherpa-collector.kruth-support.de`)
+      - traefik.http.routers.sherpa-collector.entrypoints=websecure
+      - traefik.http.routers.sherpa-collector.tls=true
+      - traefik.http.routers.sherpa-collector.tls.certresolver=letsencrypt
+      - traefik.http.services.sherpa-collector.loadbalancer.server.port=8080
