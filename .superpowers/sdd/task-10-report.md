@@ -1488,4 +1488,26 @@ $ git diff --check
 (exit 0; no output)
 ```
 
-The Docker smoke was not rerun; the controller will rebuild and exercise the exact committed arm64 and amd64 candidates. No external infrastructure was accessed.
+The Docker smoke was not rerun by the focused fixer; the controller rebuilt and exercised both exact committed candidates after the independent review approved the correction. No external infrastructure was accessed by the fixer.
+
+# Task 10 Final Exact-Commit Docker Gates
+
+Both full smoke runs used source constructed by `git archive` from exact commit `0350c1d68972cda8a640cb6c6f64c18a3a6d00be`. Each run independently passed the pinned image build, both real BorgBackup 1.4.5 integration tests, rendered Compose contract, exact OCI identity, complete merged-filesystem scan, every saved-layer scan, archive verification, private bind-mounted data layout, local Borg create/list, health, and hardened Compose runtime checks.
+
+```text
+linux/arm64
+image=sha256:fa1e1a9047a51fb14b860dfe09862ea9488efacf6beb0128ca0a59f9b4db386c
+revision=0350c1d68972cda8a640cb6c6f64c18a3a6d00be
+TestBorgLocalRepositoryCreateAndExactPresence: PASS
+TestCollectorEndToEndWithLocalBorgRepository: PASS
+Collector Docker smoke: PASS
+
+linux/amd64
+image=sha256:67ccf46553575e676e1f7b1ec35b54e45d9d96c938d4d47f7a3c93b9b953e9f0
+revision=0350c1d68972cda8a640cb6c6f64c18a3a6d00be
+TestBorgLocalRepositoryCreateAndExactPresence: PASS
+TestCollectorEndToEndWithLocalBorgRepository: PASS
+Collector Docker smoke: PASS
+```
+
+The arm64 and amd64 image inspections both reported their exact requested platform and exact OCI revision. The three untracked `.DS_Store` files remained untouched. No VPS, Railway, Traefik, Hetzner Storage Box, repository, restoration, cleanup, prune, compact, or other external mutation was performed.
