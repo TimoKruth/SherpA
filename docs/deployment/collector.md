@@ -4,9 +4,9 @@ This runbook covers the SherpA off-site collector, its dedicated Storage Box rep
 retention, monitoring, incident response, and independent recovery. It contains no live
 credentials, private Storage Box identifiers, repository locations, or key material.
 
-## Append-Only Capability Result and Deployment Blocker
+## Append-Only Capability Result and Reduced-Model Decision
 
-The verified append-only capability result is **Blocked**:
+The strict Task 0 capability result remains **Blocked**:
 
 - the routine identity was unable to mutate the sacrificial repository through SFTP, SCP, or
   rsync;
@@ -17,47 +17,58 @@ The verified append-only capability result is **Blocked**:
 - nevertheless, the routine identity could logically delete an archive from the current
   manifest and create different content under the same archive name.
 
-That final behavior violates the required threat model. This is a fail-closed operational gate.
-While the status remains **Blocked**, do not contact, query, provision, configure, validate,
-build on, deploy to, restart, monitor, or otherwise mutate any Railway environment or resource,
-any VPS, or any Storage Box account, path, repository, snapshot, or service. This blanket ban
-includes authoritative repository initialization, all collector and non-collector live deployment
-work, credential installation, variable inspection or changes, uploads, restores, and every outage,
-queue, idempotency, retention, rollback, cleanup, or recovery drill.
+That final behavior still fails the original requirement that the routine identity cannot delete or
+recreate an archive. The current governing decision is **Reduced model approved**: the user
+explicitly selected the implementation plan's third outcome. This clears only the threat-model
+decision gate. It does not turn the strict capability result into a pass and authorizes no Railway,
+VPS, Storage Box, repository, deployment, restart, drill, maintenance, cleanup, outage, rollback,
+or other external action by itself.
 
-A fresh approval for an individual disruptive step does not override this gate. The gate clears
-only after the provider/restriction model changes and the complete capability exercise passes, or
-a separately approved threat-model change is documented by revising this runbook before any live
-action. No reduced model is currently approved. Only repository source work, documentation, and
-local-only validation through Task 12 may continue. No external acceptance or operational step may
-run while the gate is Blocked.
+The approved reduced model accepts these compensating controls together:
 
-The previously considered reduced model would depend on offline transaction rollback plus the
-maximum practical Storage Box snapshot schedule. It would not provide immutable archive names in
-the routine repository view and is not authorization to proceed.
+- forced BorgBackup 1.4 append-only routine access restricted to one dedicated repository;
+- no routine SFTP, SCP, or rsync mutation path;
+- the tested routine compact reclaimed no segments or bytes;
+- offline recovery-identity download plus transaction rollback recovered the original bytes;
+- the maximum practical automatic Storage Box snapshots as secondary, non-WORM protection; and
+- an offline recovery SSH identity and offline age private identity.
 
-The capability exercise did **not** test in-place remote repair, prune, compact, and restoration
-of append-only protection. Its recovery proof was an offline rollback of a repository download
-made with the recovery identity. Do not claim otherwise. At publication time, production remains
-empty and untouched: the authoritative repository is uninitialized and the collector is not
-deployed.
+This model does **not** provide immutable archive names. The routine identity can remove an archive
+from the current manifest view and reuse its name for different content. Operators must therefore
+review the expected ledger, deletion markers, transaction history, snapshots, and any archive-name
+reuse anomaly before every unrestricted maintenance operation. Stop and investigate any mismatch
+before prune, compact, repair, or another unrestricted write.
+
+The capability exercise did **not** prove native undelete, in-place remote recovery, or a complete
+repair/prune/compact cycle followed by restoration of append-only routine access. Its recovery proof
+was offline rollback of a recovery-identity repository download. Do not describe snapshots as WORM,
+do not claim immutable archive names, and do not claim that maintenance lifecycle was tested.
+
+Every existing fresh approval checkpoint remains mandatory. In particular, Task 13 still requires
+separate fresh approval before authoritative repository initialization or any VPS work; Railway
+work and restarts, drills, recovery resources, prune/compact, cleanup, outage, and rollback retain
+their own approvals. At publication time, production remains empty and untouched: the authoritative
+repository is uninitialized and the collector is not deployed.
 
 ## Candidate Binding
 
-At the time of this runbook update, the accepted collector code and image lineage is exactly:
+The last accepted collector code and image lineage remains:
 
 ```text
 0350c1d68972cda8a640cb6c6f64c18a3a6d00be
 ```
 
-The later branch revision `a066517d5b04e169a40b427056c13e7491c2df38` records evidence only;
-it is not a new collector image candidate. Task 12 must bind the final exact candidate before
-any deployment. Never build from an uncommitted working tree or infer the candidate from a
+Task 12 historically passed exact repository commit
+`e121df2623de4c2a1f52a1afdcd1155b0c518c2f`. This approval documentation changes `HEAD`, so that
+Task 12 result is historical evidence, not the final candidate. Rerun Task 12 on the new exact
+commit and bind that passing commit before Task 13 or any live acceptance. Do not call `e121df2`
+the final candidate afterward, and do not substitute the older code/image lineage for the required
+new exact-commit gate. Never build from an uncommitted working tree or infer the candidate from a
 branch name.
 
 ## Storage Box Sub-Account
 
-Create the authoritative resources only after the decision blocker above is cleared.
+Create the authoritative resources only after Task 12 has been rerun on the new exact commit and Task 13 receives its separate fresh deployment approval. The reduced-model decision alone authorizes neither initialization nor provisioning.
 
 - Use a dedicated Storage Box sub-account and a dedicated repository path used only by SherpA.
 - Do not share the sub-account with unrelated backups, interactive users, or automation.
@@ -77,9 +88,10 @@ materially different account or restriction is not evidence for the authoritativ
 Use separate identities with separate custody:
 
 - **Routine identity:** the only Storage Box private key persistently mounted on the collector
-  VPS. It is restricted to the approved Borg service and repository path. It must have no
-  unrestricted shell, SFTP, SCP, rsync, prune, delete, compact, or repository-initialization
-  role.
+  VPS. Force BorgBackup 1.4 append-only service access and restrict it to the one approved
+  repository. It must have no unrestricted shell, SFTP, SCP, rsync, repository-initialization, or
+  unrestricted-maintenance role. This restriction still permits logical Borg archive deletion and
+  archive-name reuse in the current manifest view; never describe it as immutable-name protection.
 - **Recovery identity:** unrestricted only to the dedicated recovery repository as needed for
   initialization, inspection, extraction, approved retention, and recovery. Keep it off
   Railway and off the persistent VPS. Load it temporarily only in a trusted recovery
@@ -128,9 +140,10 @@ replace the pin only after the provider change is authenticated. Never bypass th
 
 ## Borg Initialization
 
-This section is conditional on the deployment blocker being cleared. Initialize with the
-recovery identity, never the routine identity. The repository is unencrypted at the Borg layer
-because every payload is already encrypted with the offline age recipient.
+The reduced-model decision clears the threat-model choice but does not authorize initialization.
+Proceed only after the new exact commit passes Task 12 and Task 13 receives separate fresh approval.
+Initialize with the recovery identity, never the routine identity. The repository is unencrypted at
+the Borg layer because every payload is already encrypted with the offline age recipient.
 
 Prepare a mode-0700 recovery directory containing mode-0600 files for the repository location,
 recovery SSH key, and pinned known hosts. Every initialization, retention, list, check, and extract
@@ -167,9 +180,11 @@ the exact provider-supported restriction that passed the capability gate, then r
 against a sacrificial archive before allowing collector writes. Do not initialize first and
 promise to validate the restriction later.
 
-No reduced model is approved. Any future threat-model change must revise this gate and procedure
-before initialization; snapshots and offline transaction rollback must never be described as WORM
-or immutable archive-name protection.
+The approved reduced model requires the exact forced BorgBackup 1.4 append-only restriction and all
+listed compensating controls. Before initialization, confirm that the separate Task 13 approval
+explicitly accepts archive-name mutability and the untested maintenance lifecycle. Snapshots and
+offline transaction rollback must never be described as WORM, native undelete, or immutable
+archive-name protection.
 
 ## `/docker/SherpA-collector` Ownership and Modes
 
@@ -242,8 +257,8 @@ Require the built image's OCI revision to equal `SOURCE_REVISION`. Do not deploy
 short hash, locally modified checkout, or image whose revision cannot be proven.
 
 For rollback, obtain fresh approval, select a previously accepted exact collector revision, and
-retain `data/`, configuration, and every remote archive. The Task 0 gate must also be cleared; a
-rollback approval cannot authorize VPS work while it remains blocked.
+retain `data/`, configuration, and every remote archive. The reduced-model decision does not
+include rollback or VPS authorization; the rollback approval must explicitly cover that work.
 
 ```bash
 cd /docker/SherpA-collector
@@ -420,8 +435,10 @@ from a trusted environment and always requires fresh approval for unrestricted w
 
 ### 1. Private preflight and deletion-marker check
 
-The Task 0 gate must be cleared before this procedure. Create the private Borg state directories
-for this maintenance session before the first Borg command:
+The threat-model gate was cleared only by explicit approval of the reduced model; that approval does
+not authorize maintenance. Obtain the procedure's fresh unrestricted-write approval after the
+mandatory anomaly review below. Create the private Borg state directories for this maintenance
+session before the first Borg command:
 
 ```bash
 umask 077
@@ -487,9 +504,12 @@ compare them to the approved dry-run result.
 
 ### 4. Restore restrictions and remove credentials
 
-If a future provider/restriction passes the full threat model, reapply that exact routine
-restriction and repeat the capability checks before restarting collector writes. No reduced model
-is approved; do not substitute snapshot/offline-rollback controls for a passing restriction.
+Reapply the exact approved forced BorgBackup 1.4 append-only routine restriction and repeat the
+sacrificial capability checks before restarting collector writes. The first repair/prune/compact
+cycle followed by restoration of routine access remains an untested maintenance lifecycle: do not
+record it as proven merely because the original compact reclaimed no bytes or offline rollback
+worked. Stop if archive history, name mapping, restriction behavior, or recovery evidence differs
+from the approved reduced-model record.
 
 After verification, unset `BORG_REPO`, `BORG_RSH`, `BORG_CACHE_DIR`, `BORG_CONFIG_DIR`,
 `BORG_SECURITY_DIR`, and `BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK`, and terminate the recovery
@@ -505,10 +525,11 @@ Recovery must work without Railway and without the running collector. Use a trus
 machine with the recovery SSH identity, pinned host keys, the required offline age identity, and
 the exact accepted collector binary.
 
-The Task 0 gate must be cleared and the restore/recovery operation must have fresh approval before
-this procedure. Create a private recovery workspace and select the required object through the
-restricted local ledger. Keep the object identifier only in this mode-0700 workspace for command
-selection and comparisons; do not copy it into acceptance evidence:
+The threat-model gate was cleared only by the explicit reduced-model decision, which does not
+authorize a restore. The restore/recovery operation must have its own fresh approval before this
+procedure. Create a private recovery workspace and select the required object through the restricted
+local ledger. Keep the object identifier only in this mode-0700 workspace for command selection and
+comparisons; do not copy it into acceptance evidence:
 
 ```bash
 umask 077

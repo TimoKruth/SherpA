@@ -15,7 +15,7 @@
 - Railway project: `powerful-rebirth` (`865ca83b-9c9e-4e50-b424-e267aa43988f`).
 - Railway environment: `staging` (`53d89401-bec2-49a3-ac58-8dc93b29d049`).
 - Production remains empty and untouched.
-- The current accepted application/collector lineage is `0350c1d68972cda8a640cb6c6f64c18a3a6d00be`; local documentation-only commits do not change it. Task 12 must bind the final exact candidate before execution and update every candidate field if it changes.
+- The last accepted application/collector code and image lineage is `0350c1d68972cda8a640cb6c6f64c18a3a6d00be`. Task 12 historically passed exact repository commit `e121df2623de4c2a1f52a1afdcd1155b0c518c2f`, but the reduced-model approval documentation changes `HEAD`. Rerun Task 12 on the new exact commit before Task 13 or any live acceptance, then update every candidate field if it changes. `e121df2` is historical gate evidence, not the final candidate.
 - The local branch contains approved rollout documentation commits ahead of `origin/main`; do not push them merely to deploy the unchanged application.
 - Preserve the three unrelated untracked `.DS_Store` files; never add, delete, or commit them.
 - Never print or persist Railway variable values, database URLs, OAuth secrets, access tokens, device codes, grants, CSRF values, cookies, trial notes, request bodies, or private collector URLs.
@@ -24,10 +24,11 @@
 - A failed local preflight blocks provisioning. A failed Postgres deployment blocks registry. A failed 2c-iii gate blocks web. A failed 2d gate blocks 2e.
 - Before every deliberate outage, rollback, restore, temporary sibling/recovery resource, or cleanup of recovery resources, present the exact action, expected impact, rollback, and resources, then wait for operator approval.
 - If a code defect is discovered, stop this operational plan, invoke systematic-debugging and test-driven-development, create a focused regression test and permanent fix, run the complete local gate, push only the required fix commit, update the candidate commit in the evidence file, and resume at the blocked task.
-- Task 0 is conclusively **Blocked**: the tested routine Storage Box identity could logically delete a Borg archive and reuse its archive name. No reduced model is approved.
-- **FAIL CLOSED:** while Task 0 remains Blocked, no step may contact, query, provision, configure, validate, deploy, restart, monitor, or otherwise mutate any Railway environment or resource, any VPS, or any Storage Box account, path, repository, snapshot, or service. This blanket ban includes ordinary Railway inventory and status queries, not only collector-dependent work. No approval checkpoint in this plan overrides this gate.
-- The gate clears only after a changed provider/restriction model passes the complete capability exercise, or a separately approved threat-model change is documented in revised runbooks before execution. The previously considered reduced model relies on offline transaction rollback plus maximum practical snapshots, does not provide immutable archive names, and is not authorization to proceed. Task 0 proved offline rollback of a recovery-identity repository download, not in-place remote repair/prune/compact followed by restoration of append-only protection.
-- Only repository source work, documentation, and local-only validation through SDD Task 12 may continue. All external acceptance and operational procedures in this plan remain future instructions until the blanket gate is formally cleared. Their existing fresh-approval checkpoints remain mandatory after clearance and never override the blanket gate.
+- The strict Task 0 capability result remains **Blocked**: the tested routine Storage Box identity could logically delete a Borg archive and reuse its archive name.
+- The current governing decision is **Reduced model approved**, the collector implementation plan's explicit third outcome. The accepted controls are forced BorgBackup 1.4 append-only routine access restricted to one repository; no routine SFTP/SCP/rsync mutation path; zero reclaimed segments and bytes in the tested routine compact; byte-identical offline transaction rollback through the recovery identity; maximum practical automatic Storage Box snapshots as secondary, non-WORM protection; and offline recovery SSH and age private identities.
+- This explicit decision clears only the threat-model gate. It does not turn the strict capability result into a pass and authorizes no Railway, VPS, Storage Box, deployment, restart, drill, maintenance, cleanup, outage, rollback, or other external action by itself. Task 13 still requires separate fresh approval before authoritative repository initialization or VPS work. Every existing checkpoint in this plan remains mandatory.
+- The reduced model does not provide immutable archive names, WORM, native undelete, in-place remote recovery, or a tested repair/prune/compact cycle followed by restoration of append-only routine access. Review the expected ledger, deletion markers, archive-name mappings, transaction history, and snapshots before any unrestricted maintenance; stop on every unexplained deletion or history anomaly.
+- Do not begin live acceptance until Task 12 has been rerun on the new exact commit. After that local gate passes, external execution still requires its separate authorization, and each Railway change/restart, temporary interval, drill, recovery resource, cleanup, outage, rollback, or other stated checkpoint requires fresh approval at its existing boundary.
 - If the configured off-site collector cannot be proven durable and independently recoverable through recovery-only Borg extraction, offline age decryption, and `collector verify`, fail the gate. Do not substitute local container storage or another Railway volume.
 
 ## File Structure
@@ -49,11 +50,11 @@
 - Consumes: approved spec and existing authenticated Railway account.
 - Produces: current Railway CLI, Railway agent integration, verified local tools, `ACCEPT_ROOT` convention, and the evidence ledger used by every later task.
 
-**Task 0 blanket stop gate:** while Task 0 is Blocked, do not run any Task 1 command that
-contacts Railway, GitHub, an update service, a browser endpoint, or another external system. In
-particular, Steps 2 and 4 and the `gh auth status` portion of Step 3 are future procedures. Only
-offline local tool checks plus repository/documentation work may continue. No ordinary approval
-allows an external query.
+**Reduced-model approval boundary:** the explicit reduced-model decision removed the former Task 0
+blanket prohibition, but authorizes none of Task 1's external queries or changes. Rerun Task 12 on
+the new exact commit before live acceptance, and obtain separate authorization to begin this plan.
+Only then may Steps 2 and 4 and the `gh auth status` portion of Step 3 contact external systems; all
+later fresh approval checkpoints remain mandatory.
 
 - [ ] **Step 1: Verify the project root before any write**
 
@@ -389,11 +390,10 @@ Expected: evidence records a fully green exact-candidate preflight.
 - Consumes: green Task 2 and existing `postgres` service.
 - Produces: active PG16 service with one ready 5 GB volume at `/var/lib/postgresql/data`.
 
-**Task 0 blanket stop gate:** this entire live task is prohibited while Task 0 is Blocked. Do not
-query Railway inventory or status, provision or configure Postgres, create or inspect a volume,
-deploy or restart a service, open an SSH session, or record results derived from live access. Resume
-only after the global gate is formally cleared; every existing disruptive-action approval remains
-required afterward.
+**Reduced-model approval boundary:** the threat-model gate was cleared only by the explicit reduced-
+model decision, which authorizes none of this live task. Start only after the new exact commit passes
+Task 12 and separate live-plan execution is authorized. The volume-persistence redeploy still
+requires its fresh Step 7 approval; no earlier approval covers it.
 
 - [ ] **Step 1: Reconfirm no Postgres volume exists**
 
@@ -546,12 +546,10 @@ git commit -m $'docs: record Railway Postgres provisioning\n\nCo-Authored-By: Cl
 - Consumes: active Postgres, existing registry `/data` volume, two operator-controlled GitHub identities, and two source IPs.
 - Produces: healthy registry, two isolated CLI sessions, one published acceptance stack, verified auth controls, host pinning, and persistence across registry redeploy.
 
-**Task 0 blanket stop gate:** all live or external portions of this task are prohibited while Task 0
-is Blocked. Do not query or validate Railway variables, deployments, logs, domains, health, or
-service state; do not configure, deploy, restart, or SSH into the registry; and do not contact any
-live OAuth or staging endpoint. Only the exact-candidate auth/proxy tests may run separately as
-local-only validation without Railway or other external access. Resume the live task only after the
-global gate is formally cleared; every existing approval remains required afterward.
+**Reduced-model approval boundary:** the explicit reduced-model decision authorizes none of this
+live or external task. Start only after the new exact commit passes Task 12 and separate live-plan
+execution is authorized. The registry persistence redeploy still requires its fresh Step 11
+approval, and no general plan authorization replaces that checkpoint.
 
 - [ ] **Step 1: Verify required registry variable names without displaying values**
 
@@ -945,11 +943,11 @@ git commit -m $'docs: record initial registry staging gate\n\nCo-Authored-By: Cl
 - Consumes: passing Task 4, configured collector variables, published acceptance stack.
 - Produces: durable collector object, approved temporary recovery resources, restored Postgres and Git, passing audit and smoke tests.
 
-**Task 0 blanket stop gate:** every step in this task is prohibited while Task 0 is Blocked. Do not
-query or change Railway variables or state, restart/redeploy or SSH into the registry, alter
-collector availability, access the VPS or Storage Box, manipulate the queue, upload, extract,
-restore, provision temporary recovery resources, or clean up drill artifacts. No approval below
-overrides this gate; all fresh approvals remain required after the blanket gate is formally cleared.
+**Reduced-model approval boundary:** the explicit reduced-model decision authorizes none of this
+task. Begin only after the new exact commit passes Task 12, Task 13 separately authorizes and
+completes the collector deployment, and live-plan execution is separately authorized. Every
+interval change, queue drill, recovery operation/resource, and cleanup below still requires its own
+fresh approval at the stated boundary.
 
 - [ ] **Step 1: Save the existing export interval without displaying it**
 
@@ -1357,10 +1355,10 @@ Do not delete recovery resources yet; cleanup requires a separate explicit appro
 - Consumes: completed 2c-iii gate and healthy primary registry.
 - Produces: correctly sourced stateless website and passing public/API/header/responsive checks.
 
-**Task 0 blanket stop gate:** this entire live task is prohibited while Task 0 is Blocked. Do not
-query, connect, configure, deploy, restart, inspect, or test the Railway web service, and do not
-contact its public endpoint. Resume only after the global gate is formally cleared; any existing or
-new approval requirement still applies afterward.
+**Reduced-model approval boundary:** the explicit reduced-model decision authorizes none of this
+live task. Start only after the new exact commit passes Task 12, the preceding registry gate passes,
+and separate live-plan execution is authorized. Any existing or newly triggered approval requirement
+still applies at its stated boundary.
 
 - [ ] **Step 1: Connect the web service source**
 
@@ -1542,10 +1540,10 @@ git commit -m $'docs: record non-disruptive website staging gate\n\nCo-Authored-
 - Consumes: passing non-disruptive 2d checks.
 - Produces: proof that web stays healthy and degrades safely during registry outage, and that web/registry redeploy independently.
 
-**Task 0 blanket stop gate:** this entire live task, including requesting its outage approval, is
-prohibited while Task 0 is Blocked. Do not query, scale, deploy, restart, inspect, or test any
-Railway service or public endpoint. After the global gate is formally cleared, the fresh outage and
-redeploy approvals below are still mandatory and separate.
+**Reduced-model approval boundary:** the explicit reduced-model decision authorizes no outage,
+scale, deploy, restart, inspection, or endpoint test in this task. The task may be considered only
+after the new exact commit passes Task 12 and separate live-plan execution is authorized. The fresh
+outage and registry-redeploy approvals below remain mandatory and separate.
 
 - [ ] **Step 1: Request explicit approval to scale registry to zero temporarily**
 
@@ -1656,10 +1654,10 @@ git commit -m $'docs: record complete website staging gate\n\nCo-Authored-By: Cl
 - Consumes: passing 2c-iii and 2d gates, identity A CLI home, published stack, live web service.
 - Produces: verified browser session security, role boundaries, follow/update lifecycle, offline follow queue setup, and private trial behavior.
 
-**Task 0 blanket stop gate:** this entire live task is prohibited while Task 0 is Blocked. Do not
-query Railway evidence or state, open Playwright against live services, contact GitHub OAuth or
-staging endpoints, or perform any live CLI/API operation. Resume only after the global gate is
-formally cleared; all authentication and evidence controls remain required afterward.
+**Reduced-model approval boundary:** the explicit reduced-model decision authorizes no Railway,
+Playwright, GitHub OAuth, staging-endpoint, or live CLI/API operation in this task. Start only after
+the new exact commit passes Task 12, both prior live gates pass, and separate live-plan execution is
+authorized. All authentication, secret-safety, and evidence controls remain required.
 
 - [ ] **Step 1: Confirm both prior gates identify the same application candidate and domains**
 
@@ -1899,11 +1897,11 @@ git commit -m $'docs: record non-disruptive Phase 2e staging gate\n\nCo-Authored
 - Consumes: passing Task 8 and retained recovery resources from Task 5.
 - Produces: completed offline queue, outage/logout, restored social-data, separate web/registry rollback evidence, approved recovery cleanup, and final 34/34 gate status.
 
-**Task 0 blanket stop gate:** this entire live task, including requesting any outage, restore,
-rollback, or cleanup approval, is prohibited while Task 0 is Blocked. Do not query, scale, deploy,
-restart, inspect, restore, or delete any Railway resource; do not access the VPS or Storage Box; and
-do not contact live public endpoints. After the global gate is formally cleared, every fresh
-approval below remains mandatory at its stated boundary.
+**Reduced-model approval boundary:** the explicit reduced-model decision authorizes no outage,
+restore, rollback, cleanup, Railway operation, VPS or Storage Box access, or live endpoint contact in
+this task. Start only after the new exact commit passes Task 12, all preceding gates pass, and
+separate live-plan execution is authorized. Every fresh approval below remains mandatory at its
+stated boundary.
 
 - [ ] **Step 1: Request approval for the Phase 2e outage**
 
@@ -2011,8 +2009,9 @@ Expected: the queued follow syncs once and no duplicate follow is created.
 
 - [ ] **Step 3: Request approval and verify restored social/session data**
 
-This step is collector-dependent and must not be requested or executed while Task 0 is Blocked. The
-global gate must be formally cleared before the fresh approval below can be considered.
+The reduced-model decision clears only the threat-model gate and does not authorize this collector-
+dependent step. Request and execute it only after Task 12 passes the new exact commit, Task 13's
+separate deployment approval has been granted and completed, and the fresh approval below is given.
 
 Because Task 8 created follows, events, verdict feedback, grants, and sessions after the Task 5 archive, present this checkpoint:
 

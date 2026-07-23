@@ -8,21 +8,33 @@ secrets for staging and production.
 Production is not approved until the staging gate in this document has been recorded for
 the exact commit being promoted.
 
-## Fail-Closed Collector Capability Gate
+## Storage Model Decision and Execution Boundaries
 
-Task 0 is **Blocked** and no reduced threat model is approved. While that status remains, do not
-contact, query, provision, configure, validate, deploy, restart, monitor, or otherwise mutate any
-Railway environment or resource, any VPS, or any Storage Box account, path, repository, snapshot,
-or service. This blanket ban covers both collector-dependent and ordinary Railway work, all live
-acceptance steps, authoritative repository initialization, uploads, restores, and every outage,
-queue, idempotency, retention, rollback, cleanup, or recovery drill. A fresh approval for an
-individual action does not override this capability gate.
+The strict Task 0 capability result remains **Blocked**: the tested routine identity could logically
+delete a Borg archive and reuse its archive name. The current governing decision is
+**Reduced model approved**, the implementation plan's explicit third outcome. This decision accepts forced
+BorgBackup 1.4 append-only routine access restricted to one repository, no routine SFTP/SCP/rsync
+mutation path, zero reclaimed segments and bytes in the tested routine compact, byte-identical
+offline transaction rollback through the recovery identity, maximum practical automatic Storage
+Box snapshots as secondary non-WORM protection, and offline recovery SSH and age private identities.
 
-Only a provider/restriction change that passes the complete capability exercise, or a separately
-approved threat-model change documented in revised runbooks before execution, can clear the gate.
-Only repository source work, documentation, and local-only validation through Task 12 may continue.
-All Railway, VPS, and Storage Box commands below are future procedures and must not be executed
-while the gate is Blocked. Production remains empty and untouched.
+The approval clears only the threat-model decision gate. It does not convert the strict capability
+result to a pass and authorizes no Railway query or change, VPS work, authoritative repository
+initialization, Storage Box operation, deployment, restart, upload, restore, drill, cleanup,
+prune/compact, outage, or rollback by itself. Task 13 still requires separate fresh approval before
+authoritative repository initialization or VPS work, and every existing Railway or disruptive-action
+checkpoint below remains mandatory.
+
+The reduced model does not provide immutable archive names, WORM, native undelete, or proven
+in-place remote recovery. The repair/prune/compact lifecycle followed by restoration of append-only
+routine access remains untested. Review deletion markers, archive-name mappings, the expected ledger,
+transaction history, and snapshots before every unrestricted maintenance operation, and stop on any
+anomaly.
+
+Task 12 historically passed exact commit
+`e121df2623de4c2a1f52a1afdcd1155b0c518c2f`. This approval documentation changes `HEAD`; rerun
+Task 12 on the new exact commit before Task 13 or any live acceptance. The historical `e121df2` result is
+not the final candidate. Production remains empty and untouched.
 
 ## Platform Constraints
 
@@ -63,7 +75,7 @@ Record these values in the operator change ticket. Do not put secret values in t
 | Domains | Separate canonical staging and production HTTPS origins |
 | Recovery objectives | Approved RPO and RTO for Postgres and Git together |
 | Off-site collector | Provider, HTTPS endpoint, encryption, access owner, and restore access |
-| Retention | Immutable/off-site retention and deletion policy that satisfies the RPO |
+| Retention | Approved reduced-model off-site retention and deletion policy that satisfies the RPO without claiming immutable names or WORM |
 | Railway plan | Postgres limits/PITR availability, volume size, CPU, memory, and spend caps |
 | OAuth | Separate GitHub OAuth Apps with device flow enabled and exact registry callback URLs |
 | Operations | Alert destinations, on-call owner, and quarterly restore-drill owner |
@@ -200,8 +212,9 @@ real, root-owned volume mountpoint that is not writable by the registry UID; the
 alone precreates the queue beneath it as a real `0700` directory owned by the registry UID/GID.
 The scheduler validates that identity and holds a cooperative lock for its lifetime. Keep
 `numReplicas=1`, and do not run another registry, sidecar, shell, or job as the registry UID
-against the same queue. Collector retention is the authoritative off-site retention policy only
-after the blocked Storage Box posture receives an approved resolution.
+against the same queue. Collector retention becomes the authoritative off-site policy only after
+Task 12 passes the new exact commit, Task 13 receives separate fresh approval, and the complete
+approved reduced-model posture is deployed and verified.
 
 For a manual local archive in a container or recovery environment:
 
@@ -210,10 +223,11 @@ registry export /tmp/sherpa-manual.tar.gz
 ```
 
 This command packages but does not upload the archive. Do not treat a file left on the Railway
-container filesystem as a backup. The forced-upload procedure (`SHERPA_EXPORT_INTERVAL=1m`,
-redeploy, wait for a validated collector result, restore the interval) and every off-site restore
-drill are prohibited while the Task 0 gate is Blocked. After the gate is cleared, each interval
-change/redeploy and each restore drill still requires its own fresh disruptive-action approval.
+container filesystem as a backup. The reduced-model approval does not authorize the forced-upload
+procedure (`SHERPA_EXPORT_INTERVAL=1m`, redeploy, wait for a validated collector result, restore the
+interval) or an off-site restore drill. Each interval change/redeploy and each restore drill still
+requires its own fresh disruptive-action approval, after the new exact commit passes Task 12 and the
+collector has been separately authorized and deployed under Task 13.
 A successful upload is not proof of recoverability; perform and record an approved off-site restore
 drill at least quarterly and after any backup-format change.
 
@@ -239,9 +253,11 @@ Record the commit, environment, domain, timestamps, operator, and non-sensitive 
 for every step. Do not record collector archive/object IDs, tokens, or device codes. Keep any exact
 object identifier needed for an operational comparison only in a mode-0600 temporary workspace.
 
-The Task 0 gate must be cleared before any step that configures or starts the export scheduler,
-forces an upload, accesses the collector, or creates recovery resources. While Blocked, do not
-execute steps 9-10 or redeploy a registry whose configured scheduler would contact the collector.
+The threat-model gate was cleared only by the explicit reduced-model approval. That decision does
+not authorize any staging step. Before live acceptance, rerun Task 12 on the new exact commit and
+obtain the plan's separate execution and disruptive-action approvals. Steps 9-10, any registry
+redeploy whose scheduler contacts the collector, and any recovery-resource creation retain their
+specific fresh approval boundaries.
 
 1. Deploy the pinned commit with an empty staging Postgres database and empty Git volume.
 2. Confirm Railway activates only after `GET /healthz` returns `200`, and confirm the public
@@ -374,9 +390,10 @@ expand/migrate/contract plan and rollback gate before deployment.
 - Review Railway Postgres and Git-volume backup jobs and test restore availability monthly.
 - Run and record `registry audit` before cutover, after restore, and after suspected storage
   incidents. Missing content is always blocking.
-- After the Task 0 gate is cleared, run a separately approved complete off-site recovery drill at
+- Under the approved reduced model, run a separately approved complete off-site recovery drill at
   least quarterly. Rotate collector/admin secrets on the approved schedule and after any suspected
-  disclosure; collector-side rotations remain prohibited while Blocked.
+  disclosure; every collector-side rotation retains its own approval and must revalidate the forced
+  Borg restriction and compensating controls.
 - Never use credential values, device codes, session tokens, repository bodies, or database
   URLs as log fields or metric labels.
 
