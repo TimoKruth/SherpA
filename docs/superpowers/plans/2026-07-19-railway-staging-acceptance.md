@@ -15,7 +15,7 @@
 - Railway project: `powerful-rebirth` (`865ca83b-9c9e-4e50-b424-e267aa43988f`).
 - Railway environment: `staging` (`53d89401-bec2-49a3-ac58-8dc93b29d049`).
 - Production remains empty and untouched.
-- Application candidate is `origin/main` at `312479ee55539560936129db21bcec8da7b9827a` unless an application/configuration fix is required and pushed; local documentation-only commits do not change the deployed candidate.
+- The current accepted application/collector lineage is `0350c1d68972cda8a640cb6c6f64c18a3a6d00be`; local documentation-only commits do not change it. Task 12 must bind the final exact candidate before execution and update every candidate field if it changes.
 - The local branch contains approved rollout documentation commits ahead of `origin/main`; do not push them merely to deploy the unchanged application.
 - Preserve the three unrelated untracked `.DS_Store` files; never add, delete, or commit them.
 - Never print or persist Railway variable values, database URLs, OAuth secrets, access tokens, device codes, grants, CSRF values, cookies, trial notes, request bodies, or private collector URLs.
@@ -24,7 +24,9 @@
 - A failed local preflight blocks provisioning. A failed Postgres deployment blocks registry. A failed 2c-iii gate blocks web. A failed 2d gate blocks 2e.
 - Before every deliberate outage, rollback, restore, temporary sibling/recovery resource, or cleanup of recovery resources, present the exact action, expected impact, rollback, and resources, then wait for operator approval.
 - If a code defect is discovered, stop this operational plan, invoke systematic-debugging and test-driven-development, create a focused regression test and permanent fix, run the complete local gate, push only the required fix commit, update the candidate commit in the evidence file, and resume at the blocked task.
-- If the configured off-site collector cannot be proven durable and retrievable, fail the gate. Do not substitute local container storage or another Railway volume.
+- Task 0 is conclusively **Blocked**: the tested routine Storage Box identity could logically delete a Borg archive and reuse its archive name. The authoritative repository must not be initialized and Task 13 collector deployment must not proceed unless the provider/restriction model changes and passes the complete capability gate, or the user explicitly approves the documented reduced model. No reduced model is currently approved.
+- The reduced model is an available decision only: it relies on offline transaction rollback plus the maximum practical Storage Box snapshot schedule and does not provide immutable archive names in the routine view. Task 0 proved offline rollback of a recovery-identity repository download, not in-place remote repair/prune/compact followed by restoration of append-only protection.
+- If the configured off-site collector cannot be proven durable and independently recoverable through recovery-only Borg extraction, offline age decryption, and `collector verify`, fail the gate. Do not substitute local container storage or another Railway volume.
 
 ## File Structure
 
@@ -124,7 +126,7 @@ Create `docs/deployment/evidence/2026-07-20-railway-staging-acceptance.md` with 
 |---|---|
 | Project | `powerful-rebirth` |
 | Environment | `staging` |
-| Application candidate | `312479ee55539560936129db21bcec8da7b9827a` |
+| Application candidate | `0350c1d68972cda8a640cb6c6f64c18a3a6d00be` |
 | Registry domain | `https://registry-staging-78a5.up.railway.app` |
 | Website domain | `https://web-staging-c58d.up.railway.app` |
 | Operator | Timo Kruth |
@@ -288,7 +290,7 @@ git status --short --branch
 git diff --name-status origin/main..HEAD
 ```
 
-Expected: `origin/main` is `312479ee55539560936129db21bcec8da7b9827a`; every committed path after it is under `docs/`; only the three known `.DS_Store` files are untracked.
+Expected: `origin/main` is `0350c1d68972cda8a640cb6c6f64c18a3a6d00be`; every committed path after it is under `docs/`; only the three known `.DS_Store` files are untracked.
 
 - [ ] **Step 2: Create an exact-candidate source directory without changing branches**
 
@@ -299,7 +301,7 @@ ACCEPT_ROOT="$(mktemp -d /tmp/sherpa-railway-acceptance.XXXXXX)"
 chmod 700 "$ACCEPT_ROOT"
 printf '%s\n' "$ACCEPT_ROOT" >/tmp/sherpa-accept-root-current
 chmod 600 /tmp/sherpa-accept-root-current
-git archive 312479ee55539560936129db21bcec8da7b9827a | tar -x -C "$ACCEPT_ROOT"
+git archive 0350c1d68972cda8a640cb6c6f64c18a3a6d00be | tar -x -C "$ACCEPT_ROOT"
 printf '%s\n' "$ACCEPT_ROOT"
 ```
 
@@ -548,6 +550,7 @@ Expected names include:
 DATABASE_URL
 PORT
 SHERPA_CONTENT_DIR
+SHERPA_EXPORT_ARCHIVE_DIR
 SHERPA_EXPORT_INTERVAL
 SHERPA_EXPORT_TOKEN
 SHERPA_EXPORT_URL
@@ -558,7 +561,19 @@ SHERPA_TRUST_PROXY
 SHERPA_WEB_PUBLIC_BASE_URL
 ```
 
-`SHERPA_REGISTRY_TOKEN` is optional. Stop if any required name is absent.
+`SHERPA_REGISTRY_TOKEN` is optional. Stop if any required name is absent. After the registry is
+running, verify the required export values inside the service without printing them:
+
+```sh
+railway ssh \
+  --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+  --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+  --service d5d848e6-4655-4823-839f-0a2d1659bcb4 \
+  sh -lc 'test "$SHERPA_EXPORT_URL" = https://sherpa-collector.kruth-support.de/v1/exports && test "$SHERPA_EXPORT_ARCHIVE_DIR" = /data/exports && test -n "$SHERPA_EXPORT_TOKEN"'
+```
+
+Expected: exit 0. `SHERPA_EXPORT_TOKEN` is a Railway secret; never display, download, hash, or
+record it.
 
 - [ ] **Step 2: Redeploy registry from GitHub source**
 
@@ -583,7 +598,7 @@ railway deployment list \
   --limit 1 --json | jq '.[0] | {id, status, createdAt, commitHash: .meta.commitHash, configFile: .meta.configFile, volumeMounts: .meta.volumeMounts}'
 ```
 
-Expected: `SUCCESS`, commit `312479ee55539560936129db21bcec8da7b9827a`, config `/railway.json`, mount `/data`.
+Expected: `SUCCESS`, commit `0350c1d68972cda8a640cb6c6f64c18a3a6d00be`, config `/railway.json`, mount `/data`.
 
 - [ ] **Step 3: Verify health and empty public search**
 
@@ -951,29 +966,96 @@ railway variable set SHERPA_EXPORT_INTERVAL --stdin \
 
 Expected: another healthy registry deployment with the original interval restored.
 
-- [ ] **Step 5: Prove the collector object is durable and retrievable**
+- [ ] **Step 5: Request approval for restart and idempotency queue drills**
 
-Use the collector's authenticated retrieval interface supplied by the operator. Download the object into `$LIVE_ROOT/recovery/archive.tar.gz`, mode 0600. Verify:
+Present this exact checkpoint:
+
+```text
+Action: make the collector temporarily unavailable through an approved reversible control, temporarily set the registry export interval to 1m, create exactly one completed `/data/exports` archive, restart/redeploy the registry while it is pending, restore collector reachability, and then replay the same byte-identical archive after remote commit to exercise the `existing` path.
+Impact: one bounded collector outage, registry configuration deployments/restarts, one additional export object, and controlled queue-file preservation/restoration while the registry writer is fully stopped.
+Rollback: immediately restore collector reachability and the saved export interval; preserve the only queue archive and its byte-identical drill copy; restart the accepted registry image without manually deleting either copy.
+Resources changed: collector availability control, primary registry `SHERPA_EXPORT_INTERVAL` and deployments, `/data/exports`, and one mode-0600 drill copy outside the queue on the same volume.
+```
+
+Wait for approval. Before any manual queue operation, prove the registry process is stopped, its
+cooperative lifetime lock is released, and no sidecar, shell, job, or second registry is running as
+the registry UID. Never mutate the queue manually while the scheduler is active.
+
+- [ ] **Step 6: Prove restart-safe queue discovery**
+
+1. Confirm `/data/exports` contains no completed archive before the drill.
+2. Make the collector unavailable using only the approved reversible control and set the export
+   interval to `1m` under the Step 5 approval.
+3. Wait until exactly one completed archive exists in `/data/exports`. Confirm it remains pending,
+   record its SHA-256 object ID and safe filesystem metadata, and confirm no second archive is
+   created. Do not print the archive, manifest, member names, or collector credentials.
+4. Restart or redeploy the registry while the collector remains unavailable. Confirm startup
+   rediscovers the same byte-identical archive, retains it, and does not create another export.
+5. Fully stop the registry writer and preserve an exact mode-0600 copy outside `/data/exports` on
+   the persistent volume for Step 7. Record that its SHA-256 matches the pending object ID. Do not
+   use a concurrent same-UID helper.
+6. Restart the accepted registry image, restore collector reachability, and immediately restore
+   the saved original export interval. Accept only `201 stored` or `200 existing` with the matching
+   object ID. Confirm the local queue archive is deleted only after that validated proof.
+
+A missing archive after restart, a changed digest, a second queued export, local deletion before
+validated remote proof, or an unclassified response fails the gate.
+
+- [ ] **Step 7: Prove remote-commit/local-delete idempotency**
+
+1. Use the validated Step 6 `stored` or `existing` response for the exact object ID and its
+   successful final Borg `Exists` proof to establish that the remote commit completed under archive name
+   `sherpa-<object-id>`; archive-name presence alone is not integrity proof.
+2. Fully stop the registry writer and prove the cooperative lock is released.
+3. Verify the preserved copy still hashes to the exact object ID, then restore that byte-identical
+   completed archive to an otherwise empty `/data/exports` with the entrypoint-required filename,
+   UID/GID, and mode. No manual same-UID queue mutation is allowed while the scheduler is active.
+4. Restart the accepted registry image. Confirm startup discovers the archive, the collector
+   returns `200 existing` for the matching object ID, and only then the registry removes the local
+   queue archive.
+5. Confirm `/data/exports` is empty, the remote object is unchanged, and the export interval is the
+   saved original value. Remove the out-of-queue drill copy only within the Step 5 approved cleanup
+   scope after these checks pass.
+
+Any `stored` response for changed bytes, mismatched object ID, premature local deletion, concurrent
+queue writer, or unproven remote presence fails the gate.
+
+- [ ] **Step 8: Prove independent Borg retrieval, age decryption, and archive verification**
+
+The running collector has no retrieval/download API. In a trusted recovery environment, use the
+recovery-only Borg SSH identity and pinned host key to select exact archive
+`sherpa-<object-id>` and extract `<object-id>.tar.gz.age`. Keep repository location, SSH key, and
+offline age private identity in mode-0600 files and never print them. Decrypt to
+`$LIVE_ROOT/recovery/archive.tar.gz`, then run the exact Task-12-bound collector binary:
 
 ```sh
 LIVE_ROOT="$(cat /tmp/sherpa-live-root-current)"
 . "$LIVE_ROOT/context.sh"
 mkdir -m 700 "$LIVE_ROOT/recovery"
+chmod 600 "$LIVE_ROOT/recovery/archive.tar.gz.age"
+age --decrypt --identity "$LIVE_ROOT/recovery/age-identity" \
+  --output "$LIVE_ROOT/recovery/archive.tar.gz" \
+  "$LIVE_ROOT/recovery/archive.tar.gz.age"
 chmod 600 "$LIVE_ROOT/recovery/archive.tar.gz"
+collector verify "$LIVE_ROOT/recovery/archive.tar.gz"
 tar -tzf "$LIVE_ROOT/recovery/archive.tar.gz" >"$LIVE_ROOT/recovery/archive-members.txt"
+chmod 600 "$LIVE_ROOT/recovery/archive-members.txt"
 grep -Fx 'postgres.dump' "$LIVE_ROOT/recovery/archive-members.txt"
 grep -Fx 'manifest.json' "$LIVE_ROOT/recovery/archive-members.txt"
 grep -F "repos/$OWNER_A/$STACK_NAME.bundle" "$LIVE_ROOT/recovery/archive-members.txt"
 ```
 
-Expected: database dump, acceptance-stack bundle, and final manifest are present. If the collector cannot retrieve the object, stop: 2c-iii.9 fails and no recovery resources are created.
+Require `collector verify` to pass before listing or importing. Independently verify the final
+manifest and every artifact size and SHA-256. If Borg extraction, age decryption, collector
+verification, or manifest validation fails, stop: 2c-iii.9 fails and no recovery resources are
+created.
 
-- [ ] **Step 6: Request explicit approval for temporary recovery infrastructure**
+- [ ] **Step 9: Request explicit approval for temporary recovery infrastructure**
 
 Present this exact checkpoint:
 
 ```text
-Action: create temporary staging services postgres-recovery and registry-recovery, one Postgres data volume, and one /data Git volume; restore the retrieved archive; run audit/login/search/detail/clone smoke tests.
+Action: create temporary staging services postgres-recovery and registry-recovery, one Postgres data volume, and one /data Git volume; restore the independently extracted, decrypted, and verified archive; run audit/login/search/detail/clone smoke tests.
 Impact: additional Railway usage; no writes to the primary staging stores; recovery services use separate private/public endpoints.
 Rollback/cleanup: leave primary services unchanged; after evidence review, request separate approval before deleting recovery services and volumes.
 Resources: 2 services, 2 volumes, 1 temporary recovery domain.
@@ -981,24 +1063,25 @@ Resources: 2 services, 2 volumes, 1 temporary recovery domain.
 
 Wait for approval before continuing.
 
-- [ ] **Step 7: Provision recovery resources with isolated settings**
+- [ ] **Step 10: Provision recovery resources with isolated settings**
 
 Using Railway MCP/dashboard after approval:
 
 - create `postgres-recovery` pinned to PG16 with one 5 GB volume at `/var/lib/postgresql/data` and no public domain;
-- create `registry-recovery` from `TimoKruth/SherpA` commit `312479ee55539560936129db21bcec8da7b9827a` with `/railway.json`, one 5 GB volume at `/data`, one replica, a distinct temporary domain, and a database reference to `postgres-recovery`;
+- create `registry-recovery` from `TimoKruth/SherpA` commit `0350c1d68972cda8a640cb6c6f64c18a3a6d00be` with `/railway.json`, one 5 GB volume at `/data`, one replica, a distinct temporary domain, and a database reference to `postgres-recovery`;
 - copy only the required non-secret configuration shape and use recovery-specific public base URL;
 - do not enable the export scheduler against the primary collector during restore;
 - do not reuse the primary Git volume or database.
 
 Record every recovery service, deployment, volume, and domain ID.
 
-- [ ] **Step 8: Restore and verify the archive**
+- [ ] **Step 11: Restore and verify the archive**
 
-Follow `docs/deployment/railway.md:235-270` exactly:
+Follow the current `Restore and Cutover` section of `docs/deployment/railway.md` exactly:
 
-1. extract into the recovery environment;
-2. verify every manifest size and SHA-256 before import;
+1. use only the archive that passed recovery-only Borg extraction, offline age decryption, and
+   `collector verify` in Step 8;
+2. verify every manifest size and SHA-256 again before import;
 3. restore `postgres.dump` into empty `postgres-recovery` without placing credentials in process arguments;
 4. recreate each bare repository from its bundle under the recovery `/data/git` tree;
 5. start `registry-recovery`;
@@ -1007,9 +1090,10 @@ Follow `docs/deployment/railway.md:235-270` exactly:
 
 Expected: manifest valid, audit has no `MISSING`, acceptance version searchable/viewable/cloneable.
 
-- [ ] **Step 9: Complete and commit the registry gate evidence**
+- [ ] **Step 12: Complete and commit the registry gate evidence**
 
-Mark 2c-iii.9 through 2c-iii.11 only after collector retrieval, restore, audit, smoke, and log review pass. Commit:
+Mark 2c-iii.9 through 2c-iii.11 only after both queue drills, recovery-only Borg extraction, age
+decryption, `collector verify`, restore, audit, smoke, and log review pass. Commit:
 
 ```sh
 git add docs/deployment/evidence/2026-07-20-railway-staging-acceptance.md
@@ -1092,7 +1176,7 @@ railway redeploy \
   --yes --json
 ```
 
-Poll until `SUCCESS`. Confirm commit `312479ee55539560936129db21bcec8da7b9827a`, config `/deploy/web/railway.json`, Dockerfile `deploy/web/Dockerfile`, and no volume mounts.
+Poll until `SUCCESS`. Confirm commit `0350c1d68972cda8a640cb6c6f64c18a3a6d00be`, config `/deploy/web/railway.json`, Dockerfile `deploy/web/Dockerfile`, and no volume mounts.
 
 - [ ] **Step 5: Verify health and live PID 1 non-root**
 
@@ -1320,7 +1404,7 @@ git commit -m $'docs: record complete website staging gate\n\nCo-Authored-By: Cl
 
 - [ ] **Step 1: Confirm both prior gates identify the same application candidate and domains**
 
-Compare deployment metadata and evidence rows. Expected: registry and web both run `312479ee55539560936129db21bcec8da7b9827a`, with the configured staging domains.
+Compare deployment metadata and evidence rows. Expected: registry and web both run `0350c1d68972cda8a640cb6c6f64c18a3a6d00be`, with the configured staging domains.
 
 - [ ] **Step 2: Complete website GitHub sign-in as identity A with Playwright**
 
@@ -1665,8 +1749,8 @@ Expected: the queued follow syncs once and no duplicate follow is created.
 Because Task 8 created follows, events, verdict feedback, grants, and sessions after the Task 5 archive, present this checkpoint:
 
 ```text
-Action: temporarily set the primary registry export interval to 1m, retrieve the new completed off-site archive, restore it into new postgres-recovery-2 and registry-recovery-2 services with separate 5 GB Postgres and /data volumes, then run data-shape checks and registry audit.
-Impact: two primary registry configuration deployments, one additional collector object, and temporary Railway usage for 2 services, 2 volumes, and 1 recovery domain; primary stores are read but never replaced.
+Action: temporarily set the primary registry export interval to 1m, create one new completed off-site object, extract it through the recovery-only Borg identity, decrypt it with the offline age identity, run `collector verify`, and restore it into new postgres-recovery-2 and registry-recovery-2 services with separate 5 GB Postgres and /data volumes before data-shape checks and registry audit.
+Impact: two primary registry configuration deployments, one additional collector object, recovery-only read access, and temporary Railway usage for 2 services, 2 volumes, and 1 recovery domain; primary stores are read but never replaced.
 Rollback/cleanup: restore the exact original export interval immediately after the bounded upload attempt; leave all primary services/stores unchanged; retain both recovery generations until a later explicit cleanup approval.
 Resources changed: primary SHERPA_EXPORT_INTERVAL and resulting deployments; new postgres-recovery-2, registry-recovery-2, 2 volumes, and 1 temporary domain.
 ```
@@ -1701,7 +1785,7 @@ railway variable set SHERPA_EXPORT_INTERVAL --stdin \
   --json <"$AUTH_DIR/original-export-interval-2"
 ```
 
-If the upload did not complete, fail 2e.11 and do not create recovery-2 resources. Otherwise retrieve the exact new object through the collector's authenticated interface into `$LIVE_ROOT/recovery/archive-2.tar.gz`, mode 0600. Verify `postgres.dump`, final `manifest.json`, and `repos/$OWNER_A/$STACK_NAME.bundle`; verify every manifest size and SHA-256. Create `postgres-recovery-2` pinned to PG16 with a fresh 5 GB `/var/lib/postgresql/data` volume and no public domain. Create `registry-recovery-2` from the accepted commit with `/railway.json`, a fresh 5 GB `/data` volume, a distinct temporary domain, a database reference only to `postgres-recovery-2`, recovery-specific public base URL, and export scheduling disabled. Restore the dump with libpq environment variables rather than credentials in argv, reconstruct each bare Git repository with `git clone --mirror`, start the recovery registry, and run its health, data-shape, search/detail/clone, and `registry audit` checks. Never overwrite the Task 5 recovery stores.
+If the upload did not complete with `201 stored` or `200 existing` for the matching object ID, fail 2e.11 and do not create recovery-2 resources. Otherwise, from a trusted recovery environment, use the recovery-only Borg SSH identity and pinned host key to extract exact archive `sherpa-<object-id>` and file `<object-id>.tar.gz.age`; the running collector has no retrieval/download interface. Decrypt it with the required offline age private identity into `$LIVE_ROOT/recovery/archive-2.tar.gz`, mode 0600, and run the exact Task-12-bound `collector verify` before inspection or import. Verify `postgres.dump`, final `manifest.json`, and `repos/$OWNER_A/$STACK_NAME.bundle`; independently verify every manifest size and SHA-256. Create `postgres-recovery-2` pinned to PG16 with a fresh 5 GB `/var/lib/postgresql/data` volume and no public domain. Create `registry-recovery-2` from the accepted commit with `/railway.json`, a fresh 5 GB `/data` volume, a distinct temporary domain, a database reference only to `postgres-recovery-2`, recovery-specific public base URL, and export scheduling disabled. Restore the dump with libpq environment variables rather than credentials in argv, reconstruct each bare Git repository with `git clone --mirror`, start the recovery registry, and run its health, data-shape, search/detail/clone, and `registry audit` checks. Never overwrite the Task 5 recovery stores.
 
 Expected restored data:
 
@@ -1718,7 +1802,7 @@ Run `registry audit`; any `MISSING` fails the gate.
 Present:
 
 ```text
-Action: deploy the previous 2e-aware website commit 4b4e86f to web, verify public discovery and registry operations, then redeploy current commit 312479e.
+Action: deploy the previous 2e-aware website commit 4b4e86f to web, verify public discovery and registry operations, then redeploy current commit 0350c1d.
 Impact: temporary website version change; registry remains online and unchanged.
 Rollback: redeploy web from current GitHub source and wait for /healthz 200.
 Resources changed: web deployment only.
@@ -1731,7 +1815,7 @@ Wait for approval. Use Railway MCP/dashboard's deploy-commit function so the ser
 Present:
 
 ```text
-Action: deploy the previous 2e-aware registry commit 4b4e86f, verify health, public discovery, clone, login, follow, and web-session publish rejection, then redeploy current commit 312479e.
+Action: deploy the previous 2e-aware registry commit 4b4e86f, verify health, public discovery, clone, login, follow, and web-session publish rejection, then redeploy current commit 0350c1d.
 Impact: brief registry downtime from the /data volume handoff; no schema or data rollback.
 Rollback: redeploy registry from current GitHub source and wait for /healthz 200.
 Resources changed: registry deployment only; Postgres and Git volumes are preserved.

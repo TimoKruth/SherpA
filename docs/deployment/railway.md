@@ -23,13 +23,14 @@ platform behavior, not an application guarantee.
   [Healthchecks](https://docs.railway.com/deployments/healthchecks).
 - Services in the same project and environment have private `railway.internal` networking.
   See [Private networking](https://docs.railway.com/private-networking).
-- Public HTTP requests have a 15-minute maximum duration and Railway supplies
+- Public HTTP requests have a 15-minute maximum duration. Railway strips client-supplied
+  forwarding headers and supplies authoritative forwarding values, including `X-Real-IP`,
   `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Railway-Request-Id`. See
   [public-networking limits](https://docs.railway.com/networking/public-networking/specs-and-limits).
-  Per-IP auth rate limiting keys on the **rightmost** `X-Forwarded-For` hop (the value the
-  Railway edge appends); client-prependable headers, including `X-Real-IP` and any left-hand
-  `X-Forwarded-For` entries, are not trusted for identity. This assumption is verified at the
-  staging gate — see step 6.
+  With proxy trust enabled, per-IP auth rate limiting prefers a valid, sanitized `X-Real-IP`.
+  The final valid hop in `X-Forwarded-For` remains only a fallback for trusted proxies that do
+  not provide `X-Real-IP`; malformed or missing forwarding data falls back to the direct peer.
+  This assumption is verified at the staging gate — see step 6.
 
 Keep the registry at one replica while it owns a local bare-Git volume. Railway snapshots
 are the fast in-project recovery tier. The application export sent outside Railway is the
@@ -102,14 +103,14 @@ Configure variables in Railway's secret/variable UI. Never place secret values i
 | `SHERPA_GITHUB_CLIENT_ID` | Required; environment-specific OAuth App with device flow |
 | `SHERPA_GITHUB_CLIENT_SECRET` | Required for website sign-in; registry-only OAuth App secret |
 | `SHERPA_WEB_PUBLIC_BASE_URL` | Required with the client secret; exact canonical website HTTPS origin used for fixed handoff redirects |
-| `SHERPA_TRUST_PROXY` | Set `true` on Railway; trusts `X-Forwarded-Proto` for scheme and the rightmost `X-Forwarded-For` hop for per-IP rate limiting, never host |
+| `SHERPA_TRUST_PROXY` | Set `true` on Railway; trusts `X-Forwarded-Proto` for scheme and prefers Railway's sanitized, authoritative `X-Real-IP` for per-IP rate limiting. The final valid hop in `X-Forwarded-For` is fallback-only for a trusted proxy without `X-Real-IP`; host is never trusted. |
 | `SHERPA_DB_MAX_CONNS` | Optional positive pool cap matched to the Postgres plan |
 | `SHERPA_REGISTRY_TOKEN` | Optional admin/CI bypass; omit for normal session-only operation |
 | `PORT` | Injected by Railway; do not hard-code it |
-| `SHERPA_EXPORT_URL` | Required for DR; external HTTPS collector endpoint |
-| `SHERPA_EXPORT_TOKEN` | Required operationally; collector Bearer secret |
+| `SHERPA_EXPORT_URL` | Required for DR; exactly `https://sherpa-collector.kruth-support.de/v1/exports` |
+| `SHERPA_EXPORT_TOKEN` | Required operationally; set as a Railway secret and never expose its value |
 | `SHERPA_EXPORT_INTERVAL` | Required with export URL; Go duration such as `24h` |
-| `SHERPA_EXPORT_ARCHIVE_DIR` | Required with export URL; use the persistent, entrypoint-prepared `/data/exports` queue, never a child of `/data/git` |
+| `SHERPA_EXPORT_ARCHIVE_DIR` | Required with export URL; exactly `/data/exports`, the persistent entrypoint-prepared queue, never a child of `/data/git` |
 
 Staging and production values must be independent. Rotate the GitHub client secret, optional
 admin token, and export token through the Railway variable UI and the receiving system. Revoke
@@ -142,25 +143,48 @@ POSTs it to `SHERPA_EXPORT_URL`. The database-first order means a concurrent pub
 only harmless extra Git content; dumped metadata cannot refer to content absent from later
 bundles.
 
+Configure the registry with exactly:
+
+```text
+SHERPA_EXPORT_URL=https://sherpa-collector.kruth-support.de/v1/exports
+SHERPA_EXPORT_ARCHIVE_DIR=/data/exports
+SHERPA_EXPORT_TOKEN=<set as a Railway secret; never record the value>
+```
+
 The collector must:
 
-- accept authenticated HTTPS `POST` requests with `Content-Type: application/gzip`;
-- generate a unique object name and return 2xx only after durable storage completes;
-- encrypt objects, restrict read/delete access, and live outside the Railway project/account;
-- retain immutable copies according to the approved RPO and retention policy;
-- alert on missed intervals and support retrieval without the running Railway project.
+- accept authenticated HTTPS `POST /v1/exports` requests with `Content-Type: application/gzip`;
+- validate the archive, hash its exact compressed bytes, and use that 64-lowercase-hex SHA-256
+  as the object ID;
+- age-encrypt the validated bytes before remote storage, with only the public age recipient on
+  the VPS and the private identity held offline;
+- durably record encrypted spool and ledger state before acknowledging the request;
+- use exact Borg `Exists -> Create if absent -> Exists` handling, with archive name
+  `sherpa-<object-id>` and stored file `<object-id>.tar.gz.age`;
+- return only `201` with status `stored` or `200` with status `existing` after proving the exact
+  object ID; and
+- live outside the Railway project/account and satisfy the separately approved Storage Box
+  capability, retention, monitoring, and recovery posture in `docs/deployment/collector.md`.
 
-The scheduler deletes a local archive after a successful upload. A failed archive remains in
-`SHERPA_EXPORT_ARCHIVE_DIR` and is retried on each interval; the scheduler does not create a
-new archive until that pending archive uploads and is deleted. This bounds local accumulation
-to one archive, but a failed upload or missing collector object is still an alert because the
-off-site recovery point is not advancing. Keep the archive directory outside `/data/git` and
-monitor its capacity. `/data` must remain a real, root-owned volume mountpoint that is not
-writable by the registry UID; the root entrypoint alone precreates the queue beneath it as a
-real `0700` directory owned by the registry UID/GID. The scheduler validates that identity and
-holds a cooperative lock for its lifetime. Keep `numReplicas=1`, and do not run another
-registry, sidecar, shell, or job as the registry UID against the same queue. Collector retention
-is the authoritative retention policy.
+The running collector intentionally has no authenticated retrieval/download API. Disaster
+recovery uses the recovery-only Borg identity to extract the exact encrypted object, the offline
+age private identity to decrypt it, and `collector verify <archive-path>` before any import.
+
+The scheduler deletes a local archive only after validating a `stored` or `existing` response
+for the matching SHA-256 object ID. A failed deletion or interruption after remote commit leaves
+the exact archive locally; a restart resends the identical bytes, accepts a validated `existing`
+response, and deletes only after that proof. Any failed upload remains in
+`SHERPA_EXPORT_ARCHIVE_DIR` and is retried on each interval; startup rediscovers completed queue
+archives, and the scheduler does not create a new archive until the oldest pending archive uploads
+and is deleted. This bounds ordinary local accumulation to one archive, but a failed upload or
+missing collector object is still an alert because the off-site recovery point is not advancing.
+Keep the archive directory outside `/data/git` and monitor its capacity. `/data` must remain a
+real, root-owned volume mountpoint that is not writable by the registry UID; the root entrypoint
+alone precreates the queue beneath it as a real `0700` directory owned by the registry UID/GID.
+The scheduler validates that identity and holds a cooperative lock for its lifetime. Keep
+`numReplicas=1`, and do not run another registry, sidecar, shell, or job as the registry UID
+against the same queue. Collector retention is the authoritative off-site retention policy only
+after the blocked Storage Box posture receives an approved resolution.
 
 For a manual local archive in a container or recovery environment:
 
@@ -212,25 +236,30 @@ step. Do not record tokens or device codes.
    - Start a real device flow, then poll its (registered) device code twice without waiting and
      confirm the second poll is `429`. Poll a random, never-started device code and confirm
      `410` with no GitHub-call error in the logs (unregistered codes must never reach GitHub).
-   - **Verify per-IP identity depends on the Railway edge, not a client header.** From two
-     genuinely different source IPs, confirm each gets its own device-start allowance (proving
-     Railway populates the rightmost `X-Forwarded-For` hop and clients are not all collapsed
-     into one global bucket). Then, from a single IP already rate-limited, send device-start
-     with a forged `X-Real-IP` and with an extra prepended `X-Forwarded-For` entry; confirm
-     **neither** header grants a fresh allowance (no rate-limit bypass). If two distinct clients
-     share a bucket, Railway is not appending `X-Forwarded-For` as assumed — stop and reconcile
-     before production.
+   - **Verify per-IP identity depends on Railway's sanitized forwarding data, not a client
+     header.** From two genuinely different source IPs, confirm each gets its own device-start
+     allowance and the application sees distinct valid `X-Real-IP` values supplied by Railway.
+     Then, from a single IP already rate-limited, send device-start requests with forged
+     `X-Real-IP` and extra prepended `X-Forwarded-For` values; confirm Railway strips/replaces the
+     client-supplied forwarding values and neither request gains a fresh allowance. Retain the
+     final-valid-hop `X-Forwarded-For` behavior only as a tested fallback for a trusted proxy that
+     supplies no valid `X-Real-IP`. If distinct real clients collapse into one bucket or a forged
+     value changes the bucket, stop and reconcile before production.
    - Confirm locally rejected requests do not produce GitHub-call errors and request logs
      contain no headers or bodies.
 7. Search and view the published stack, then clone its returned `repo_url`. Confirm the URL is
    the configured public HTTPS domain even when a test request supplies a spoofed
    `X-Forwarded-Host`.
 8. Redeploy the API. Confirm the same version remains searchable, viewable, and cloneable.
-9. Temporarily set the export interval to one minute, redeploy, and confirm a new complete
-   archive reaches the external collector. Restore the normal interval afterward.
-10. Retrieve that archive into a new sibling/recovery target, restore both Postgres and Git,
-    and run `registry audit`. Missing content fails the gate. Complete login, search, detail,
-    and HTTPS clone smoke tests against the recovery target.
+9. After the separately approved temporary interval change, set the export interval to one
+   minute, redeploy, and confirm the collector returns `201 stored` or `200 existing` for the
+   matching object ID and the local `/data/exports` archive is removed only after that proof.
+   Restore the normal interval afterward.
+10. From an approved trusted recovery environment, use the recovery-only Borg identity to extract
+    that exact `<object-id>.tar.gz.age`, decrypt it with the offline age private identity, and run
+    `collector verify <archive-path>`. Only after verification passes, restore both Postgres and
+    Git into a new sibling/recovery target and run `registry audit`. Missing content fails the
+    gate. Complete login, search, detail, and HTTPS clone smoke tests against the recovery target.
 11. Review application, Railway, and collector logs. Confirm no database URL, admin token,
     export token, GitHub token, session token, authorization header, request body, or internal
     error detail appears.
@@ -245,11 +274,15 @@ Never restore over the only production database or Git volume.
    access or stop the registry service; record the final accepted-write timestamp.
 2. Create a sibling/recovery registry, empty Postgres database, and empty Git volume. Keep its
    domain separate from production. For fast in-project recovery, Railway can restore its
-   snapshots only in the same project/environment. For disaster recovery, retrieve the
-   selected completed archive from the external collector.
-3. Extract the archive in the recovery environment and verify every artifact's size and
-   SHA-256 against `manifest.json` before importing it. Reject an incomplete archive or a
-   manifest that is not the final completed member.
+   snapshots only in the same project/environment. For disaster recovery, use the recovery-only
+   Borg identity and pinned host key from a trusted recovery environment to select the exact
+   `sherpa-<object-id>` archive and extract `<object-id>.tar.gz.age`. The running collector has no
+   retrieval/download API.
+3. Decrypt the extracted object with the required offline age private identity, then run
+   `collector verify <archive-path>`. Only after that succeeds, extract it in the recovery
+   environment and independently verify every artifact's size and SHA-256 against
+   `manifest.json` before importing it. Reject an incomplete archive, trailing data, unexpected
+   members, or a manifest that is not the final completed member.
 4. Restore `postgres.dump` into the empty recovery database. Parse the secret Railway
    `DATABASE_URL` into the standard libpq environment variables `PGHOST`, `PGPORT`, `PGUSER`,
    `PGPASSWORD`, `PGDATABASE` (database name only), and `PGSSLMODE`, as the export command
@@ -306,8 +339,11 @@ expand/migrate/contract plan and rollback gate before deployment.
   deployment healthcheck is not continuous monitoring.
 - Alert on 5xx rates, failed GitHub calls, auth throttling, publish rejection classes,
   graceful-shutdown failures, Postgres pool saturation, CPU/memory, and Git volume capacity.
-- Alert when no new off-site object arrives within the approved interval plus tolerance, on
-  collector 4xx/5xx responses, and on growth in the local export archive directory.
+- Alert when no new verified off-site object arrives within the approved interval plus tolerance,
+  on any collector 4xx/5xx response or scheduler retry/fatal classification, and when a completed
+  archive remains in `/data/exports` across the interval or a registry restart. Monitor queue
+  count, queue bytes, and `/data` capacity; one pending archive is already stale recovery-point
+  growth because the scheduler suppresses creation of the next export.
 - Review Railway Postgres and Git-volume backup jobs and test restore availability monthly.
 - Run and record `registry audit` before cutover, after restore, and after suspected storage
   incidents. Missing content is always blocking.
