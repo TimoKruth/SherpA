@@ -18,21 +18,19 @@ The verified append-only capability result is **Blocked**:
   manifest and create different content under the same archive name.
 
 That final behavior violates the required threat model. This is a fail-closed operational gate.
-While the status remains **Blocked**, none of the following may run:
-
-- authoritative Storage Box account/repository creation or initialization;
-- VPS preparation, configuration, build, deployment, restart, credential installation, or
-  collector health/monitoring work;
-- collector-dependent Railway variable changes, registry restart/redeploy, forced upload, or
-  restore preparation; or
-- collector outage, queue rediscovery, idempotency, retention, or recovery drills.
+While the status remains **Blocked**, do not contact, query, provision, configure, validate,
+build on, deploy to, restart, monitor, or otherwise mutate any Railway environment or resource,
+any VPS, or any Storage Box account, path, repository, snapshot, or service. This blanket ban
+includes authoritative repository initialization, all collector and non-collector live deployment
+work, credential installation, variable inspection or changes, uploads, restores, and every outage,
+queue, idempotency, retention, rollback, cleanup, or recovery drill.
 
 A fresh approval for an individual disruptive step does not override this gate. The gate clears
 only after the provider/restriction model changes and the complete capability exercise passes, or
 a separately approved threat-model change is documented by revising this runbook before any live
-action. No reduced model is currently approved. Repository source, documentation, and local-only
-validation work through Task 12 may continue; it must not create or mutate Railway, VPS, Storage
-Box, or production resources.
+action. No reduced model is currently approved. Only repository source work, documentation, and
+local-only validation through Task 12 may continue. No external acceptance or operational step may
+run while the gate is Blocked.
 
 The previously considered reduced model would depend on offline transaction rollback plus the
 maximum practical Storage Box snapshot schedule. It would not provide immutable archive names in

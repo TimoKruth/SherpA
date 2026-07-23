@@ -11,17 +11,18 @@ the exact commit being promoted.
 ## Fail-Closed Collector Capability Gate
 
 Task 0 is **Blocked** and no reduced threat model is approved. While that status remains, do not
-initialize an authoritative off-site repository; perform any collector VPS work; set, change, or
-validate collector-dependent Railway variables; restart or redeploy a registry that would start the
-export scheduler; force an upload; or run collector outage, queue, idempotency, retention, restore,
-or recovery drills. A fresh approval for an individual outage, restart, restore, rollback, or
-cleanup does not override this capability gate.
+contact, query, provision, configure, validate, deploy, restart, monitor, or otherwise mutate any
+Railway environment or resource, any VPS, or any Storage Box account, path, repository, snapshot,
+or service. This blanket ban covers both collector-dependent and ordinary Railway work, all live
+acceptance steps, authoritative repository initialization, uploads, restores, and every outage,
+queue, idempotency, retention, rollback, cleanup, or recovery drill. A fresh approval for an
+individual action does not override this capability gate.
 
 Only a provider/restriction change that passes the complete capability exercise, or a separately
 approved threat-model change documented in revised runbooks before execution, can clear the gate.
-Repository source, documentation, and local-only validation through Task 12 may continue. Commands
-below that depend on the collector are future procedures and must not be executed while the gate is
-Blocked. Production remains empty and untouched.
+Only repository source work, documentation, and local-only validation through Task 12 may continue.
+All Railway, VPS, and Storage Box commands below are future procedures and must not be executed
+while the gate is Blocked. Production remains empty and untouched.
 
 ## Platform Constraints
 
