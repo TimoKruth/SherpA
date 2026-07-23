@@ -382,8 +382,13 @@ Never print old or new values. Use mode-0600 temporary files and remove them aft
   accepted baseline exactly: routine create/list works; logical delete and archive-name reuse remain
   an acknowledged limitation; SFTP, SCP, and rsync mutation is denied; routine compact reclaims no
   segments or bytes; and offline recovery-identity download plus transaction rollback recovers the
-  original bytes. Any deviation blocks rotation. Only after every expected outcome is reproduced,
-  replace `secrets/storage-ssh-key`, restart, prove exact remote presence, and revoke the old key.
+  original bytes. Also record non-secret confirmation that the maximum-practical automatic Storage
+  Box snapshot schedule and approved retention posture remain enabled as secondary, non-WORM
+  protection, and that both the offline recovery SSH identity and offline age private identity remain
+  available, usable when separately authorized, and under documented offline custody. Do not expose
+  identity values or private snapshot identifiers. Any deviation blocks rotation. Only after every
+  expected outcome is reproduced, replace `secrets/storage-ssh-key`, restart, prove exact remote
+  presence, and revoke the old key.
 - **Recovery SSH key:** perform a separately approved recovery-credential change from a trusted
   environment, test read-only list/extract first, and remove all temporary copies. Never place it
   on the VPS.
