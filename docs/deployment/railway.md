@@ -8,6 +8,21 @@ secrets for staging and production.
 Production is not approved until the staging gate in this document has been recorded for
 the exact commit being promoted.
 
+## Fail-Closed Collector Capability Gate
+
+Task 0 is **Blocked** and no reduced threat model is approved. While that status remains, do not
+initialize an authoritative off-site repository; perform any collector VPS work; set, change, or
+validate collector-dependent Railway variables; restart or redeploy a registry that would start the
+export scheduler; force an upload; or run collector outage, queue, idempotency, retention, restore,
+or recovery drills. A fresh approval for an individual outage, restart, restore, rollback, or
+cleanup does not override this capability gate.
+
+Only a provider/restriction change that passes the complete capability exercise, or a separately
+approved threat-model change documented in revised runbooks before execution, can clear the gate.
+Repository source, documentation, and local-only validation through Task 12 may continue. Commands
+below that depend on the collector are future procedures and must not be executed while the gate is
+Blocked. Production remains empty and untouched.
+
 ## Platform Constraints
 
 The following Railway behavior was re-verified against the official documentation on
@@ -23,14 +38,15 @@ platform behavior, not an application guarantee.
   [Healthchecks](https://docs.railway.com/deployments/healthchecks).
 - Services in the same project and environment have private `railway.internal` networking.
   See [Private networking](https://docs.railway.com/private-networking).
-- Public HTTP requests have a 15-minute maximum duration. Railway strips client-supplied
-  forwarding headers and supplies authoritative forwarding values, including `X-Real-IP`,
+- Public HTTP requests have a 15-minute maximum duration. Railway documents that its edge strips
+  client-supplied forwarding headers and supplies forwarding values including `X-Real-IP`,
   `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Railway-Request-Id`. See
   [public-networking limits](https://docs.railway.com/networking/public-networking/specs-and-limits).
-  With proxy trust enabled, per-IP auth rate limiting prefers a valid, sanitized `X-Real-IP`.
-  The final valid hop in `X-Forwarded-For` remains only a fallback for trusted proxies that do
-  not provide `X-Real-IP`; malformed or missing forwarding data falls back to the direct peer.
-  This assumption is verified at the staging gate — see step 6.
+  Candidate unit/integration tests prove the application's exact selection logic: with proxy trust
+  enabled it uses a valid `X-Real-IP` first, otherwise the final valid `X-Forwarded-For` hop, and
+  otherwise the direct peer. Live staging status checks prove only edge-level rate-limit bucketing
+  and resistance to a client-supplied-header bypass; they cannot observe or prove the sanitized
+  header value or the application's internal fallback branch.
 
 Keep the registry at one replica while it owns a local bare-Git volume. Railway snapshots
 are the fast in-project recovery tier. The application export sent outside Railway is the
@@ -103,7 +119,7 @@ Configure variables in Railway's secret/variable UI. Never place secret values i
 | `SHERPA_GITHUB_CLIENT_ID` | Required; environment-specific OAuth App with device flow |
 | `SHERPA_GITHUB_CLIENT_SECRET` | Required for website sign-in; registry-only OAuth App secret |
 | `SHERPA_WEB_PUBLIC_BASE_URL` | Required with the client secret; exact canonical website HTTPS origin used for fixed handoff redirects |
-| `SHERPA_TRUST_PROXY` | Set `true` on Railway; trusts `X-Forwarded-Proto` for scheme and prefers Railway's sanitized, authoritative `X-Real-IP` for per-IP rate limiting. The final valid hop in `X-Forwarded-For` is fallback-only for a trusted proxy without `X-Real-IP`; host is never trusted. |
+| `SHERPA_TRUST_PROXY` | Set `true` on Railway; trusts `X-Forwarded-Proto` for scheme. Candidate tests prove rate-limit identity selects a valid `X-Real-IP`, then the final valid `X-Forwarded-For` hop, then the direct peer. Railway documents edge sanitization; live status checks verify bucketing/bypass behavior, not internal header values. Host is never trusted. |
 | `SHERPA_DB_MAX_CONNS` | Optional positive pool cap matched to the Postgres plan |
 | `SHERPA_REGISTRY_TOKEN` | Optional admin/CI bypass; omit for normal session-only operation |
 | `PORT` | Injected by Railway; do not hard-code it |
@@ -192,13 +208,13 @@ For a manual local archive in a container or recovery environment:
 registry export /tmp/sherpa-manual.tar.gz
 ```
 
-This command packages but does not upload the archive. Do not treat a file left on the
-Railway container filesystem as a backup. To force and verify a scheduler upload during the
-staging gate, temporarily set `SHERPA_EXPORT_INTERVAL=1m`, redeploy, wait for a newly stored
-collector object, then restore the approved interval.
-
-Perform and record an off-site restore drill at least quarterly and after any backup-format
-change. A successful upload is not proof of recoverability.
+This command packages but does not upload the archive. Do not treat a file left on the Railway
+container filesystem as a backup. The forced-upload procedure (`SHERPA_EXPORT_INTERVAL=1m`,
+redeploy, wait for a validated collector result, restore the interval) and every off-site restore
+drill are prohibited while the Task 0 gate is Blocked. After the gate is cleared, each interval
+change/redeploy and each restore drill still requires its own fresh disruptive-action approval.
+A successful upload is not proof of recoverability; perform and record an approved off-site restore
+drill at least quarterly and after any backup-format change.
 
 ## Operational Commands
 
@@ -218,8 +234,13 @@ Operational/configuration errors exit `2`.
 
 ## Staging Acceptance Gate
 
-Record the commit, environment, domain, backup object IDs, timestamps, and operator for every
-step. Do not record tokens or device codes.
+Record the commit, environment, domain, timestamps, operator, and non-sensitive result summaries
+for every step. Do not record collector archive/object IDs, tokens, or device codes. Keep any exact
+object identifier needed for an operational comparison only in a mode-0600 temporary workspace.
+
+The Task 0 gate must be cleared before any step that configures or starts the export scheduler,
+forces an upload, accesses the collector, or creates recovery resources. While Blocked, do not
+execute steps 9-10 or redeploy a registry whose configured scheduler would contact the collector.
 
 1. Deploy the pinned commit with an empty staging Postgres database and empty Git volume.
 2. Confirm Railway activates only after `GET /healthz` returns `200`, and confirm the public
@@ -236,15 +257,20 @@ step. Do not record tokens or device codes.
    - Start a real device flow, then poll its (registered) device code twice without waiting and
      confirm the second poll is `429`. Poll a random, never-started device code and confirm
      `410` with no GitHub-call error in the logs (unregistered codes must never reach GitHub).
-   - **Verify per-IP identity depends on Railway's sanitized forwarding data, not a client
-     header.** From two genuinely different source IPs, confirm each gets its own device-start
-     allowance and the application sees distinct valid `X-Real-IP` values supplied by Railway.
-     Then, from a single IP already rate-limited, send device-start requests with forged
-     `X-Real-IP` and extra prepended `X-Forwarded-For` values; confirm Railway strips/replaces the
-     client-supplied forwarding values and neither request gains a fresh allowance. Retain the
-     final-valid-hop `X-Forwarded-For` behavior only as a tested fallback for a trusted proxy that
-     supplies no valid `X-Real-IP`. If distinct real clients collapse into one bucket or a forged
-     value changes the bucket, stop and reconcile before production.
+   - First run the exact-candidate test
+     `go test -count=1 ./internal/registry/api -run '^TestDeviceStartClientIPHonorsForwardedFor$'`.
+     That test, not the live edge probe, proves valid-`X-Real-IP` preference, final-valid-hop
+     `X-Forwarded-For` fallback, malformed/missing fallback to the direct peer, and distinct-bucket
+     behavior in the application.
+   - **Verify live edge bucketing without claiming header introspection.** From two genuinely
+     different source networks, confirm each gets an independent first device-start allowance.
+     From one already-limited network, repeat with a forged `X-Real-IP` and a prepended
+     `X-Forwarded-For`; neither request may gain a fresh allowance. Record only network labels and
+     status sequences. This proves the observed Railway edge plus application does not permit those
+     client headers to bypass or collapse the rate-limit buckets; status codes do not reveal the
+     sanitized header values or prove which internal fallback branch ran. If distinct real clients
+     collapse into one bucket or a forged value changes the bucket, stop and reconcile before
+     production.
    - Confirm locally rejected requests do not produce GitHub-call errors and request logs
      contain no headers or bodies.
 7. Search and view the published stack, then clone its returned `repo_url`. Confirm the URL is
@@ -347,8 +373,9 @@ expand/migrate/contract plan and rollback gate before deployment.
 - Review Railway Postgres and Git-volume backup jobs and test restore availability monthly.
 - Run and record `registry audit` before cutover, after restore, and after suspected storage
   incidents. Missing content is always blocking.
-- Run a complete off-site recovery drill at least quarterly. Rotate collector/admin secrets
-  on the approved schedule and after any suspected disclosure.
+- After the Task 0 gate is cleared, run a separately approved complete off-site recovery drill at
+  least quarterly. Rotate collector/admin secrets on the approved schedule and after any suspected
+  disclosure; collector-side rotations remain prohibited while Blocked.
 - Never use credential values, device codes, session tokens, repository bodies, or database
   URLs as log fields or metric labels.
 

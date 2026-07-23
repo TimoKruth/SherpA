@@ -17,16 +17,26 @@ The verified append-only capability result is **Blocked**:
 - nevertheless, the routine identity could logically delete an archive from the current
   manifest and create different content under the same archive name.
 
-That final behavior violates the required threat model. The authoritative repository must not
-be initialized and Task 13 collector deployment must not proceed unless either:
+That final behavior violates the required threat model. This is a fail-closed operational gate.
+While the status remains **Blocked**, none of the following may run:
 
-1. the provider or restriction mechanism changes and the complete capability gate passes; or
-2. the user explicitly approves the reduced threat model documented below.
+- authoritative Storage Box account/repository creation or initialization;
+- VPS preparation, configuration, build, deployment, restart, credential installation, or
+  collector health/monitoring work;
+- collector-dependent Railway variable changes, registry restart/redeploy, forced upload, or
+  restore preparation; or
+- collector outage, queue rediscovery, idempotency, retention, or recovery drills.
 
-No reduced model is currently approved. Under the available reduced model, physical recovery
-would depend on offline transaction rollback plus the maximum practical Storage Box snapshot
-schedule. It would not provide immutable archive names in the routine repository view. Do not
-present that model as the production posture without explicit approval.
+A fresh approval for an individual disruptive step does not override this gate. The gate clears
+only after the provider/restriction model changes and the complete capability exercise passes, or
+a separately approved threat-model change is documented by revising this runbook before any live
+action. No reduced model is currently approved. Repository source, documentation, and local-only
+validation work through Task 12 may continue; it must not create or mutate Railway, VPS, Storage
+Box, or production resources.
+
+The previously considered reduced model would depend on offline transaction rollback plus the
+maximum practical Storage Box snapshot schedule. It would not provide immutable archive names in
+the routine repository view and is not authorization to proceed.
 
 The capability exercise did **not** test in-place remote repair, prune, compact, and restoration
 of append-only protection. Its recovery proof was an offline rollback of a repository download
@@ -125,26 +135,43 @@ recovery identity, never the routine identity. The repository is unencrypted at 
 because every payload is already encrypted with the offline age recipient.
 
 Prepare a mode-0700 recovery directory containing mode-0600 files for the repository location,
-recovery SSH key, and pinned known hosts. Then load private values without printing them:
+recovery SSH key, and pinned known hosts. Every initialization, retention, list, check, and extract
+command must isolate all Borg private state inside that workspace; default home cache, config, and
+security locations are prohibited. Then load private values without printing them:
 
 ```bash
 umask 077
 RECOVERY_ROOT="<trusted-mode-0700-recovery-directory>"
+install -d -m 0700 "$RECOVERY_ROOT" \
+  "$RECOVERY_ROOT/borg-cache" \
+  "$RECOVERY_ROOT/borg-config" \
+  "$RECOVERY_ROOT/borg-security"
+chmod 0600 "$RECOVERY_ROOT/borg-repository" \
+  "$RECOVERY_ROOT/recovery-ssh-key" \
+  "$RECOVERY_ROOT/known_hosts"
+export BORG_CACHE_DIR="$RECOVERY_ROOT/borg-cache"
+export BORG_CONFIG_DIR="$RECOVERY_ROOT/borg-config"
+export BORG_SECURITY_DIR="$RECOVERY_ROOT/borg-security"
 export BORG_REPO="$(<"$RECOVERY_ROOT/borg-repository")"
 export BORG_RSH="ssh -i $RECOVERY_ROOT/recovery-ssh-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RECOVERY_ROOT/known_hosts -o StrictHostKeyChecking=yes -p 23"
+export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
 borg --version
 borg init --encryption=none "$BORG_REPO"
 borg check --repository-only
 ```
 
-Require BorgBackup 1.4.5 compatibility. After initialization, install the routine public key by
+`BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes` is the expected, scoped, noninteractive
+confirmation for this deliberately unencrypted Borg repository. Set it only after the pinned
+repository location and host key have been checked, never use a broad interactive auto-confirmation,
+and unset it with the other Borg variables when the operation ends. Require BorgBackup 1.4.5
+compatibility. After initialization, install the routine public key by
 the exact provider-supported restriction that passed the capability gate, then repeat the gate
 against a sacrificial archive before allowing collector writes. Do not initialize first and
 promise to validate the restriction later.
 
-If the reduced model is explicitly approved, record that routine logical deletion and archive-
-name reuse remain possible and that snapshots plus offline transaction rollback are compensating
-controls. Approval of the reduced model does not turn those controls into WORM storage.
+No reduced model is approved. Any future threat-model change must revise this gate and procedure
+before initialization; snapshots and offline transaction rollback must never be described as WORM
+or immutable archive-name protection.
 
 ## `/docker/SherpA-collector` Ownership and Modes
 
@@ -217,18 +244,36 @@ Require the built image's OCI revision to equal `SOURCE_REVISION`. Do not deploy
 short hash, locally modified checkout, or image whose revision cannot be proven.
 
 For rollback, obtain fresh approval, select a previously accepted exact collector revision, and
-retain `data/`, configuration, and every remote archive:
+retain `data/`, configuration, and every remote archive. The Task 0 gate must also be cleared; a
+rollback approval cannot authorize VPS work while it remains blocked.
 
 ```bash
 cd /docker/SherpA-collector
+ROLLBACK_REVISION="<previous-accepted-full-commit>"
+test "${#ROLLBACK_REVISION}" -eq 40
+case "$ROLLBACK_REVISION" in (*[!0-9a-f]*) exit 2;; esac
+
 docker compose down
-git -C source checkout --detach "<previous-accepted-full-commit>"
-SOURCE_REVISION="<previous-accepted-full-commit>" docker compose build --pull
-SOURCE_REVISION="<previous-accepted-full-commit>" docker compose up -d
+git -C source checkout --detach "$ROLLBACK_REVISION"
+ACTUAL_REVISION="$(git -C source rev-parse HEAD)"
+test "$ACTUAL_REVISION" = "$ROLLBACK_REVISION"
+test -z "$(git -C source status --porcelain=v1 --untracked-files=all)"
+
+cd source
+SOURCE_REVISION="$ROLLBACK_REVISION" bash deploy/collector/smoke_build.sh
+cd ..
+SOURCE_REVISION="$ROLLBACK_REVISION" docker compose build --pull
+ROLLBACK_IMAGE_ID="$(SOURCE_REVISION="$ROLLBACK_REVISION" docker compose images -q collector)"
+test -n "$ROLLBACK_IMAGE_ID"
+test "$(docker image inspect "$ROLLBACK_IMAGE_ID" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$ROLLBACK_REVISION"
+SOURCE_REVISION="$ROLLBACK_REVISION" docker compose up -d
 docker compose ps
 ```
 
-Rollback must not delete the spool, ledger, Borg state, Storage Box repository, or snapshots. If
+Stop before building if the detached checkout contains any tracked or untracked change. The smoke
+build and its gates must pass from that exact clean checkout, and the final image's OCI revision
+must equal the intended rollback commit before deployment. Rollback must not delete the spool,
+ledger, Borg state, Storage Box repository, or snapshots. If
 the previous image cannot read the current durable local state, stop and use an explicit recovery
 plan instead of discarding data.
 
@@ -377,10 +422,35 @@ from a trusted environment and always requires fresh approval for unrestricted w
 
 ### 1. Private preflight and deletion-marker check
 
-1. Load `BORG_REPO`, `BORG_RSH`, the accepted object ledger, and prior evidence from mode-0600
-   files without printing private values.
-2. Save `borg list --json` to a mode-0600 local file and compare the complete archive set with the
-   accepted ledger.
+The Task 0 gate must be cleared before this procedure. Create the private Borg state directories
+for this maintenance session before the first Borg command:
+
+```bash
+umask 077
+RECOVERY_ROOT="<trusted-mode-0700-recovery-directory>"
+install -d -m 0700 "$RECOVERY_ROOT" \
+  "$RECOVERY_ROOT/borg-cache" \
+  "$RECOVERY_ROOT/borg-config" \
+  "$RECOVERY_ROOT/borg-security"
+chmod 0600 "$RECOVERY_ROOT/borg-repository" \
+  "$RECOVERY_ROOT/recovery-ssh-key" \
+  "$RECOVERY_ROOT/known_hosts"
+export BORG_CACHE_DIR="$RECOVERY_ROOT/borg-cache"
+export BORG_CONFIG_DIR="$RECOVERY_ROOT/borg-config"
+export BORG_SECURITY_DIR="$RECOVERY_ROOT/borg-security"
+export BORG_REPO="$(<"$RECOVERY_ROOT/borg-repository")"
+export BORG_RSH="ssh -i $RECOVERY_ROOT/recovery-ssh-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RECOVERY_ROOT/known_hosts -o StrictHostKeyChecking=yes -p 23"
+export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
+```
+
+The scoped unknown-unencrypted-repository confirmation is expected because age, not Borg, encrypts
+payloads. Do not continue if the pinned repository or host identity differs from the approved
+operator record.
+
+1. Load the accepted object ledger and prior evidence from mode-0600 files without printing private
+   values.
+2. Save `borg list --json` to a mode-0600 file inside `RECOVERY_ROOT` and compare the complete
+   archive set with the accepted ledger.
 3. Treat any expected archive missing from the current list, any canonical archive name mapped to
    unexpected content/metadata, any provider or transaction-history deletion marker, or any
    unexplained archive-name reuse as an unexpected deletion-marked archive.
@@ -420,14 +490,16 @@ compare them to the approved dry-run result.
 ### 4. Restore restrictions and remove credentials
 
 If a future provider/restriction passes the full threat model, reapply that exact routine
-restriction and repeat the capability checks before restarting collector writes. If the user has
-instead approved the reduced model, restore its documented routine restriction and verify the
-snapshot/offline-rollback controls without describing them as immutable.
+restriction and repeat the capability checks before restarting collector writes. No reduced model
+is approved; do not substitute snapshot/offline-rollback controls for a passing restriction.
 
-Unset Borg variables, terminate the recovery SSH agent if used, securely remove temporary key and
-repository files, and confirm the recovery private key is absent from the VPS, containers, shell
-history, logs, and evidence. Removal of temporary recovery credentials is part of the maintenance
-procedure, not optional cleanup.
+After verification, unset `BORG_REPO`, `BORG_RSH`, `BORG_CACHE_DIR`, `BORG_CONFIG_DIR`,
+`BORG_SECURITY_DIR`, and `BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK`, and terminate the recovery
+SSH agent if used. Then present the exact temporary workspace and artifacts, impact, and retention
+fallback and obtain a separate fresh cleanup approval. Only after that approval securely remove
+temporary key, repository, cache, config, security, list, and recovery files and confirm the
+recovery private key is absent from the VPS, containers, shell history, logs, and evidence. Without
+cleanup approval, retain the mode-0700 workspace under an assigned custodian; do not delete it.
 
 ## Independent Retrieval, Decryption, and Verification
 
@@ -435,25 +507,45 @@ Recovery must work without Railway and without the running collector. Use a trus
 machine with the recovery SSH identity, pinned host keys, the required offline age identity, and
 the exact accepted collector binary.
 
-Create a private recovery workspace and select an approved object ID without printing private
-repository data:
+The Task 0 gate must be cleared and the restore/recovery operation must have fresh approval before
+this procedure. Create a private recovery workspace and select the required object through the
+restricted local ledger. Keep the object identifier only in this mode-0700 workspace for command
+selection and comparisons; do not copy it into acceptance evidence:
 
 ```bash
 umask 077
 RECOVERY_ROOT="<trusted-mode-0700-recovery-directory>"
+install -d -m 0700 "$RECOVERY_ROOT" \
+  "$RECOVERY_ROOT/borg-cache" \
+  "$RECOVERY_ROOT/borg-config" \
+  "$RECOVERY_ROOT/borg-security"
+chmod 0600 "$RECOVERY_ROOT/borg-repository" \
+  "$RECOVERY_ROOT/recovery-ssh-key" \
+  "$RECOVERY_ROOT/known_hosts" \
+  "$RECOVERY_ROOT/age-identity"
 OBJECT_HEX="<64-lowercase-hex-object-digest>"
 [[ "$OBJECT_HEX" =~ ^[0-9a-f]{64}$ ]]
+export BORG_CACHE_DIR="$RECOVERY_ROOT/borg-cache"
+export BORG_CONFIG_DIR="$RECOVERY_ROOT/borg-config"
+export BORG_SECURITY_DIR="$RECOVERY_ROOT/borg-security"
 export BORG_REPO="$(<"$RECOVERY_ROOT/borg-repository")"
 export BORG_RSH="ssh -i $RECOVERY_ROOT/recovery-ssh-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RECOVERY_ROOT/known_hosts -o StrictHostKeyChecking=yes -p 23"
+export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
 cd "$RECOVERY_ROOT"
 borg list --json >archives.json
-chmod 600 archives.json
+chmod 0600 archives.json
 borg extract "::sherpa-$OBJECT_HEX" "$OBJECT_HEX.tar.gz.age"
+chmod 0600 "$OBJECT_HEX.tar.gz.age"
 age --decrypt --identity "$RECOVERY_ROOT/age-identity" \
   --output "$RECOVERY_ROOT/archive.tar.gz" \
   "$RECOVERY_ROOT/$OBJECT_HEX.tar.gz.age"
+chmod 0600 "$RECOVERY_ROOT/archive.tar.gz"
 collector verify "$RECOVERY_ROOT/archive.tar.gz"
 ```
+
+The scoped `BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes` handles the expected confirmation for
+this deliberately unencrypted repository without an interactive prompt and without writing Borg
+security metadata to a default home location. Abort on any unexpected repository identity prompt.
 
 Require `collector verify` to report valid, the expected artifact count/verified byte summary, and
 `manifest_final=true`. It must not print member names or payloads. Independently verify the final
@@ -472,7 +564,8 @@ Evidence may contain only:
 - platform, Borg version, Compose checksum, and safe configuration names;
 - public collector hostname, certificate classification, and health/readiness results;
 - append-only decision classification and the non-secret facts supporting it;
-- archive/object IDs only when explicitly approved as safe evidence;
+- non-sensitive stored/existing, byte-identity, extraction, decryption, and verification summaries,
+  but not archive/object IDs;
 - compressed/encrypted sizes, timestamps, archive counts, and pass/fail classifications;
 - recovery service/deployment/volume IDs and aggregate audit results.
 

@@ -24,13 +24,15 @@
 - A failed local preflight blocks provisioning. A failed Postgres deployment blocks registry. A failed 2c-iii gate blocks web. A failed 2d gate blocks 2e.
 - Before every deliberate outage, rollback, restore, temporary sibling/recovery resource, or cleanup of recovery resources, present the exact action, expected impact, rollback, and resources, then wait for operator approval.
 - If a code defect is discovered, stop this operational plan, invoke systematic-debugging and test-driven-development, create a focused regression test and permanent fix, run the complete local gate, push only the required fix commit, update the candidate commit in the evidence file, and resume at the blocked task.
-- Task 0 is conclusively **Blocked**: the tested routine Storage Box identity could logically delete a Borg archive and reuse its archive name. The authoritative repository must not be initialized and Task 13 collector deployment must not proceed unless the provider/restriction model changes and passes the complete capability gate, or the user explicitly approves the documented reduced model. No reduced model is currently approved.
-- The reduced model is an available decision only: it relies on offline transaction rollback plus the maximum practical Storage Box snapshot schedule and does not provide immutable archive names in the routine view. Task 0 proved offline rollback of a recovery-identity repository download, not in-place remote repair/prune/compact followed by restoration of append-only protection.
+- Task 0 is conclusively **Blocked**: the tested routine Storage Box identity could logically delete a Borg archive and reuse its archive name. No reduced model is approved.
+- **FAIL CLOSED:** while Task 0 remains Blocked, do not initialize an authoritative repository; perform any VPS preparation, configuration, build, deploy, restart, or monitoring work; set/change/validate collector-dependent Railway variables; restart or redeploy a registry that would start the export scheduler; force an upload; or run collector outage, queue rediscovery, idempotency, retention, restore, or recovery drills. No approval checkpoint in this plan overrides this gate.
+- The gate clears only after a changed provider/restriction model passes the complete capability exercise, or a separately approved threat-model change is documented in revised runbooks before execution. The previously considered reduced model relies on offline transaction rollback plus maximum practical snapshots, does not provide immutable archive names, and is not authorization to proceed. Task 0 proved offline rollback of a recovery-identity repository download, not in-place remote repair/prune/compact followed by restoration of append-only protection.
+- Repository source, documentation, and local-only validation work through SDD Task 12 may continue. Within this acceptance plan, any step that would contact or mutate Railway, the VPS, or Storage Box remains subject to its own scope and approvals; collector-dependent steps additionally remain prohibited until this gate clears.
 - If the configured off-site collector cannot be proven durable and independently recoverable through recovery-only Borg extraction, offline age decryption, and `collector verify`, fail the gate. Do not substitute local container storage or another Railway volume.
 
 ## File Structure
 
-- Create: `docs/deployment/evidence/2026-07-20-railway-staging-acceptance.md` — secret-safe execution record with metadata, approval checkpoints, one row per acceptance step, deployment/object IDs, and final status.
+- Create: `docs/deployment/evidence/2026-07-20-railway-staging-acceptance.md` — secret-safe execution record with metadata, approval checkpoints, one row per acceptance step, deployment/resource IDs, non-sensitive collector proof summaries, and final status. Do not record collector archive/object IDs.
 - Modify during execution: `docs/deployment/evidence/2026-07-20-railway-staging-acceptance.md` only.
 - Do not modify application code unless a separately diagnosed defect requires the TDD exception in Global Constraints.
 - Ephemeral test homes, auth response files, stack fixtures, and downloaded `/proc` files live beneath a mode-0700 directory created by `mktemp -d`; delete it only after the evidence record no longer needs local non-secret summaries.
@@ -227,7 +229,7 @@ Create `docs/deployment/evidence/2026-07-20-railway-staging-acceptance.md` with 
 
 | Field | Value |
 |---|---|
-| Collector object ID | Not run |
+| Collector stored/existing proof | Not run; record classification and timestamp only, never the object ID |
 | Recovery Postgres/service IDs | Not run |
 | Recovery registry/service IDs | Not run |
 | Recovery volume IDs | Not run |
@@ -532,6 +534,11 @@ git commit -m $'docs: record Railway Postgres provisioning\n\nCo-Authored-By: Cl
 - Consumes: active Postgres, existing registry `/data` volume, two operator-controlled GitHub identities, and two source IPs.
 - Produces: healthy registry, two isolated CLI sessions, one published acceptance stack, verified auth controls, host pinning, and persistence across registry redeploy.
 
+**Task 0 stop gate:** this task's expected configuration includes an enabled export scheduler. While
+Task 0 is Blocked, do not validate the live collector values, redeploy/restart the registry, or run
+this task. Resume only after the global capability gate is formally cleared. Local exact-candidate
+auth/proxy tests may continue independently without Railway access.
+
 - [ ] **Step 1: Verify required registry variable names without displaying values**
 
 Run:
@@ -802,7 +809,21 @@ PY
 
 Expected: second start 429, immediate second registered poll 429, random code 410, oversized body 413. Inspect registry logs by failure class only and confirm locally rejected requests do not emit GitHub-call errors.
 
-- [ ] **Step 9: Verify Railway edge IP identity from two real networks**
+- [ ] **Step 9: Verify candidate IP selection and live Railway rate-limit bucketing**
+
+First, from the exact-candidate source directory, run:
+
+```sh
+ACCEPT_ROOT="$(cat /tmp/sherpa-accept-root-current)"
+cd "$ACCEPT_ROOT"
+go test -count=1 ./internal/registry/api -run '^TestDeviceStartClientIPHonorsForwardedFor$'
+```
+
+Expected: pass. This candidate test proves the exact application logic: valid `X-Real-IP` first,
+then the final valid `X-Forwarded-For` hop, then direct peer fallback; it also covers malformed or
+missing forwarded values and bucket behavior. The live probe below proves only observed edge
+bucketing and resistance to client-supplied-header bypass. It cannot observe sanitized header values
+or identify which internal fallback branch ran.
 
 Create `$LIVE_ROOT/edge-probe.sh`:
 
@@ -821,7 +842,11 @@ EOF
 chmod 700 "$LIVE_ROOT/edge-probe.sh"
 ```
 
-After each network's current rate window has expired, the operator runs the script once from network A and once from genuinely different network B. Expected on each network: first 200, second 429, forged headers 429. Record only network labels and status sequences, never IP addresses unless the operator explicitly approves recording them.
+After each network's current rate window has expired, the operator runs the script once from
+network A and once from genuinely different network B. Expected on each network: first `200`,
+second `429`, forged-header requests `429`. Two independent first allowances plus no forged-header
+fresh allowance prove live bucketing/bypass behavior only. Record network labels and status
+sequences, not IP addresses or claims about the header values Railway supplied internally.
 
 - [ ] **Step 10: Verify search, detail, clone, and host-header pinning**
 
@@ -906,6 +931,11 @@ git commit -m $'docs: record initial registry staging gate\n\nCo-Authored-By: Cl
 - Consumes: passing Task 4, configured collector variables, published acceptance stack.
 - Produces: durable collector object, approved temporary recovery resources, restored Postgres and Git, passing audit and smoke tests.
 
+**Task 0 stop gate:** every step in this task is prohibited while Task 0 is Blocked. Do not save or
+change collector-dependent variables, restart/redeploy the registry for export, alter collector
+availability, access the VPS/Storage Box, manipulate the queue, upload, extract, restore, provision
+temporary recovery resources, or clean up drill artifacts. No approval below overrides this gate.
+
 - [ ] **Step 1: Save the existing export interval without displaying it**
 
 Run:
@@ -948,7 +978,10 @@ railway variable set SHERPA_EXPORT_INTERVAL=1m \
   --service d5d848e6-4655-4823-839f-0a2d1659bcb4 --json
 ```
 
-Wait for the triggered deployment to become `SUCCESS`, then monitor secret-safe status/log summaries until a collector upload succeeds or a bounded failure is established. Record the new collector object ID and timestamp without recording the collector URL.
+Wait for the triggered deployment to become `SUCCESS`, then monitor secret-safe status/log
+summaries until a collector upload succeeds or a bounded failure is established. Keep the exact
+object ID only in a mode-0600 private workspace if it is needed for the subsequent recovery command;
+record only the `stored`/`existing` classification and timestamp in acceptance evidence.
 
 - [ ] **Step 4: Restore the original export interval immediately after the upload attempt**
 
@@ -968,82 +1001,278 @@ Expected: another healthy registry deployment with the original interval restore
 
 - [ ] **Step 5: Request approval for restart and idempotency queue drills**
 
-Present this exact checkpoint:
+This future procedure uses only the primary registry service and its already attached `/data`
+volume. It stops the export writer by redeploying the same accepted registry image with all four
+scheduler settings blank, then uses `railway ssh` against that active scheduler-disabled deployment.
+It never attaches the volume to a sidecar, job, second service, or overlapping deployment. If
+Railway cannot provide SSH command execution against that same-volume deployment, stop and fail the
+drill; do not improvise another volume-access mechanism.
+
+Present this exact checkpoint, including the operator-supplied reversible collector-availability
+control and its exact reversal:
 
 ```text
-Action: make the collector temporarily unavailable through an approved reversible control, temporarily set the registry export interval to 1m, create exactly one completed `/data/exports` archive, restart/redeploy the registry while it is pending, restore collector reachability, and then replay the same byte-identical archive after remote commit to exercise the `existing` path.
-Impact: one bounded collector outage, registry configuration deployments/restarts, one additional export object, and controlled queue-file preservation/restoration while the registry writer is fully stopped.
-Rollback: immediately restore collector reachability and the saved export interval; preserve the only queue archive and its byte-identical drill copy; restart the accepted registry image without manually deleting either copy.
-Resources changed: collector availability control, primary registry `SHERPA_EXPORT_INTERVAL` and deployments, `/data/exports`, and one mode-0600 drill copy outside the queue on the same volume.
+Action: make the collector temporarily unavailable through the named reversible control; set the registry export interval to 1m; create exactly one pending archive; redeploy once to prove startup rediscovery; blank all four export settings with one redeploy to stop the scheduler while preserving the same /data volume; make a byte-identical copy outside the queue; restore the settings and collector; then repeat the scheduler-disabled redeploy, restore the copy with its accepted filename/owner/mode, and restart for controlled replay.
+Impact: one bounded collector outage, multiple accepted-image registry redeploys with brief /data handoff downtime, one additional remote object, and one retained same-volume drill copy.
+Rollback: restore the four saved export settings and collector reachability; redeploy the accepted image; preserve the pending archive and drill copy; perform no manual queue deletion.
+Resources changed: named collector availability control, primary registry export settings/deployments, `/data/exports`, and `/data/export-drill` on the existing primary registry volume.
 ```
 
-Wait for approval. Before any manual queue operation, prove the registry process is stopped, its
-cooperative lifetime lock is released, and no sidecar, shell, job, or second registry is running as
-the registry UID. Never mutate the queue manually while the scheduler is active.
-
-- [ ] **Step 6: Prove restart-safe queue discovery**
-
-1. Confirm `/data/exports` contains no completed archive before the drill.
-2. Make the collector unavailable using only the approved reversible control and set the export
-   interval to `1m` under the Step 5 approval.
-3. Wait until exactly one completed archive exists in `/data/exports`. Confirm it remains pending,
-   record its SHA-256 object ID and safe filesystem metadata, and confirm no second archive is
-   created. Do not print the archive, manifest, member names, or collector credentials.
-4. Restart or redeploy the registry while the collector remains unavailable. Confirm startup
-   rediscovers the same byte-identical archive, retains it, and does not create another export.
-5. Fully stop the registry writer and preserve an exact mode-0600 copy outside `/data/exports` on
-   the persistent volume for Step 7. Record that its SHA-256 matches the pending object ID. Do not
-   use a concurrent same-UID helper.
-6. Restart the accepted registry image, restore collector reachability, and immediately restore
-   the saved original export interval. Accept only `201 stored` or `200 existing` with the matching
-   object ID. Confirm the local queue archive is deleted only after that validated proof.
-
-A missing archive after restart, a changed digest, a second queued export, local deletion before
-validated remote proof, or an unclassified response fails the gate.
-
-- [ ] **Step 7: Prove remote-commit/local-delete idempotency**
-
-1. Use the validated Step 6 `stored` or `existing` response for the exact object ID and its
-   successful final Borg `Exists` proof to establish that the remote commit completed under archive name
-   `sherpa-<object-id>`; archive-name presence alone is not integrity proof.
-2. Fully stop the registry writer and prove the cooperative lock is released.
-3. Verify the preserved copy still hashes to the exact object ID, then restore that byte-identical
-   completed archive to an otherwise empty `/data/exports` with the entrypoint-required filename,
-   UID/GID, and mode. No manual same-UID queue mutation is allowed while the scheduler is active.
-4. Restart the accepted registry image. Confirm startup discovers the archive, the collector
-   returns `200 existing` for the matching object ID, and only then the registry removes the local
-   queue archive.
-5. Confirm `/data/exports` is empty, the remote object is unchanged, and the export interval is the
-   saved original value. Remove the out-of-queue drill copy only within the Step 5 approved cleanup
-   scope after these checks pass.
-
-Any `stored` response for changed bytes, mismatched object ID, premature local deletion, concurrent
-queue writer, or unproven remote presence fails the gate.
-
-- [ ] **Step 8: Prove independent Borg retrieval, age decryption, and archive verification**
-
-The running collector has no retrieval/download API. In a trusted recovery environment, use the
-recovery-only Borg SSH identity and pinned host key to select exact archive
-`sherpa-<object-id>` and extract `<object-id>.tar.gz.age`. Keep repository location, SSH key, and
-offline age private identity in mode-0600 files and never print them. Decrypt to
-`$LIVE_ROOT/recovery/archive.tar.gz`, then run the exact Task-12-bound collector binary:
+Wait for fresh approval. Save all four current scheduler values without displaying or storing
+unfiltered Railway JSON:
 
 ```sh
 LIVE_ROOT="$(cat /tmp/sherpa-live-root-current)"
 . "$LIVE_ROOT/context.sh"
-mkdir -m 700 "$LIVE_ROOT/recovery"
-chmod 600 "$LIVE_ROOT/recovery/archive.tar.gz.age"
-age --decrypt --identity "$LIVE_ROOT/recovery/age-identity" \
-  --output "$LIVE_ROOT/recovery/archive.tar.gz" \
-  "$LIVE_ROOT/recovery/archive.tar.gz.age"
-chmod 600 "$LIVE_ROOT/recovery/archive.tar.gz"
-collector verify "$LIVE_ROOT/recovery/archive.tar.gz"
-tar -tzf "$LIVE_ROOT/recovery/archive.tar.gz" >"$LIVE_ROOT/recovery/archive-members.txt"
-chmod 600 "$LIVE_ROOT/recovery/archive-members.txt"
-grep -Fx 'postgres.dump' "$LIVE_ROOT/recovery/archive-members.txt"
-grep -Fx 'manifest.json' "$LIVE_ROOT/recovery/archive-members.txt"
-grep -F "repos/$OWNER_A/$STACK_NAME.bundle" "$LIVE_ROOT/recovery/archive-members.txt"
+for key in SHERPA_EXPORT_URL SHERPA_EXPORT_TOKEN SHERPA_EXPORT_INTERVAL SHERPA_EXPORT_ARCHIVE_DIR; do
+  railway variable list \
+    --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+    --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+    --service d5d848e6-4655-4823-839f-0a2d1659bcb4 \
+    --json | jq -er --arg key "$key" '.[$key] | select(type == "string" and length > 0)' \
+      >"$AUTH_DIR/$key"
+  chmod 0600 "$AUTH_DIR/$key"
+done
 ```
+
+- [ ] **Step 6: Prove restart-safe queue discovery and preserve a byte-identical copy**
+
+1. With collector reachability still normal, use `railway ssh` only to assert that
+   `/data/exports` has no completed `sherpa-*.tar.gz` file. Do not mutate the queue.
+2. Apply the approved collector-unavailable control and set the interval to `1m`. Wait for exactly
+   one completed queue file, then redeploy the accepted registry once while the collector remains
+   unavailable. Confirm secret-safe retry summaries report `queue_count=1` after startup and no
+   second completed archive appears. Do not record the file digest or collector object ID.
+3. Stop the export writer without moving the volume by blanking the four scheduler settings in one
+   variable update and redeploying the same accepted image:
+
+```sh
+railway variable set \
+  SHERPA_EXPORT_URL= SHERPA_EXPORT_TOKEN= SHERPA_EXPORT_INTERVAL= SHERPA_EXPORT_ARCHIVE_DIR= \
+  --skip-deploys \
+  --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+  --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+  --service d5d848e6-4655-4823-839f-0a2d1659bcb4 >/dev/null
+railway redeploy \
+  --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+  --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+  --service d5d848e6-4655-4823-839f-0a2d1659bcb4 \
+  --yes --json
+```
+
+4. After that deployment is healthy, prove scheduler disablement, one registry process, and a free
+   queue lock. Stop if any check fails:
+
+```sh
+railway ssh \
+  --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+  --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+  --service d5d848e6-4655-4823-839f-0a2d1659bcb4 \
+  sh -lc '
+    set -eu
+    test -z "${SHERPA_EXPORT_URL:-}${SHERPA_EXPORT_TOKEN:-}${SHERPA_EXPORT_INTERVAL:-}${SHERPA_EXPORT_ARCHIVE_DIR:-}"
+    count=0
+    for comm in /proc/[0-9]*/comm; do
+      [ "$(cat "$comm")" = registry ] && count=$((count + 1)) || true
+    done
+    test "$count" -eq 1
+    flock -n /data/exports -c true
+  '
+```
+
+5. While that scheduler-disabled deployment owns the same volume, create the exact copy. The
+   accepted queue filename is `sherpa-YYYYMMDDTHHMMSSZ-<UnixNano>.tar.gz`; regular-file mode must be
+   `0600`, and UID/GID must equal the queue directory owner. This command records the original name
+   only in the mode-0600 drill directory and proves byte identity with `cmp`, without printing or
+   recording a digest:
+
+```sh
+railway ssh \
+  --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+  --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+  --service d5d848e6-4655-4823-839f-0a2d1659bcb4 \
+  sh -lc '
+    set -eu
+    QUEUE=/data/exports
+    DRILL=/data/export-drill
+    flock -n "$QUEUE" -c true
+    set -- "$QUEUE"/sherpa-*.tar.gz
+    [ "$#" -eq 1 ] && [ -f "$1" ] && [ ! -L "$1" ]
+    archive=$1
+    base=${archive##*/}
+    printf "%s\n" "$base" | grep -Eq "^sherpa-[0-9]{8}T[0-9]{6}Z-[0-9]+[.]tar[.]gz$"
+    test "$(stat -c %a "$archive")" = 600
+    test "$(stat -c %u:%g "$archive")" = "$(stat -c %u:%g "$QUEUE")"
+    test ! -e "$DRILL"
+    install -d -m 0700 "$DRILL"
+    cp --reflink=never --preserve=mode,ownership,timestamps -- "$archive" "$DRILL/archive.copy"
+    printf "%s\n" "$base" >"$DRILL/original-name"
+    chmod 0600 "$DRILL/archive.copy" "$DRILL/original-name"
+    cmp -s -- "$archive" "$DRILL/archive.copy"
+    sync -f "$DRILL/archive.copy"
+    sync -f "$DRILL"
+  '
+```
+
+6. Restore the four exact values with `--skip-deploys`, reverse the approved collector outage, and
+   redeploy once. Redirect each setter's output so the token cannot reach evidence:
+
+```sh
+for key in SHERPA_EXPORT_URL SHERPA_EXPORT_TOKEN SHERPA_EXPORT_INTERVAL SHERPA_EXPORT_ARCHIVE_DIR; do
+  railway variable set "$key" --stdin --skip-deploys \
+    --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+    --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+    --service d5d848e6-4655-4823-839f-0a2d1659bcb4 \
+    <"$AUTH_DIR/$key" >/dev/null
+done
+railway redeploy \
+  --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+  --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+  --service d5d848e6-4655-4823-839f-0a2d1659bcb4 \
+  --yes --json
+```
+
+Accept only a collector `201 stored` or `200 existing` classification followed by an empty queue.
+Record the classification, timestamp, byte-copy check, ownership/mode check, and startup
+rediscovery result only. A missing archive, second archive, changed copy, premature queue deletion,
+nonmatching response (validated internally by the registry), or unsupported same-volume access
+fails the gate.
+
+- [ ] **Step 7: Prove remote-commit/local-delete idempotency by controlled replay**
+
+1. Require the Step 6 accepted response and final Borg exact-presence proof before replay. Keep the
+   object ID private; archive-name presence alone is not integrity proof.
+2. Obtain a new fresh approval for this second scheduler stop/redeploy. Repeat Step 6's four-value
+   blanking, accepted-image redeploy, empty-environment check, one-registry-process check, and
+   `flock -n /data/exports -c true` proof. Confirm the queue is otherwise empty.
+3. Restore the copy with its original accepted name, exact queue owner, mode `0600`, byte identity,
+   and durable file/directory sync:
+
+```sh
+railway ssh \
+  --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+  --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+  --service d5d848e6-4655-4823-839f-0a2d1659bcb4 \
+  sh -lc '
+    set -eu
+    QUEUE=/data/exports
+    DRILL=/data/export-drill
+    flock -n "$QUEUE" -c true
+    test -d "$DRILL" && test ! -L "$DRILL"
+    test -f "$DRILL/archive.copy" && test ! -L "$DRILL/archive.copy"
+    base=$(cat "$DRILL/original-name")
+    printf "%s\n" "$base" | grep -Eq "^sherpa-[0-9]{8}T[0-9]{6}Z-[0-9]+[.]tar[.]gz$"
+    set -- "$QUEUE"/sherpa-*.tar.gz
+    [ "$#" -eq 1 ] && [ ! -e "$1" ]
+    queue_uid=$(stat -c %u "$QUEUE")
+    queue_gid=$(stat -c %g "$QUEUE")
+    cp --reflink=never -- "$DRILL/archive.copy" "$QUEUE/$base"
+    chown "$queue_uid:$queue_gid" "$QUEUE/$base"
+    chmod 0600 "$QUEUE/$base"
+    cmp -s -- "$DRILL/archive.copy" "$QUEUE/$base"
+    test "$(stat -c %u:%g "$QUEUE/$base")" = "$queue_uid:$queue_gid"
+    test "$(stat -c %a "$QUEUE/$base")" = 600
+    sync -f "$QUEUE/$base"
+    sync -f "$QUEUE"
+  '
+```
+
+4. Restore the four scheduler values exactly as in Step 6 and redeploy the accepted image. Startup
+   must discover the restored file, the collector access log must show `POST /v1/exports` status
+   `200`, and only then may the registry remove the local queue file. Record `existing`, timestamp,
+   startup rediscovery, queue deletion-after-proof, and byte-identity pass only; do not record the
+   object ID.
+
+Any `201 stored` replay, premature deletion, concurrent writer, mismatched response, or unproven
+remote exact presence fails the gate.
+
+- [ ] **Step 7a: Request separate approval immediately before drill-copy cleanup**
+
+Present:
+
+```text
+Action: delete only `/data/export-drill/archive.copy` and `/data/export-drill/original-name`, then remove the empty `/data/export-drill` directory through `railway ssh` on the primary registry service.
+Impact: removes the retained byte-identical drill copy and its private filename record; the remote object and `/data/exports` remain unchanged.
+Rollback: none for the local drill copy; if approval is absent, retain it mode 0600/0700 under the named custodian.
+Resources changed: `/data/export-drill` on the existing primary registry volume only.
+```
+
+Wait for fresh approval. If approved, run exactly; otherwise retain the directory:
+
+```sh
+railway ssh \
+  --project 865ca83b-9c9e-4e50-b424-e267aa43988f \
+  --environment 53d89401-bec2-49a3-ac58-8dc93b29d049 \
+  --service d5d848e6-4655-4823-839f-0a2d1659bcb4 \
+  sh -lc '
+    set -eu
+    DRILL=/data/export-drill
+    test -d "$DRILL" && test ! -L "$DRILL"
+    test -f "$DRILL/archive.copy" && test ! -L "$DRILL/archive.copy"
+    test -f "$DRILL/original-name" && test ! -L "$DRILL/original-name"
+    rm -- "$DRILL/archive.copy" "$DRILL/original-name"
+    rmdir -- "$DRILL"
+    sync -f /data
+  '
+```
+
+- [ ] **Step 8: Prove independent Borg retrieval, age decryption, and archive verification**
+
+Present a fresh recovery-operation checkpoint naming the selected non-secret recovery-point label,
+read-only Borg extraction, offline decryption, verification commands, temporary workspace, impact,
+and abort/retention plan. Wait for approval. This approval does not include deleting the encrypted,
+decrypted, Borg-state, or verification artifacts; their cleanup requires a later separate approval.
+
+The running collector has no retrieval/download API. In a freshly approved trusted recovery
+environment, use the recovery-only Borg SSH identity and pinned host key to select the exact archive
+from the private ledger. Keep its object ID, repository location, SSH key, and offline age private
+identity in mode-0600 files and never copy the object ID into acceptance evidence. Isolate every
+Borg private-state path inside the mode-0700 recovery workspace, and handle the expected unknown
+unencrypted repository confirmation only with the scoped Borg variable:
+
+```sh
+LIVE_ROOT="$(cat /tmp/sherpa-live-root-current)"
+. "$LIVE_ROOT/context.sh"
+umask 077
+RECOVERY_DIR="$LIVE_ROOT/recovery"
+install -d -m 0700 "$RECOVERY_DIR" \
+  "$RECOVERY_DIR/borg-cache" \
+  "$RECOVERY_DIR/borg-config" \
+  "$RECOVERY_DIR/borg-security"
+chmod 0600 "$RECOVERY_DIR/borg-repository" \
+  "$RECOVERY_DIR/recovery-ssh-key" \
+  "$RECOVERY_DIR/known_hosts" \
+  "$RECOVERY_DIR/age-identity" \
+  "$RECOVERY_DIR/object-hex"
+OBJECT_HEX="$(<"$RECOVERY_DIR/object-hex")"
+printf '%s\n' "$OBJECT_HEX" | grep -Eq '^[0-9a-f]{64}$'
+export BORG_CACHE_DIR="$RECOVERY_DIR/borg-cache"
+export BORG_CONFIG_DIR="$RECOVERY_DIR/borg-config"
+export BORG_SECURITY_DIR="$RECOVERY_DIR/borg-security"
+export BORG_REPO="$(<"$RECOVERY_DIR/borg-repository")"
+export BORG_RSH="ssh -i $RECOVERY_DIR/recovery-ssh-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$RECOVERY_DIR/known_hosts -o StrictHostKeyChecking=yes -p 23"
+export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
+cd "$RECOVERY_DIR"
+borg list --json >archives.json
+chmod 0600 archives.json
+borg extract "::sherpa-$OBJECT_HEX" "$OBJECT_HEX.tar.gz.age"
+chmod 0600 "$OBJECT_HEX.tar.gz.age"
+age --decrypt --identity "$RECOVERY_DIR/age-identity" \
+  --output "$RECOVERY_DIR/archive.tar.gz" \
+  "$RECOVERY_DIR/$OBJECT_HEX.tar.gz.age"
+chmod 0600 "$RECOVERY_DIR/archive.tar.gz"
+collector verify "$RECOVERY_DIR/archive.tar.gz"
+tar -tzf "$RECOVERY_DIR/archive.tar.gz" >"$RECOVERY_DIR/archive-members.txt"
+chmod 0600 "$RECOVERY_DIR/archive-members.txt"
+grep -Fx 'postgres.dump' "$RECOVERY_DIR/archive-members.txt"
+grep -Fx 'manifest.json' "$RECOVERY_DIR/archive-members.txt"
+grep -F "repos/$OWNER_A/$STACK_NAME.bundle" "$RECOVERY_DIR/archive-members.txt"
+unset BORG_REPO BORG_RSH BORG_CACHE_DIR BORG_CONFIG_DIR BORG_SECURITY_DIR \
+  BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK OBJECT_HEX
+```
+
+Abort on any unexpected repository-identity prompt. This expected-confirmation variable is not a
+general yes-to-all control and does not authorize a different repository location.
 
 Require `collector verify` to pass before listing or importing. Independently verify the final
 manifest and every artifact size and SHA-256. If Borg extraction, age decryption, collector
@@ -1746,6 +1975,9 @@ Expected: the queued follow syncs once and no duplicate follow is created.
 
 - [ ] **Step 3: Request approval and verify restored social/session data**
 
+This step is collector-dependent and must not be requested or executed while Task 0 is Blocked. The
+global gate must be formally cleared before the fresh approval below can be considered.
+
 Because Task 8 created follows, events, verdict feedback, grants, and sessions after the Task 5 archive, present this checkpoint:
 
 ```text
@@ -1785,7 +2017,7 @@ railway variable set SHERPA_EXPORT_INTERVAL --stdin \
   --json <"$AUTH_DIR/original-export-interval-2"
 ```
 
-If the upload did not complete with `201 stored` or `200 existing` for the matching object ID, fail 2e.11 and do not create recovery-2 resources. Otherwise, from a trusted recovery environment, use the recovery-only Borg SSH identity and pinned host key to extract exact archive `sherpa-<object-id>` and file `<object-id>.tar.gz.age`; the running collector has no retrieval/download interface. Decrypt it with the required offline age private identity into `$LIVE_ROOT/recovery/archive-2.tar.gz`, mode 0600, and run the exact Task-12-bound `collector verify` before inspection or import. Verify `postgres.dump`, final `manifest.json`, and `repos/$OWNER_A/$STACK_NAME.bundle`; independently verify every manifest size and SHA-256. Create `postgres-recovery-2` pinned to PG16 with a fresh 5 GB `/var/lib/postgresql/data` volume and no public domain. Create `registry-recovery-2` from the accepted commit with `/railway.json`, a fresh 5 GB `/data` volume, a distinct temporary domain, a database reference only to `postgres-recovery-2`, recovery-specific public base URL, and export scheduling disabled. Restore the dump with libpq environment variables rather than credentials in argv, reconstruct each bare Git repository with `git clone --mirror`, start the recovery registry, and run its health, data-shape, search/detail/clone, and `registry audit` checks. Never overwrite the Task 5 recovery stores.
+If the upload did not complete with a registry-validated `201 stored` or `200 existing`, fail 2e.11 and do not create recovery-2 resources. Record only that classification and timestamp, not the object ID. Otherwise, repeat Task 5 Step 8's private recovery procedure with `RECOVERY_DIR="$LIVE_ROOT/recovery-2"`: create that workspace plus its `borg-cache`, `borg-config`, and `borg-security` directories mode 0700; set dedicated `BORG_CACHE_DIR`, `BORG_CONFIG_DIR`, and `BORG_SECURITY_DIR`; use only the scoped `BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes` confirmation; extract through the recovery-only Borg SSH identity and pinned host key; decrypt with the offline age identity into `$RECOVERY_DIR/archive.tar.gz`, mode 0600; and run the exact Task-12-bound `collector verify` before inspection or import. The running collector has no retrieval/download interface. Verify `postgres.dump`, final `manifest.json`, and `repos/$OWNER_A/$STACK_NAME.bundle`; independently verify every manifest size and SHA-256. Create `postgres-recovery-2` pinned to PG16 with a fresh 5 GB `/var/lib/postgresql/data` volume and no public domain. Create `registry-recovery-2` from the accepted commit with `/railway.json`, a fresh 5 GB `/data` volume, a distinct temporary domain, a database reference only to `postgres-recovery-2`, recovery-specific public base URL, and export scheduling disabled. Restore the dump with libpq environment variables rather than credentials in argv, reconstruct each bare Git repository with `git clone --mirror`, start the recovery registry, and run its health, data-shape, search/detail/clone, and `registry audit` checks. Never overwrite the Task 5 recovery stores.
 
 Expected restored data:
 
@@ -1844,7 +2076,13 @@ Inspect primary registry, web, recovery registry, and collector logs locally. Co
 
 - [ ] **Step 7: Request approval before deleting temporary recovery resources**
 
-Present the exact recovery service and volume IDs and state that their deletion removes the temporary restored copies. Wait for approval. If approved, delete recovery services/volumes with exact IDs and `--yes`; if not approved, retain them and record ownership/cost responsibility.
+Present the exact recovery service and volume IDs plus each local mode-0700 recovery workspace and
+state that deletion removes the temporary restored copies, encrypted/decrypted extracts, Borg
+cache/config/security state, and verification artifacts. Wait for fresh cleanup approval. If
+approved, delete only the named recovery services/volumes with exact IDs and `--yes`, then remove
+only the named local artifacts with nonsymlink/type checks. If not approved, retain everything and
+record ownership, custody, and cost responsibility. The earlier restore approvals do not authorize
+this cleanup.
 
 - [ ] **Step 8: Finalize the evidence document**
 
