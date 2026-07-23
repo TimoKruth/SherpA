@@ -175,10 +175,11 @@ borg check --repository-only
 confirmation for this deliberately unencrypted Borg repository. Set it only after the pinned
 repository location and host key have been checked, never use a broad interactive auto-confirmation,
 and unset it with the other Borg variables when the operation ends. Require BorgBackup 1.4.5
-compatibility. After initialization, install the routine public key by
-the exact provider-supported restriction that passed the capability gate, then repeat the gate
-against a sacrificial archive before allowing collector writes. Do not initialize first and
-promise to validate the restriction later.
+compatibility. After initialization, install the routine public key with the exact tested
+provider-supported restriction accepted by the explicit reduced-model decision. The strict
+capability result remains **Blocked** because logical archive deletion and archive-name reuse remain
+possible. Reproduce the accepted reduced-model baseline against a sacrificial archive before
+allowing collector writes. Do not initialize first and promise to validate the restriction later.
 
 The approved reduced model requires the exact forced BorgBackup 1.4 append-only restriction and all
 listed compensating controls. Before initialization, confirm that the separate Task 13 approval
@@ -376,10 +377,13 @@ Never print old or new values. Use mode-0600 temporary files and remove them aft
   Railway secret and the collector secret in a bounded coordinated change. A temporary mismatch
   is expected to leave the archive safely in `/data/exports`; verify a successful stored/existing
   response and queue removal before deleting the old value.
-- **Routine SSH key:** stop collector writes, install a new restricted public key through the
-  provider mechanism, repeat the full capability test, replace only
-  `secrets/storage-ssh-key`, restart, and prove exact remote presence. Revoke the old key only
-  after success.
+- **Routine SSH key:** stop collector writes and install a new public key with the exact tested
+  restriction accepted by the reduced-model decision. On a sacrificial repository, reproduce the
+  accepted baseline exactly: routine create/list works; logical delete and archive-name reuse remain
+  an acknowledged limitation; SFTP, SCP, and rsync mutation is denied; routine compact reclaims no
+  segments or bytes; and offline recovery-identity download plus transaction rollback recovers the
+  original bytes. Any deviation blocks rotation. Only after every expected outcome is reproduced,
+  replace `secrets/storage-ssh-key`, restart, prove exact remote presence, and revoke the old key.
 - **Recovery SSH key:** perform a separately approved recovery-credential change from a trusted
   environment, test read-only list/extract first, and remove all temporary copies. Never place it
   on the VPS.
