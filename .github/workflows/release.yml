@@ -73,8 +73,13 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ github.event.inputs.tag || github.ref_name }}"
+          # Any tag carrying a prerelease suffix (v1.2.3-beta.1) publishes as a
+          # prerelease so it is not served as "latest".
+          prerelease=""
+          case "$version" in *-*) prerelease="--prerelease" ;; esac
           gh release create "$version" \
             --title "$version" \
             --generate-notes \
             --verify-tag \
+            $prerelease \
             dist/sherpa-* dist/SHA256SUMS
