@@ -181,16 +181,22 @@ func (l *Ledger) Put(r ObjectRecord) error {
 	if unix.Fstat(fd, &opened) != nil || !safeRegularMetadata(&opened) {
 		return fail(errors.New("collector ledger replacement unsafe"))
 	}
-	if e = l.ops.close(fd); e != nil {
-		fd = -1
-		return fail(errors.New("collector ledger close failed"))
-	}
-	fd = -1
 	target := d + ".json"
 	if e = l.ops.rename(l.dirFD, n, l.dirFD, target); e != nil {
 		return fail(errors.New("collector ledger replacement failed"))
 	}
-	if !l.sameEntry(target, &opened) {
+	// Keep the descriptor open across verification. While it is open the kernel
+	// cannot free the inode, so any file substituted for the final name is
+	// guaranteed a different inode number. Closing first would let a filesystem
+	// that recycles inodes eagerly, such as ext4, hand the same Dev/Ino pair to
+	// a replacement and defeat sameEntry.
+	same := l.sameEntry(target, &opened)
+	if e = l.ops.close(fd); e != nil {
+		fd = -1
+		return errors.New("collector ledger close failed")
+	}
+	fd = -1
+	if !same {
 		return errors.New("collector ledger replacement unsafe")
 	}
 	if l.ops.fsync(l.dirFD) != nil {
