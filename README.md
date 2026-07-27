@@ -6,17 +6,25 @@ Design spec: [docs/superpowers/specs/2026-07-08-follow-the-expert-design.md](doc
 
 ## Install
 
-Download the binary for your platform from the [latest release](https://github.com/TimoKruth/SherpA/releases/latest),
-verify it, and put it on your `PATH`:
+Download the binary for your platform from the
+[releases page](https://github.com/TimoKruth/SherpA/releases), verify it, and
+put it on your `PATH`:
 
 ```sh
-# macOS (Apple silicon); swap the name for your platform
-curl -fsSLO https://github.com/TimoKruth/SherpA/releases/latest/download/sherpa-darwin-arm64
-curl -fsSLO https://github.com/TimoKruth/SherpA/releases/latest/download/SHA256SUMS
+VERSION=v0.1.0-beta.1          # see the releases page for the current tag
+ASSET=sherpa-darwin-arm64      # or -darwin-amd64, -linux-amd64, -linux-arm64,
+                               #    -windows-amd64.exe, -windows-arm64.exe
+BASE=https://github.com/TimoKruth/SherpA/releases/download/$VERSION
+
+curl -fsSLO "$BASE/$ASSET"
+curl -fsSLO "$BASE/SHA256SUMS"
 shasum -a 256 --ignore-missing --check SHA256SUMS
-chmod +x sherpa-darwin-arm64
-sudo mv sherpa-darwin-arm64 /usr/local/bin/sherpa
+chmod +x "$ASSET"
+sudo mv "$ASSET" /usr/local/bin/sherpa
 ```
+
+During the beta the releases are prereleases, so `/releases/latest/` does not
+resolve to them — use the explicit tag above.
 
 Builds are published for macOS, Linux, and Windows on both `amd64` and `arm64`.
 On macOS the binary is unsigned, so the first run needs Gatekeeper approval:
