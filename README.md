@@ -6,6 +6,26 @@ Design spec: [docs/superpowers/specs/2026-07-08-follow-the-expert-design.md](doc
 
 ## Install
 
+Download the binary for your platform from the [latest release](https://github.com/TimoKruth/SherpA/releases/latest),
+verify it, and put it on your `PATH`:
+
+```sh
+# macOS (Apple silicon); swap the name for your platform
+curl -fsSLO https://github.com/TimoKruth/SherpA/releases/latest/download/sherpa-darwin-arm64
+curl -fsSLO https://github.com/TimoKruth/SherpA/releases/latest/download/SHA256SUMS
+shasum -a 256 --ignore-missing --check SHA256SUMS
+chmod +x sherpa-darwin-arm64
+sudo mv sherpa-darwin-arm64 /usr/local/bin/sherpa
+```
+
+Builds are published for macOS, Linux, and Windows on both `amd64` and `arm64`.
+On macOS the binary is unsigned, so the first run needs Gatekeeper approval:
+`xattr -d com.apple.quarantine /usr/local/bin/sherpa`.
+
+Check the install with `sherpa version`.
+
+From source instead:
+
 ```sh
 go build ./cmd/sherpa
 ```
