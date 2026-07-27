@@ -87,8 +87,8 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 	exportConfigured := cfg.ExportURL != "" || cfg.ExportToken != "" || cfg.ExportInterval != 0 || cfg.ExportArchiveDir != ""
-	if exportConfigured && (cfg.ExportURL == "" || cfg.ExportInterval == 0) {
-		return Config{}, fmt.Errorf("SHERPA_EXPORT_URL and SHERPA_EXPORT_INTERVAL must be configured together")
+	if exportConfigured && (cfg.ExportURL == "" || cfg.ExportToken == "" || cfg.ExportInterval == 0 || cfg.ExportArchiveDir == "") {
+		return Config{}, fmt.Errorf("SHERPA_EXPORT_URL, SHERPA_EXPORT_TOKEN, SHERPA_EXPORT_INTERVAL, and SHERPA_EXPORT_ARCHIVE_DIR must be configured together")
 	}
 	return cfg, nil
 }

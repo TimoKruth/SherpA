@@ -653,7 +653,7 @@ func TestPublishDeclineDoesNotBurnVersionOrCommit(t *testing.T) {
 func makeBareRepo(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "remote.git")
-	if out, err := exec.Command("git", "init", "--bare", dir).CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "init", "--bare", "-b", "main", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %s", out)
 	}
 	return dir

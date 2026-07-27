@@ -7,7 +7,8 @@ import (
 	"path/filepath"
 )
 
-const Version = "0.1.0-dev"
+// Version is overridden at release time with -ldflags "-X sherpa/internal/cli.Version=<tag>".
+var Version = "0.1.0-dev"
 
 type Ctx struct {
 	Home   string

@@ -187,7 +187,7 @@ func TestFullPhase1Loop(t *testing.T) {
 			t.Fatalf("use before publish failed: %s\nstdout:\n%s", errb, out)
 		}
 		remote := filepath.Join(root, "fork.git")
-		gitRaw(t, "init", "--bare", remote)
+		gitRaw(t, "init", "--bare", "-b", "main", remote)
 		out, errb, code = runCLI(t, "yes\nyes\n", "publish", "--remote", remote)
 		if code != 0 {
 			t.Fatalf("publish failed: %s\nstdout:\n%s", errb, out)
@@ -303,7 +303,7 @@ func TestCodexHarnessRoundTrip(t *testing.T) {
 		t.Fatalf("save tracked auth fixture failed: %s\nstdout:\n%s", errb, out)
 	}
 	remote := filepath.Join(root, "codex-fork.git")
-	gitRaw(t, "init", "--bare", remote)
+	gitRaw(t, "init", "--bare", "-b", "main", remote)
 	out, errb, code := runCLI(t, "yes\nyes\n", "publish", "--remote", remote)
 	if code == 0 {
 		t.Fatalf("publish with tracked codex auth.json unexpectedly succeeded:\n%s", out)

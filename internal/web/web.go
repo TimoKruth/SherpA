@@ -38,6 +38,9 @@ type Options struct {
 	PublicBaseURL     *url.URL
 	RegistryPublicURL *url.URL
 	Logger            *log.Logger
+	// NoIndex serves noindex on every page and disallows all crawling in
+	// robots.txt. Used for unlisted deployments such as a closed beta.
+	NoIndex bool
 }
 
 type server struct {
@@ -47,13 +50,14 @@ type server struct {
 	logger            *log.Logger
 	authRegistry      AuthRegistry
 	registryPublicURL *url.URL
+	noIndex           bool
 }
 
 func New(reg Registry, options Options) (http.Handler, error) {
 	if reg == nil {
 		return nil, errors.New("web registry client is required")
 	}
-	renderer, err := newRenderer()
+	renderer, err := newRenderer(options.NoIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +93,7 @@ func New(reg Registry, options Options) (http.Handler, error) {
 		logger:            logger,
 		authRegistry:      authRegistry,
 		registryPublicURL: registryPublicURL,
+		noIndex:           options.NoIndex,
 	}
 	return s.securityHeaders(s.logRequests(http.HandlerFunc(s.route))), nil
 }

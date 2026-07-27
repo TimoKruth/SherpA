@@ -93,6 +93,10 @@ func (s *server) route(w http.ResponseWriter, r *http.Request) {
 	case "/robots.txt":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
+		if s.noIndex {
+			_, _ = w.Write([]byte("User-agent: *\nDisallow: /\n"))
+			return
+		}
 		_, _ = w.Write([]byte("User-agent: *\nAllow: /\n"))
 		return
 	case "/static/app.css":

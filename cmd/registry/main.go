@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,8 +38,34 @@ const (
 type postgresOpener func(context.Context, string, ...int) (*store.PostgresStore, error)
 type retrySleeper func(context.Context, time.Duration) error
 
-var validateExportScheduler = registryexport.ValidateSchedulerConfig
-var startExportScheduler = registryexport.StartScheduler
+type exportScheduler interface {
+	Run(context.Context) error
+	Close() error
+}
+
+type registryRunOps struct {
+	validateExportScheduler func(registryexport.SchedulerConfig) error
+	prepareExportScheduler  func(registryexport.SchedulerConfig) (exportScheduler, error)
+	openPostgres            postgresOpener
+	sleep                   retrySleeper
+	mkdirAll                func(string, os.FileMode) error
+	cleanAbandonedStages    func(string) (int, error)
+}
+
+func defaultRegistryRunOps() registryRunOps {
+	return registryRunOps{
+		validateExportScheduler: registryexport.ValidateSchedulerConfig,
+		prepareExportScheduler: func(cfg registryexport.SchedulerConfig) (exportScheduler, error) {
+			return registryexport.PrepareScheduler(cfg)
+		},
+		openPostgres: store.OpenPostgres,
+		sleep:        sleepWithContext,
+		mkdirAll:     os.MkdirAll,
+		cleanAbandonedStages: func(contentDir string) (int, error) {
+			return content.NewBareGit(contentDir).CleanAbandonedStages()
+		},
+	}
+}
 
 func sleepWithContext(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
@@ -82,57 +109,93 @@ func openPostgresWithRetry(ctx context.Context, dsn string, maxConns int, open p
 	return nil, fmt.Errorf("open registry database: retry limit reached after %d attempts: %w", postgresOpenAttempts, lastErr)
 }
 
+type runningRegistry struct {
+	server         *http.Server
+	cleanup        func()
+	schedulerFatal <-chan error
+}
+
 func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {
+	return runWithOps(ctx, cfg, defaultRegistryRunOps())
+}
+
+func runWithOps(ctx context.Context, cfg Config, ops registryRunOps) (*http.Server, func(), error) {
+	runtime, err := startRegistryWithOps(ctx, cfg, ops)
+	if err != nil {
+		return nil, nil, err
+	}
+	return runtime.server, runtime.cleanup, nil
+}
+
+func startRegistry(ctx context.Context, cfg Config) (*runningRegistry, error) {
+	return startRegistryWithOps(ctx, cfg, defaultRegistryRunOps())
+}
+
+func startRegistryWithOps(ctx context.Context, cfg Config, ops registryRunOps) (*runningRegistry, error) {
 	exportCfg := registryexport.SchedulerConfig{
 		ContentDir: cfg.ContentDir, DatabaseURL: cfg.DatabaseURL,
 		ArchiveDir: cfg.ExportArchiveDir, CollectorURL: cfg.ExportURL,
 		Token: cfg.ExportToken, Interval: cfg.ExportInterval,
 	}
-	if err := validateExportScheduler(exportCfg); err != nil {
-		return nil, nil, fmt.Errorf("configure off-site export: %w", err)
+	if err := ops.validateExportScheduler(exportCfg); err != nil {
+		return nil, fmt.Errorf("configure off-site export: %w", err)
 	}
-	st, err := openPostgresWithRetry(ctx, cfg.DatabaseURL, cfg.DBMaxConns, store.OpenPostgres, sleepWithContext)
-	if err != nil {
-		return nil, nil, err
+	var scheduler exportScheduler
+	if cfg.ExportURL != "" {
+		var err error
+		scheduler, err = ops.prepareExportScheduler(exportCfg)
+		if err != nil {
+			return nil, fmt.Errorf("prepare off-site export scheduler: %w", err)
+		}
+		if scheduler == nil {
+			return nil, errors.New("prepare off-site export scheduler")
+		}
 	}
 
 	var cleanupOnce sync.Once
 	schedulerCtx, stopScheduler := context.WithCancel(ctx)
 	var schedulerDone chan struct{}
+	var st *store.PostgresStore
 	cleanup := func() {
 		cleanupOnce.Do(func() {
 			stopScheduler()
 			if schedulerDone != nil {
 				<-schedulerDone
 			}
-			if err := st.Close(); err != nil {
-				log.Printf("close registry store: %v", err)
+			if scheduler != nil {
+				if err := scheduler.Close(); err != nil {
+					log.Printf("close off-site export scheduler: %v", err)
+				}
+			}
+			if st != nil {
+				if err := st.Close(); err != nil {
+					log.Printf("close registry store: %v", err)
+				}
 			}
 		})
 	}
 
-	cs := content.NewBareGit(cfg.ContentDir)
-	if err := os.MkdirAll(cfg.ContentDir, 0o755); err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("prepare registry content directory: %w", err)
-	}
-	removed, err := cs.CleanAbandonedStages()
+	var err error
+	st, err = openPostgresWithRetry(ctx, cfg.DatabaseURL, cfg.DBMaxConns, ops.openPostgres, ops.sleep)
 	if err != nil {
 		cleanup()
-		return nil, nil, fmt.Errorf("clean abandoned content stages: %w", err)
+		return nil, err
+	}
+
+	if err := ops.mkdirAll(cfg.ContentDir, 0o755); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("prepare registry content directory: %w", err)
+	}
+	removed, err := ops.cleanAbandonedStages(cfg.ContentDir)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("clean abandoned content stages: %w", err)
 	}
 	if removed > 0 {
 		log.Printf("removed %d abandoned content stage directories", removed)
 	}
-	if cfg.ExportURL != "" {
-		schedulerDone = make(chan struct{})
-		go func() {
-			defer close(schedulerDone)
-			if err := startExportScheduler(schedulerCtx, exportCfg); err != nil && schedulerCtx.Err() == nil {
-				log.Printf("off-site export scheduler stopped: %v", err)
-			}
-		}()
-	}
+
+	cs := content.NewBareGit(cfg.ContentDir)
 	github := registryauth.NewGitHubClientWithSecret(cfg.GitHubClientID, cfg.GitHubClientSecret)
 	var ready atomic.Bool
 	mux := http.NewServeMux()
@@ -151,7 +214,25 @@ func run(ctx context.Context, cfg Config) (*http.Server, func(), error) {
 		IdleTimeout:       2 * time.Minute,
 	}
 	ready.Store(true)
-	return srv, cleanup, nil
+
+	var schedulerFatal chan error
+	if scheduler != nil {
+		schedulerDone = make(chan struct{})
+		schedulerFatal = make(chan error, 1)
+		go func() {
+			defer close(schedulerDone)
+			err := scheduler.Run(schedulerCtx)
+			if schedulerCtx.Err() != nil {
+				return
+			}
+			ready.Store(false)
+			if err == nil {
+				err = errors.New("scheduler exited unexpectedly")
+			}
+			schedulerFatal <- fmt.Errorf("off-site export scheduler stopped: %w", err)
+		}()
+	}
+	return &runningRegistry{server: srv, cleanup: cleanup, schedulerFatal: schedulerFatal}, nil
 }
 
 func main() {
@@ -203,15 +284,19 @@ func serve(ctx context.Context) error {
 		return err
 	}
 
-	srv, cleanup, err := run(ctx, cfg)
+	runtime, err := startRegistry(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
+	defer runtime.cleanup()
 
+	listener, err := net.Listen("tcp", runtime.server.Addr)
+	if err != nil {
+		return fmt.Errorf("listen registry: %w", err)
+	}
 	serverErr := make(chan error, 1)
 	go func() {
-		serverErr <- srv.ListenAndServe()
+		serverErr <- runtime.server.Serve(listener)
 	}()
 
 	select {
@@ -219,10 +304,17 @@ func serve(ctx context.Context) error {
 		if !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve registry: %w", err)
 		}
+	case fatalErr := <-runtime.schedulerFatal:
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := runtime.server.Shutdown(shutdownCtx); err != nil {
+			return errors.Join(fatalErr, fmt.Errorf("shutdown registry server: %w", err))
+		}
+		return fatalErr
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
+		if err := runtime.server.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("shutdown registry server: %w", err)
 		}
 	}

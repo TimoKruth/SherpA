@@ -1,4 +1,4 @@
-.PHONY: test build registry fmt
+.PHONY: test build registry collector-image collector-smoke fmt
 
 test:
 	go test ./...
@@ -12,6 +12,12 @@ build:
 registry:
 	mkdir -p dist
 	CGO_ENABLED=0 GOFLAGS="$(GOFLAGS) -trimpath" go build -o dist/registry ./cmd/registry
+
+collector-image:
+	bash deploy/collector/smoke_build.sh --build-only sherpa-collector:local
+
+collector-smoke:
+	bash deploy/collector/smoke_build.sh
 
 fmt:
 	gofmt -w .

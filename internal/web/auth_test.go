@@ -271,7 +271,7 @@ func newAuthHandler(t *testing.T, fake *fakeAuthRegistry, logger *log.Logger) ht
 }
 func newAuthServer(t *testing.T, fake *fakeAuthRegistry, logger *log.Logger) *server {
 	t.Helper()
-	renderer, err := newRenderer()
+	renderer, err := newRenderer(false)
 	if err != nil {
 		t.Fatal(err)
 	}

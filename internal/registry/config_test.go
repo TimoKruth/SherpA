@@ -73,6 +73,19 @@ func TestLoadConfigWebOAuthIsAllOrNothingAndPinned(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRequiresExportTokenWhenSchedulingEnabled(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://example/sherpa")
+	t.Setenv("SHERPA_EXPORT_URL", "https://collector.example/upload")
+	t.Setenv("SHERPA_EXPORT_TOKEN", "")
+	t.Setenv("SHERPA_EXPORT_INTERVAL", "1h")
+	t.Setenv("SHERPA_EXPORT_ARCHIVE_DIR", t.TempDir())
+
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), "SHERPA_EXPORT_TOKEN") {
+		t.Fatalf("LoadConfig error = %v, want missing export token", err)
+	}
+}
+
 func TestLoadConfigRejectsUnsafeWebOAuthOrigins(t *testing.T) {
 	for _, tc := range []struct{ registry, web string }{
 		{"http://registry.example", "https://web.example"},

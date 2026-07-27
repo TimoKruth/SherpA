@@ -10,12 +10,46 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	registryexport "sherpa/internal/registry/export"
 	"sherpa/internal/registry/store"
 )
+
+type exportSchedulerFunc func(context.Context) error
+
+func (run exportSchedulerFunc) Run(ctx context.Context) error {
+	return run(ctx)
+}
+
+func (exportSchedulerFunc) Close() error {
+	return nil
+}
+
+type recordingExportScheduler struct {
+	run        func(context.Context) error
+	close      func() error
+	runCalls   atomic.Int32
+	closeCalls atomic.Int32
+}
+
+func (scheduler *recordingExportScheduler) Run(ctx context.Context) error {
+	scheduler.runCalls.Add(1)
+	if scheduler.run == nil {
+		return nil
+	}
+	return scheduler.run(ctx)
+}
+
+func (scheduler *recordingExportScheduler) Close() error {
+	scheduler.closeCalls.Add(1)
+	if scheduler.close == nil {
+		return nil
+	}
+	return scheduler.close()
+}
 
 func TestRunBootsRegistryWithPostgres(t *testing.T) {
 	dsn := store.StartPostgres(t)
@@ -251,23 +285,357 @@ func TestDispatchExportUsageAndUnknownCommand(t *testing.T) {
 	}
 }
 
-func TestRunCleanupStopsExportSchedulerBeforeReturning(t *testing.T) {
+func TestRunWiresPersistentExportArchiveDirectory(t *testing.T) {
+	t.Parallel()
+
+	stop := errors.New("stop before opening database")
+	var got registryexport.SchedulerConfig
+	ops := defaultRegistryRunOps()
+	ops.validateExportScheduler = func(cfg registryexport.SchedulerConfig) error {
+		got = cfg
+		return stop
+	}
+
+	srv, cleanup, err := runWithOps(context.Background(), Config{
+		DatabaseURL: "postgres://db.internal/sherpa", ContentDir: "/data/git",
+		ExportURL: "https://collector.example/upload", ExportToken: "collector-token",
+		ExportInterval: time.Hour, ExportArchiveDir: "/data/exports",
+	}, ops)
+	if !errors.Is(err, stop) {
+		t.Fatalf("run error = %v, want validation sentinel", err)
+	}
+	if srv != nil || cleanup != nil {
+		t.Fatal("validation failure returned server or cleanup")
+	}
+	if got.ArchiveDir != "/data/exports" || got.ContentDir != "/data/git" {
+		t.Fatalf("scheduler directories = content %q archive %q", got.ContentDir, got.ArchiveDir)
+	}
+	if got.CollectorURL != "https://collector.example/upload" || got.Token != "collector-token" || got.Interval != time.Hour {
+		t.Fatalf("scheduler config = %#v", got)
+	}
+}
+
+func TestRunRejectsUnsafeExportQueueBeforeReadiness(t *testing.T) {
 	dsn := store.StartPostgres(t)
-	originalStart := startExportScheduler
-	t.Cleanup(func() { startExportScheduler = originalStart })
+	archiveDir := t.TempDir()
+	if err := os.Chmod(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, cleanup, err := run(ctx, Config{
+		DatabaseURL: dsn, ContentDir: t.TempDir(), ExportURL: "https://backups.example/upload",
+		ExportToken: "collector-secret", ExportInterval: time.Hour, ExportArchiveDir: archiveDir,
+	})
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "mode 0700") {
+		t.Fatalf("unsafe queue run error = %v, want synchronous mode rejection", err)
+	}
+	if srv != nil || cleanup != nil {
+		t.Fatal("unsafe queue run returned a ready server or cleanup function")
+	}
+}
+
+func TestRunAcquiresExportQueueLockBeforeReadinessAndReleasesDuringCleanup(t *testing.T) {
+	dsn := store.StartPostgres(t)
+	archiveDir := t.TempDir()
+	if err := os.Chmod(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exportCfg := registryexport.SchedulerConfig{
+		ContentDir: t.TempDir(), DatabaseURL: dsn, ArchiveDir: archiveDir,
+		CollectorURL: "https://backups.example/upload", Token: "collector-secret", Interval: time.Hour,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	srv, cleanup, err := run(ctx, Config{
+		DatabaseURL: dsn, ContentDir: exportCfg.ContentDir, ExportURL: exportCfg.CollectorURL,
+		ExportToken: exportCfg.Token, ExportInterval: exportCfg.Interval, ExportArchiveDir: archiveDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv == nil || cleanup == nil {
+		t.Fatal("run returned no ready server or cleanup function")
+	}
+	if contender, err := registryexport.PrepareScheduler(exportCfg); err == nil || contender != nil || !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("contending scheduler = %v, error = %v, want in-use rejection", contender, err)
+	}
+
+	cleanup()
+	fresh, err := registryexport.PrepareScheduler(exportCfg)
+	if err != nil {
+		t.Fatalf("prepare scheduler after cleanup: %v", err)
+	}
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	if err := fresh.Run(stopped); err != nil {
+		t.Fatalf("run scheduler after cleanup: %v", err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatalf("close scheduler after cleanup test: %v", err)
+	}
+}
+
+func TestRunLockContenderDoesNotCleanActiveContentStage(t *testing.T) {
+	dsn := store.StartPostgres(t)
+	contentDir := t.TempDir()
+	archiveDir := t.TempDir()
+	if err := os.Chmod(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exportCfg := registryexport.SchedulerConfig{
+		ContentDir: contentDir, DatabaseURL: dsn, ArchiveDir: archiveDir,
+		CollectorURL: "https://backups.example/upload", Token: "collector-secret", Interval: time.Hour,
+	}
+	primary, err := registryexport.PrepareScheduler(exportCfg)
+	if err != nil {
+		t.Fatalf("prepare primary scheduler: %v", err)
+	}
+	defer func() {
+		if err := primary.Close(); err != nil {
+			t.Errorf("release primary scheduler: %v", err)
+		}
+	}()
+
+	activeStage := filepath.Join(contentDir, ".stage-active")
+	if err := os.Mkdir(activeStage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(activeStage, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("active publish"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, cleanup, err := run(context.Background(), Config{
+		DatabaseURL: dsn, ContentDir: contentDir, ExportURL: exportCfg.CollectorURL,
+		ExportToken: exportCfg.Token, ExportInterval: exportCfg.Interval, ExportArchiveDir: archiveDir,
+	})
+	if err == nil || !strings.Contains(err.Error(), "export archive directory is already in use") {
+		t.Fatalf("contending run error = %v, want queue lock contention", err)
+	}
+	if srv != nil || cleanup != nil {
+		t.Fatal("contending run returned a server or cleanup function")
+	}
+	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "active publish" {
+		t.Fatalf("active stage sentinel after contention = %q, %v; want preserved", data, err)
+	}
+}
+
+func TestRegistrySchedulerFatalExitDropsReadinessAndKeepsLockUntilCleanup(t *testing.T) {
+	dsn := store.StartPostgres(t)
+	contentDir := t.TempDir()
+	archiveDir := t.TempDir()
+	if err := os.Chmod(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		DatabaseURL: dsn, ContentDir: contentDir, ExportURL: "https://backups.example/upload",
+		ExportToken: "collector-secret", ExportInterval: time.Hour, ExportArchiveDir: archiveDir,
+	}
+
+	runStarted := make(chan struct{})
+	allowFailure := make(chan struct{})
+	terminal := errors.New("terminal scheduler failure")
+	var scheduler *recordingExportScheduler
+	ops := defaultRegistryRunOps()
+	ops.prepareExportScheduler = func(exportCfg registryexport.SchedulerConfig) (exportScheduler, error) {
+		prepared, err := registryexport.PrepareScheduler(exportCfg)
+		if err != nil {
+			return nil, err
+		}
+		scheduler = &recordingExportScheduler{
+			run: func(context.Context) error {
+				close(runStarted)
+				<-allowFailure
+				return terminal
+			},
+			close: prepared.Close,
+		}
+		return scheduler, nil
+	}
+
+	runtime, err := startRegistryWithOps(context.Background(), cfg, ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.cleanup()
+	select {
+	case <-runStarted:
+	case <-time.After(time.Second):
+		t.Fatal("scheduler did not start")
+	}
+
+	health := httptest.NewRecorder()
+	runtime.server.Handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "http://registry.test/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health before scheduler failure = %d, want 200", health.Code)
+	}
+	activeStage := filepath.Join(contentDir, ".stage-active-after-scheduler-failure")
+	if err := os.Mkdir(activeStage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(activeStage, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("active publish"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	close(allowFailure)
+	select {
+	case err := <-runtime.schedulerFatal:
+		if !errors.Is(err, terminal) {
+			t.Fatalf("scheduler fatal error = %v, want terminal failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scheduler fatal error was not delivered")
+	}
+	health = httptest.NewRecorder()
+	runtime.server.Handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "http://registry.test/healthz", nil))
+	if health.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health after scheduler failure = %d, want 503", health.Code)
+	}
+
+	contenderServer, contenderCleanup, err := run(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "export archive directory is already in use") {
+		t.Fatalf("overlapping contender error = %v, want queue lock contention", err)
+	}
+	if contenderServer != nil || contenderCleanup != nil {
+		t.Fatal("overlapping contender returned server or cleanup")
+	}
+	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "active publish" {
+		t.Fatalf("active stage after terminal scheduler failure = %q, %v; want preserved", data, err)
+	}
+
+	runtime.cleanup()
+	if scheduler.closeCalls.Load() != 1 {
+		t.Fatalf("scheduler close calls = %d, want 1", scheduler.closeCalls.Load())
+	}
+	fresh, err := registryexport.PrepareScheduler(registryexport.SchedulerConfig{
+		ContentDir: contentDir, DatabaseURL: dsn, ArchiveDir: archiveDir,
+		CollectorURL: cfg.ExportURL, Token: cfg.ExportToken, Interval: cfg.ExportInterval,
+	})
+	if err != nil {
+		t.Fatalf("prepare scheduler after registry cleanup: %v", err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatalf("close fresh scheduler: %v", err)
+	}
+}
+
+func TestRegistryStartupFailuresClosePreparedSchedulerWithoutRunningIt(t *testing.T) {
+	dsn := store.StartPostgres(t)
+	startupFailure := errors.New("deterministic startup failure")
+
+	for _, tc := range []struct {
+		name      string
+		configure func(*registryRunOps, string)
+		wantError string
+	}{
+		{
+			name: "database open",
+			configure: func(ops *registryRunOps, _ string) {
+				ops.openPostgres = func(context.Context, string, ...int) (*store.PostgresStore, error) {
+					return nil, startupFailure
+				}
+				ops.sleep = func(context.Context, time.Duration) error { return nil }
+			},
+			wantError: "open registry database",
+		},
+		{
+			name: "content directory creation",
+			configure: func(ops *registryRunOps, contentDir string) {
+				ops.mkdirAll = func(path string, mode os.FileMode) error {
+					if path == contentDir {
+						return startupFailure
+					}
+					return os.MkdirAll(path, mode)
+				}
+			},
+			wantError: "prepare registry content directory",
+		},
+		{
+			name: "abandoned stage cleanup",
+			configure: func(ops *registryRunOps, _ string) {
+				ops.cleanAbandonedStages = func(string) (int, error) { return 0, startupFailure }
+			},
+			wantError: "clean abandoned content stages",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contentDir := t.TempDir()
+			archiveDir := t.TempDir()
+			if err := os.Chmod(archiveDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := Config{
+				DatabaseURL: dsn, ContentDir: contentDir, ExportURL: "https://backups.example/upload",
+				ExportToken: "collector-secret", ExportInterval: time.Hour, ExportArchiveDir: archiveDir,
+			}
+			var scheduler *recordingExportScheduler
+			ops := defaultRegistryRunOps()
+			ops.prepareExportScheduler = func(exportCfg registryexport.SchedulerConfig) (exportScheduler, error) {
+				prepared, err := registryexport.PrepareScheduler(exportCfg)
+				if err != nil {
+					return nil, err
+				}
+				scheduler = &recordingExportScheduler{close: prepared.Close}
+				return scheduler, nil
+			}
+			tc.configure(&ops, contentDir)
+
+			runtime, err := startRegistryWithOps(context.Background(), cfg, ops)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("startup error = %v, want %q", err, tc.wantError)
+			}
+			if runtime != nil {
+				t.Fatal("failed startup returned runtime")
+			}
+			if scheduler == nil {
+				t.Fatal("startup failed before scheduler preparation")
+			}
+			if scheduler.runCalls.Load() != 0 || scheduler.closeCalls.Load() != 1 {
+				t.Fatalf("scheduler lifecycle calls = run %d close %d, want 0 and 1", scheduler.runCalls.Load(), scheduler.closeCalls.Load())
+			}
+			fresh, err := registryexport.PrepareScheduler(registryexport.SchedulerConfig{
+				ContentDir: contentDir, DatabaseURL: dsn, ArchiveDir: archiveDir,
+				CollectorURL: cfg.ExportURL, Token: cfg.ExportToken, Interval: cfg.ExportInterval,
+			})
+			if err != nil {
+				t.Fatalf("prepare after failed startup: %v", err)
+			}
+			if err := fresh.Close(); err != nil {
+				t.Fatalf("close fresh scheduler: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunCleanupStopsExportSchedulerBeforeReturning(t *testing.T) {
+	t.Parallel()
+
+	dsn := store.StartPostgres(t)
 	started := make(chan struct{})
 	stopped := make(chan struct{})
-	startExportScheduler = func(ctx context.Context, _ registryexport.SchedulerConfig) error {
-		close(started)
-		<-ctx.Done()
-		time.Sleep(10 * time.Millisecond)
-		close(stopped)
-		return nil
+	ops := defaultRegistryRunOps()
+	ops.prepareExportScheduler = func(registryexport.SchedulerConfig) (exportScheduler, error) {
+		return exportSchedulerFunc(func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			time.Sleep(10 * time.Millisecond)
+			close(stopped)
+			return nil
+		}), nil
 	}
-	srv, cleanup, err := run(context.Background(), Config{
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	srv, cleanup, err := runWithOps(ctx, Config{
 		DatabaseURL: dsn, ContentDir: t.TempDir(), ExportURL: "https://backups.example/upload",
-		ExportInterval: time.Hour, ExportArchiveDir: t.TempDir(),
-	})
+		ExportToken: "collector-secret", ExportInterval: time.Hour, ExportArchiveDir: t.TempDir(),
+	}, ops)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +691,8 @@ func TestOpenPostgresWithRetry(t *testing.T) {
 func TestRunRejectsUnsafeExportConfigurationBeforeOpeningDatabase(t *testing.T) {
 	srv, cleanup, err := run(context.Background(), Config{
 		DatabaseURL: "postgres://must-not-be-opened", ContentDir: t.TempDir(),
-		ExportURL: "http://collector.example/upload", ExportInterval: time.Hour,
+		ExportURL: "http://collector.example/upload", ExportToken: "collector-secret",
+		ExportInterval: time.Hour, ExportArchiveDir: t.TempDir(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "HTTPS") {
 		t.Fatalf("run error = %v, want HTTPS collector error", err)
