@@ -64,7 +64,7 @@ curl --silent --show-error --max-time 20 --dump-header "$work_dir/headers" --out
   "http://127.0.0.1:${host_port}/stacks/alice/reviewer"
 grep -Eqi "^Content-Security-Policy: .*default-src 'none'" "$work_dir/headers"
 grep -Eqi '^X-Content-Type-Options: nosniff' "$work_dir/headers"
-grep -Eqi '^Referrer-Policy: no-referrer' "$work_dir/headers"
+tr -d '\r' <"$work_dir/headers" | grep -Fqix 'Referrer-Policy: same-origin'
 grep -Eqi '^X-Frame-Options: DENY' "$work_dir/headers"
 
 configured_user="$(docker image inspect --format '{{.Config.User}}' "$web_image")"

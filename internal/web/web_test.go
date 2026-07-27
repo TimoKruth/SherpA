@@ -290,9 +290,10 @@ func TestSecurityHeadersAndContentTypes(t *testing.T) {
 		wantHeaders := map[string]string{
 			"Content-Security-Policy": contentSecurityPolicy,
 			"X-Content-Type-Options":  "nosniff",
-			"Referrer-Policy":         "no-referrer",
-			"X-Frame-Options":         "DENY",
-			"Permissions-Policy":      "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+			// Same-origin mutation POSTs must retain a usable Origin for CSRF validation.
+			"Referrer-Policy":    "same-origin",
+			"X-Frame-Options":    "DENY",
+			"Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
 		}
 		for key, want := range wantHeaders {
 			if got := rr.Header().Get(key); got != want {
