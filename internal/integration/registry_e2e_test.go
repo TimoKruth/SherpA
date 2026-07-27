@@ -129,8 +129,16 @@ func TestRegistryCLIEndToEnd(t *testing.T) {
 func TestRegistryIdentityEndToEnd(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
+	claudeDir := filepath.Join(root, "real-claude")
 	t.Setenv("SHERPA_HOME", home)
+	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
 	t.Setenv("SHERPA_REGISTRY_TOKEN", "")
+	if err := writeFile(filepath.Join(claudeDir, "CLAUDE.md"), "baseline instructions\n", 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(filepath.Join(claudeDir, "settings.json"), `{"theme":"mine","mcpServers":{}}`+"\n", 0o644); err != nil {
+		t.Fatal(err)
+	}
 	gh := &registryauth.FakeGitHubClient{
 		Device:      registryauth.DeviceCode{DeviceCode: "device", UserCode: "ABCD", VerificationURI: "https://github.com/login/device", Interval: 0, ExpiresIn: 60},
 		PollResults: []registryauth.PollResult{{AccessToken: "github-token"}},

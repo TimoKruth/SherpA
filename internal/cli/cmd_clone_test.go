@@ -136,7 +136,11 @@ func newCloneRegistryServer(t *testing.T, repo string, followStatus *atomic.Int3
 	if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	gitOut(t, root, "init", "--bare", bare)
+	// Pin the initial branch: the content below is pushed to main, and without
+	// this the bare repo's HEAD follows init.defaultBranch, so a machine
+	// without that configured gets HEAD -> master. A clone then resolves HEAD
+	// to a branch that does not exist and checks out nothing.
+	gitOut(t, root, "init", "--bare", "-b", "main", bare)
 	gitOut(t, repo, "push", bare, "main:main", "--tags")
 	gitOut(t, bare, "update-server-info")
 	files := http.StripPrefix("/v1/stacks", http.FileServer(http.Dir(root)))
