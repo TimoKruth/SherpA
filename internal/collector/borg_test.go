@@ -431,7 +431,7 @@ func readBorgInvocations(t testing.TB, path string) []borgInvocation {
 		t.Fatal(err)
 	}
 	var calls []borgInvocation
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for _, line := range invocationLines(data) {
 		var call borgInvocation
 		if err := json.Unmarshal([]byte(line), &call); err != nil {
 			t.Fatalf("decode invocation: %v", err)
@@ -439,6 +439,21 @@ func readBorgInvocations(t testing.TB, path string) []borgInvocation {
 		calls = append(calls, call)
 	}
 	return calls
+}
+
+// invocationLines returns only the complete records in the helper's append-only
+// log. Splitting the raw contents on "\n" is not equivalent: strings.Split
+// returns a one-element slice for empty input, so a log file that exists but has
+// not been written yet would count as a single invocation and then fail to
+// decode.
+func invocationLines(data []byte) []string {
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 func runBorgTestHelper() int {

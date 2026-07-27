@@ -447,7 +447,7 @@ func waitForInvocationCount(t testing.TB, path string, count int) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
-		if err == nil && len(strings.Split(strings.TrimSpace(string(data)), "\n")) >= count {
+		if err == nil && len(invocationLines(data)) >= count {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
