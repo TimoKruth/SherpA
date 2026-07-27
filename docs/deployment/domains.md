@@ -109,6 +109,12 @@ Therefore: **provision a separate Borg repository for production.** Reusing the
 beta repository would interleave beta and production recovery points in one
 append-only store with no clean way to separate them afterwards.
 
+## Related
+
+Everything else deferred until public launch — binary signing and notarization,
+alert delivery, the disaster-recovery gate, snapshots — is tracked in
+`go-live.md`.
+
 ## Open items
 
 - `sherpa.guide` is not yet registered. The relaunch depends on it; it was still
