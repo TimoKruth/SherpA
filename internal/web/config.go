@@ -25,6 +25,7 @@ type Config struct {
 	RegistryPublicURL string
 	PublicBaseURL     string
 	UpstreamTimeout   time.Duration
+	NoIndex           bool
 }
 
 func LoadConfig() (Config, error) {
@@ -61,8 +62,12 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	noIndex, err := loadNoIndex()
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
-		Addr: addr, RegistryAPIURL: registryURL, RegistryPublicURL: registryPublicURL, PublicBaseURL: publicURL, UpstreamTimeout: timeout,
+		Addr: addr, RegistryAPIURL: registryURL, RegistryPublicURL: registryPublicURL, PublicBaseURL: publicURL, UpstreamTimeout: timeout, NoIndex: noIndex,
 	}, nil
 }
 
@@ -160,4 +165,20 @@ func loadUpstreamTimeout() (time.Duration, error) {
 		return 0, errors.New("SHERPA_WEB_UPSTREAM_TIMEOUT must be between 100ms and 30s")
 	}
 	return timeout, nil
+}
+
+// loadNoIndex reads SHERPA_WEB_NOINDEX. When set, every page is served
+// noindex,nofollow and robots.txt disallows all crawling. Intended for
+// deployments that must not be indexed, such as a closed beta on a domain that
+// will later be retired.
+func loadNoIndex() (bool, error) {
+	raw := strings.TrimSpace(os.Getenv("SHERPA_WEB_NOINDEX"))
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, errors.New("SHERPA_WEB_NOINDEX must be a boolean")
+	}
+	return value, nil
 }

@@ -38,24 +38,30 @@ type authView struct {
 
 type renderer struct {
 	templates *template.Template
+	noIndex   bool
 }
 
-func newRenderer() (*renderer, error) {
+func newRenderer(noIndex bool) (*renderer, error) {
 	templates, err := template.New("pages").ParseFS(templateFiles, "templates/*.html")
 	if err != nil {
 		return nil, errors.New("parse web templates")
 	}
-	return &renderer{templates: templates}, nil
+	return &renderer{templates: templates, noIndex: noIndex}, nil
 }
 
 func (r *renderer) render(w http.ResponseWriter, status int, data pageData) error {
+	// Enforced here rather than at each call site so a page added later cannot
+	// become indexable on a deployment that is meant to stay unlisted.
+	if r.noIndex {
+		data.Robots = "noindex,nofollow"
+	}
 	var body bytes.Buffer
 	if err := r.templates.ExecuteTemplate(&body, "base", data); err != nil {
 		return err
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if status < 200 || status >= 300 {
+	if r.noIndex || status < 200 || status >= 300 {
 		w.Header().Set("X-Robots-Tag", "noindex")
 	}
 	w.WriteHeader(status)
