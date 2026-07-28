@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -508,13 +509,17 @@ type archiveQueue struct {
 }
 
 type schedulerOps struct {
-	runExport    func(context.Context, string, string, string) error
-	upload       func(context.Context, *os.File, os.FileInfo, string, string) (UploadResult, error)
-	remove       func(*archiveQueue, string) error
-	syncQueue    func(*archiveQueue) error
-	now          func() time.Time
-	effectiveUID uint32
-	effectiveGID uint32
+	runExport      func(context.Context, string, string, string) error
+	upload         func(context.Context, *os.File, os.FileInfo, string, string) (UploadResult, error)
+	remove         func(*archiveQueue, string) error
+	syncQueue      func(*archiveQueue) error
+	now            func() time.Time
+	wait           func(context.Context, time.Duration) error
+	jitter         func(time.Duration) time.Duration
+	readLastCycle  func(*archiveQueue) (time.Time, bool, error)
+	writeLastCycle func(*archiveQueue, time.Time) error
+	effectiveUID   uint32
+	effectiveGID   uint32
 }
 
 func defaultSchedulerOps() schedulerOps {
@@ -527,13 +532,116 @@ func defaultSchedulerOps() schedulerOps {
 		syncQueue: func(queue *archiveQueue) error {
 			return queue.directory.Sync()
 		},
-		now:          time.Now,
-		effectiveUID: uint32(os.Geteuid()),
-		effectiveGID: uint32(os.Getegid()),
+		now:            time.Now,
+		wait:           waitFor,
+		jitter:         randomJitter,
+		readLastCycle:  readLastCycleMarker,
+		writeLastCycle: writeLastCycleMarker,
+		effectiveUID:   uint32(os.Geteuid()),
+		effectiveGID:   uint32(os.Getegid()),
 	}
 }
 
+// waitFor sleeps for d, returning early if ctx is cancelled.
+func waitFor(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func randomJitter(window time.Duration) time.Duration {
+	if window <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(window)))
+}
+
+// readLastCycleMarker reports when the scheduler last ran a cycle. A missing or
+// unparseable marker reports no recorded cycle rather than failing: the worst
+// consequence is one extra export, whereas refusing to start would stop backups
+// entirely.
+func readLastCycleMarker(queue *archiveQueue) (time.Time, bool, error) {
+	file, err := queue.openNoFollow(exportLastCycleMarkerName)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ELOOP) {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 128 {
+		return time.Time{}, false, nil
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	recorded, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}, false, nil
+	}
+	return recorded.UTC(), true, nil
+}
+
+// writeLastCycleMarker replaces the marker atomically and syncs the queue
+// directory, so a crash cannot leave a truncated timestamp behind.
+func writeLastCycleMarker(queue *archiveQueue, at time.Time) error {
+	temp, err := os.CreateTemp(queue.path, exportLastCycleMarkerName+"-*")
+	if err != nil {
+		return err
+	}
+	tempName := filepath.Base(temp.Name())
+	cleanup := func() {
+		_ = temp.Close()
+		_ = unix.Unlinkat(int(queue.directory.Fd()), tempName, 0)
+	}
+	if _, err := temp.WriteString(at.UTC().Format(time.RFC3339Nano)); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		_ = unix.Unlinkat(int(queue.directory.Fd()), tempName, 0)
+		return err
+	}
+	if err := unix.Renameat(int(queue.directory.Fd()), tempName, int(queue.directory.Fd()), exportLastCycleMarkerName); err != nil {
+		_ = unix.Unlinkat(int(queue.directory.Fd()), tempName, 0)
+		return err
+	}
+	return queue.directory.Sync()
+}
+
 const staleExportPartialMaxAge = 24 * time.Hour
+
+// exportLastCycleMarkerName records when the scheduler last ran a cycle, so a
+// restart resumes the existing schedule instead of starting a fresh interval.
+// The name deliberately avoids the ".sherpa-export-" prefix used by partial
+// archives and workspaces so queue discovery and stale-partial cleanup ignore it.
+const exportLastCycleMarkerName = ".sherpa-last-export"
+
+// schedulerStartupJitter bounds the delay before an overdue cycle runs. Without
+// it a crash-looping registry would export on every restart.
+const schedulerStartupJitter = 30 * time.Second
 
 var errSyncExportArchiveDirectory = errors.New("sync export archive directory")
 
@@ -1143,23 +1251,64 @@ func (scheduler *PreparedScheduler) Run(ctx context.Context) error {
 		}
 	}
 
-	ticker := time.NewTicker(scheduler.cfg.Interval)
-	defer ticker.Stop()
+	// The schedule is anchored to the recorded cycle time rather than to process
+	// start. A ticker restarts its interval on every boot, so a registry that is
+	// redeployed more often than its interval never exports at all.
+	lastCycle, hasCycle, err := scheduler.ops.readLastCycle(scheduler.queue)
+	if err != nil {
+		return errors.New("read export cycle marker")
+	}
 	for {
-		select {
-		case <-ctx.Done():
+		delay := scheduler.nextDelay(lastCycle, hasCycle)
+		if err := scheduler.ops.wait(ctx, delay); err != nil {
 			return nil
-		case now := <-ticker.C:
-			if err := runSchedulerCycleIn(ctx, scheduler.cfg, now, scheduler.queue, scheduler.ops); err != nil {
-				if ctx.Err() != nil {
-					return nil
-				}
-				if errors.Is(err, errSyncExportArchiveDirectory) {
-					return err
-				}
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		now := scheduler.ops.now()
+		cycleErr := runSchedulerCycleIn(ctx, scheduler.cfg, now, scheduler.queue, scheduler.ops)
+		// The marker records the last attempt, not the last success, so a
+		// persistently failing export retries on the normal interval instead of
+		// spinning. Failure visibility is the monitoring layer's job.
+		if markErr := scheduler.ops.writeLastCycle(scheduler.queue, now); markErr != nil {
+			return errors.New("record export cycle marker")
+		}
+		lastCycle, hasCycle = now, true
+		if cycleErr != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if errors.Is(cycleErr, errSyncExportArchiveDirectory) {
+				return cycleErr
 			}
 		}
 	}
+}
+
+// nextDelay returns how long to wait before the next cycle. An overdue or
+// never-run schedule waits only a jittered moment; otherwise it waits out the
+// remainder of the interval so a restart does not re-export.
+func (scheduler *PreparedScheduler) nextDelay(lastCycle time.Time, hasCycle bool) time.Duration {
+	if !hasCycle {
+		return scheduler.ops.jitter(scheduler.jitterWindow())
+	}
+	due := lastCycle.Add(scheduler.cfg.Interval)
+	now := scheduler.ops.now()
+	if remaining := due.Sub(now); remaining > 0 {
+		return remaining
+	}
+	return scheduler.ops.jitter(scheduler.jitterWindow())
+}
+
+// jitterWindow bounds startup jitter by the interval. A fixed window would
+// dominate any schedule shorter than itself, delaying an export far beyond its
+// configured interval.
+func (scheduler *PreparedScheduler) jitterWindow() time.Duration {
+	if scheduler.cfg.Interval < schedulerStartupJitter {
+		return scheduler.cfg.Interval
+	}
+	return schedulerStartupJitter
 }
 
 func (scheduler *PreparedScheduler) beginRun() error {
