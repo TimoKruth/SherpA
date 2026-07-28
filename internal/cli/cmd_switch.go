@@ -3,9 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
-	"strings"
 
 	"sherpa/internal/state"
 )
@@ -78,7 +76,7 @@ func cmdStatus(ctx *Ctx, args []string) error {
 }
 
 func statusRegistryUpdates(ctx *Ctx, st *state.State) {
-	rawBase := strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL"))
+	rawBase := registryBaseURL()
 	if rawBase == "" {
 		return
 	}

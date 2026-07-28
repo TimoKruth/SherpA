@@ -39,8 +39,7 @@ func cmdSearch(ctx *Ctx, args []string) error {
 	if query == "" {
 		return fmt.Errorf("usage: sherpa search <query>")
 	}
-	indexURL := os.Getenv("SHERPA_INDEX_URL")
-	registryURL := os.Getenv("SHERPA_REGISTRY_URL")
+	registryURL, indexURL := searchSource(os.Getenv("SHERPA_REGISTRY_URL"), os.Getenv("SHERPA_INDEX_URL"))
 	doc, err := loadSearchDocument(registryURL, indexURL, query)
 	if err != nil {
 		return err
@@ -57,12 +56,26 @@ func cmdSearch(ctx *Ctx, args []string) error {
 	return nil
 }
 
+// searchSource decides where search reads from. An explicitly configured
+// registry wins; otherwise an explicitly configured Phase 1 index is honoured,
+// so that fallback stays reachable; otherwise the build default applies, so a
+// fresh install can search without configuration.
+func searchSource(registryEnv, indexEnv string) (registryURL, indexURL string) {
+	if configured := strings.TrimSpace(registryEnv); configured != "" {
+		return configured, ""
+	}
+	if configured := strings.TrimSpace(indexEnv); configured != "" {
+		return "", configured
+	}
+	return DefaultRegistryURL, ""
+}
+
 func loadSearchDocument(registryURL, indexURL, query string) (indexDocument, error) {
 	if registryURL != "" {
 		return loadRegistrySearch(registryURL, query)
 	}
 	if indexURL == "" {
-		return indexDocument{}, fmt.Errorf("SHERPA_INDEX_URL is required for Phase 1 search")
+		return indexDocument{}, fmt.Errorf("no registry or index configured")
 	}
 	return loadIndex(indexURL)
 }

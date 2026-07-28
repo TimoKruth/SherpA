@@ -82,16 +82,30 @@ func TestSearchEmptyResultExitsZero(t *testing.T) {
 	}
 }
 
-func TestSearchRequiresIndexURL(t *testing.T) {
-	t.Setenv("SHERPA_HOME", t.TempDir())
-	t.Setenv("SHERPA_INDEX_URL", "")
-
-	var out, errb bytes.Buffer
-	if code := Run([]string{"search", "rust"}, &out, &errb); code == 0 {
-		t.Fatal("want nonzero exit when SHERPA_INDEX_URL is unset")
-	}
-	if !strings.Contains(errb.String(), "SHERPA_INDEX_URL") {
-		t.Fatalf("stderr = %q", errb.String())
+func TestSearchSourcePrecedence(t *testing.T) {
+	// An unconfigured install must still be able to search, so the build
+	// default applies; an explicitly configured registry or Phase 1 index
+	// still wins over it.
+	for _, tc := range []struct {
+		name         string
+		registryEnv  string
+		indexEnv     string
+		wantRegistry string
+		wantIndex    string
+	}{
+		{name: "nothing configured uses the build default", wantRegistry: DefaultRegistryURL},
+		{name: "registry wins", registryEnv: "https://r.example", wantRegistry: "https://r.example"},
+		{name: "registry wins over index", registryEnv: "https://r.example", indexEnv: "https://i.example", wantRegistry: "https://r.example"},
+		{name: "index still reachable", indexEnv: "https://i.example", wantIndex: "https://i.example"},
+		{name: "whitespace counts as unset", registryEnv: "  ", indexEnv: " ", wantRegistry: DefaultRegistryURL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registryURL, indexURL := searchSource(tc.registryEnv, tc.indexEnv)
+			if registryURL != tc.wantRegistry || indexURL != tc.wantIndex {
+				t.Fatalf("searchSource(%q, %q) = (%q, %q), want (%q, %q)",
+					tc.registryEnv, tc.indexEnv, registryURL, indexURL, tc.wantRegistry, tc.wantIndex)
+			}
+		})
 	}
 }
 

@@ -26,6 +26,22 @@ sudo mv "$ASSET" /usr/local/bin/sherpa
 During the beta the releases are prereleases, so `/releases/latest/` does not
 resolve to them — use the explicit tag above.
 
+Check the install with `sherpa version`, and list the commands with
+`sherpa help`. `sherpa search` works out of the box; set `SHERPA_REGISTRY_URL`
+only to point at a different registry.
+
+### Uninstall
+
+```sh
+sudo rm -f /usr/local/bin/sherpa   # the binary
+rm -rf ~/.sherpa                   # profiles, session, and local state
+```
+
+`~/.sherpa` holds every installed profile, so removing it discards work
+committed with `sherpa save` that was never published. To drop a single stack
+instead, use `sherpa remove <profile>`. Your own harness configuration
+(`~/.claude`) is never touched by either.
+
 Builds are published for macOS, Linux, and Windows on both `amd64` and `arm64`.
 On macOS the binary is unsigned, so the first run needs Gatekeeper approval:
 `xattr -d com.apple.quarantine /usr/local/bin/sherpa`.

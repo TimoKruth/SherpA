@@ -32,7 +32,7 @@ func cmdPublish(ctx *Ctx, args []string) error {
 		return err
 	}
 	if req.registry == "" && req.remote == "" {
-		req.registry = strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL"))
+		req.registry = registryBaseURL()
 	}
 	profile, err := activeProfile(ctx)
 	if err != nil {
@@ -138,7 +138,7 @@ func parsePublishArgs(args []string) (publishRequest, error) {
 	if req.remote != "" && req.registry != "" {
 		return publishRequest{}, fmt.Errorf("use only one of --remote or --registry")
 	}
-	if req.remote == "" && req.registry == "" && strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL")) == "" {
+	if req.remote == "" && req.registry == "" && registryBaseURL() == "" {
 		return publishRequest{}, fmt.Errorf("usage: sherpa publish --remote <git-url> or sherpa publish --registry <url>")
 	}
 	return req, nil
@@ -194,7 +194,7 @@ func parseRemoteMainSHA(out string) string {
 }
 
 func publishHistoryRangeForRequest(dir string, req publishRequest) (string, error) {
-	if req.registry != "" || (req.remote == "" && strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL")) != "") {
+	if req.registry != "" || (req.remote == "" && registryBaseURL() != "") {
 		return "local", nil
 	}
 	return publishHistoryRange(dir, req.remote)

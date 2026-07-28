@@ -106,7 +106,7 @@ func resolveRegistryRef(ref string) (string, error) {
 	if !strings.HasPrefix(ref, "@") {
 		return ref, nil
 	}
-	registryURL := strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL"))
+	registryURL := registryBaseURL()
 	if registryURL == "" {
 		return "", fmt.Errorf("SHERPA_REGISTRY_URL is required for registry ref %q", ref)
 	}

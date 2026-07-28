@@ -88,10 +88,13 @@ func TestFollowParsingAndIssuerFailuresMakeNoRequest(t *testing.T) {
 	if code := Run([]string{"follow", "@alice/reviewer"}, &out, &errOut); code == 0 || !strings.Contains(errOut.String(), "registry session belongs to") {
 		t.Fatalf("issuer mismatch: code=%d stderr=%q", code, errOut.String())
 	}
+	// An unset registry now falls back to the build default rather than being
+	// an error, so the session issuer no longer matches and the request is
+	// still refused - which is the invariant this test exists to protect.
 	t.Setenv("SHERPA_REGISTRY_URL", "")
 	errOut.Reset()
-	if code := Run([]string{"follow", "@alice/reviewer"}, &out, &errOut); code == 0 || !strings.Contains(errOut.String(), "registry URL is required") {
-		t.Fatalf("missing issuer: code=%d stderr=%q", code, errOut.String())
+	if code := Run([]string{"follow", "@alice/reviewer"}, &out, &errOut); code == 0 || !strings.Contains(errOut.String(), "registry session belongs to") {
+		t.Fatalf("unconfigured registry: code=%d stderr=%q", code, errOut.String())
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("unexpected requests = %d", calls.Load())
