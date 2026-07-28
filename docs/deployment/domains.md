@@ -74,8 +74,8 @@ Written into each user's `~/.sherpa` (or `$SHERPA_HOME`) and never re-resolved:
 - `profile.Registry.RegistryURL` — drives follow, trial, and update calls
 - the git remote inside each installed profile
 
-There is no `sherpa remove` or `uninstall` command. Testers cannot clear a stale
-profile through the CLI.
+`sherpa remove <profile>` clears a stale profile through the CLI. A full reset
+still means deleting `$SHERPA_HOME`, which also drops sessions and trials.
 
 ## Go-live reset
 
@@ -90,7 +90,7 @@ or serve a static "beta ended, reinstall" page.
 
 Tester instructions at go-live:
 
-1. Delete `~/.sherpa` — this is the only way to clear stale profiles.
+1. Delete `~/.sherpa`, or remove stacks individually with `sherpa remove`.
 2. Reinstall the CLI and run `sherpa init`; `mine` rebuilds from `~/.claude`.
 3. Register and log in again on the new registry.
 

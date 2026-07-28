@@ -51,6 +51,7 @@ The current CLI implements the following commands.
 | `sherpa clone <git-url-or-@owner/name>` | Clone, quarantine, validate, and install a stack without activating it; registry refs auto-follow best effort. |
 | `sherpa back` | Switch the active profile back to `mine`. |
 | `sherpa use <profile>` | Switch the active profile to an installed profile. |
+| `sherpa remove <profile> [--yes]` | Delete an installed profile and its directory. Refuses the active profile and the protected baseline. |
 | `sherpa run [args...]` | Run Claude Code under the active profile, reusing credentials from `mine` when available. |
 | `sherpa save [-m msg]` | Commit modifications in the active profile's local branch. |
 | `sherpa diff` | Show local profile changes, or a fork's changes against upstream. |
