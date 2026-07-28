@@ -97,7 +97,34 @@ nobody — it is visible only to someone already looking at the dashboard.
 Self-hosted Matrix is the preferred channel; the instance is already monitored
 and adds no third party. An n8n webhook or SMTP are the alternatives.
 
-## 4. Complete the disaster-recovery gate
+## 4. Run an export shortly after startup
+
+`PreparedScheduler.Run` schedules exports with `time.NewTicker(interval)`
+(`internal/registry/export/export.go:1146`), so the first export fires one full
+interval after process start and there is no run-at-boot. Every deploy, crash,
+or host reboot resets the timer, so a registry that restarts more often than
+its interval never exports at all.
+
+This is not theoretical. During beta setup on 2026-07-28 the newest recovery
+point was 40h old against a 26h `SHERPA_COLLECTOR_MAX_RECOVERY_AGE`, so the
+collector reported `/readyz` 503. The registry had been redeployed six times in
+the preceding day, and the only stored object existed solely because the
+interval had been temporarily lowered to `1m` during the acceptance run. No
+alert fired, because no notification provider is configured (see above).
+
+Mitigated for beta by lowering `SHERPA_EXPORT_INTERVAL` to `1h`, which is
+shorter than the deploy cadence. That is a workaround, not a fix: a production
+registry on a 24h interval remains one restart away from silently skipping a
+day.
+
+The fix is to run one cycle shortly after startup and then continue on the
+interval. It needs care:
+
+- apply startup jitter, or a crash-looping service will stampede the collector;
+- persist the last successful run so a restart does not re-export needlessly;
+- keep the existing queue rediscovery, which already runs at boot, unchanged.
+
+## 5. Complete the disaster-recovery gate
 
 Task 14 steps 3 and 6–8 are outstanding:
 
@@ -111,13 +138,13 @@ Until this passes, the backup chain has never been proven to restore. Doing it
 while the only data at risk is synthetic is far cheaper than doing it under
 pressure with users' published stacks on the line.
 
-## 5. Verify the Storage Box snapshot schedule
+## 6. Verify the Storage Box snapshot schedule
 
 Snapshots are one of the compensating controls the reduced threat model depends
 on, and the schedule has never been verified. Until it is, that control is
 intended rather than operative. Needs Hetzner Cloud API or console access.
 
-## 6. Give production its own Borg repository
+## 7. Give production its own Borg repository
 
 The collector's Borg repository is append-only; the routine identity cannot
 delete archives. Every encrypted beta snapshot therefore survives the teardown.
@@ -126,7 +153,7 @@ production recovery points in one immutable store with no clean way to separate
 them later. Provision a separate repository, and retire the beta one as a unit
 under its own approval.
 
-## 7. Railway custom-domain limit
+## 8. Railway custom-domain limit
 
 The current plan allows **one custom domain per service**. `registry` and `web`
 each have their slot filled by the beta hostnames, so the permanent domains
@@ -134,7 +161,7 @@ cannot be added alongside them. Either remove the beta domains first — which
 the teardown does anyway — or upgrade the plan if both must coexist during a
 cutover.
 
-## 8. Tester migration
+## 9. Tester migration
 
 See `domains.md`. In short: there is no `sherpa remove` command, so testers must
 delete `~/.sherpa` by hand, and work committed inside an installed profile with
@@ -148,6 +175,7 @@ before the reset, not after.
 - [ ] Homebrew tap evaluated (bypasses quarantine; likely the primary macOS path)
 - [ ] Windows binaries Authenticode signed
 - [ ] Alert delivery configured and tested end to end
+- [ ] Exporter runs shortly after startup; beta's 1h interval workaround reverted
 - [ ] Task 14 steps 3 and 6–8 passed
 - [ ] Storage Box snapshot schedule verified
 - [ ] Separate production Borg repository provisioned
