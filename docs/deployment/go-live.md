@@ -42,18 +42,40 @@ teaches users to strip a security control by hand.
    `--timestamp --options runtime`. The hardened runtime is mandatory for
    notarization.
 4. Submit with `xcrun notarytool submit --wait`.
-5. Generate `SHA256SUMS` **after** signing. Signing rewrites the binary, so
-   checksums produced earlier will not match what ships.
+5. Generate `SHA256SUMS` **after** signing and stapling. Both rewrite their
+   artifact, so checksums produced earlier will not match what ships.
 6. Gate publication on `codesign --verify --strict` and
    `spctl --assess --type execute` both succeeding.
 7. Drop the quarantine-bypass line from the README.
 
-**Caveat that shapes the design:** `xcrun stapler staple` does not work on a
-bare Mach-O executable. Notarization of a zipped binary succeeds, but the ticket
-cannot be attached to it, so Gatekeeper performs an online check on first launch
-and an offline user is still blocked. To staple, ship a `.dmg` or `.pkg` and
-publish that alongside the raw binaries. Decide this before building the job,
-because it determines whether the workflow produces archives or plain files.
+**Artifact format (decided 2026-07-28):** publish both a staplable archive and
+the plain binaries.
+
+`xcrun stapler staple` does not work on a bare Mach-O executable, so a plain
+binary can only be validated by an online Gatekeeper check. That is acceptable
+because the two install paths differ:
+
+| Path | `com.apple.quarantine` | Gatekeeper | Stapling |
+|---|---|---|---|
+| `curl` / script / CI | not set | never runs | irrelevant |
+| Browser download | set | runs | required offline |
+
+Verified on the published `v0.1.0-beta.1` artifact: a `curl` download carries no
+quarantine attribute. Plain binaries therefore serve scripted installs, and the
+stapled archive serves browser downloads including offline first launch.
+
+Notarization issues tickets by cdhash and covers nested code, so the same signed
+binary is recognised whether it ships inside the archive or standalone.
+
+Prefer `.pkg` over `.dmg` for the archive. A `.pkg` installs directly to
+`/usr/local/bin`; a `.dmg` holding a bare executable makes the user mount it,
+drag the binary onto `PATH`, and set the execute bit. Note that `.pkg` signing
+requires a **Developer ID Installer** certificate, which is distinct from the
+**Developer ID Application** certificate used by `codesign`. Both are covered by
+the same membership, but two certificates must be created and stored.
+
+Generate `SHA256SUMS` after **stapling**, not merely after signing: stapling
+rewrites the archive to embed the ticket.
 
 GitHub-hosted macOS runners are billed at a higher rate than Linux, but Actions
 minutes are free for public repositories, so this costs runner time only.
@@ -121,7 +143,9 @@ before the reset, not after.
 
 ## Checklist
 
-- [ ] macOS binaries signed with Developer ID and notarized; README bypass removed
+- [ ] macOS binaries signed with Developer ID and notarized; staplable archive
+      published alongside them; README bypass removed
+- [ ] Homebrew tap evaluated (bypasses quarantine; likely the primary macOS path)
 - [ ] Windows binaries Authenticode signed
 - [ ] Alert delivery configured and tested end to end
 - [ ] Task 14 steps 3 and 6–8 passed
