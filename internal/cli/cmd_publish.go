@@ -207,7 +207,22 @@ func publishRegistryVersion(ctx *Ctx, dir, registryURL, tag string) error {
 	}
 	owner := strings.TrimPrefix(m.Owner, "@")
 	if owner == "" {
-		return fmt.Errorf("stack.yaml: owner is required for registry publish")
+		// The registry rejects any owner other than the session login
+		// (authorize.go: owner != identity.Login -> 403), so the only value a
+		// user could correctly type here is the one we already know. Default it
+		// rather than making them hand-edit stack.yaml.
+		session, sessionErr := registryUserSession(ctx.Home, registryURL)
+		if sessionErr != nil {
+			return fmt.Errorf("stack.yaml has no owner and no registry session to infer it from: %w", sessionErr)
+		}
+		owner = session.Login
+		if owner == "" {
+			return fmt.Errorf("stack.yaml: owner is required for registry publish")
+		}
+		if err := setStackOwner(dir, owner); err != nil {
+			return fmt.Errorf("record owner in stack.yaml: %w", err)
+		}
+		fmt.Fprintf(ctx.Stdout, "recorded owner @%s in stack.yaml\n", owner)
 	}
 
 	tmpDir, err := os.MkdirTemp("", "sherpa-publish-*")
@@ -389,4 +404,53 @@ func showPublishDiff(w io.Writer, dir string) error {
 	}
 	fmt.Fprintf(w, "No previous published tag found. Full log:\n%s\n", out)
 	return nil
+}
+
+// setStackOwner records the owner in stack.yaml, adding the key when absent so
+// a stack that has never been published becomes self-describing. It preserves
+// the rest of the document, matching setStackVersion.
+func setStackOwner(dir, owner string) error {
+	path := filepath.Join(dir, "stack.yaml")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("stack.yaml: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return fmt.Errorf("stack.yaml: %w", err)
+	}
+	if len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return errors.New("stack.yaml: expected mapping document")
+	}
+	mapping := doc.Content[0]
+	updated := false
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value != "owner" {
+			continue
+		}
+		value := mapping.Content[i+1]
+		value.Kind = yaml.ScalarNode
+		value.Tag = "!!str"
+		value.Value = owner
+		value.Style = 0
+		updated = true
+		break
+	}
+	if !updated {
+		mapping.Content = append(mapping.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "owner"},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: owner},
+		)
+	}
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		enc.Close()
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(path, out.Bytes(), 0o644)
 }
