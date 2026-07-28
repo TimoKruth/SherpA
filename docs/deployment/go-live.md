@@ -163,10 +163,10 @@ cutover.
 
 ## 9. Tester migration
 
-See `domains.md`. In short: there is no `sherpa remove` command, so testers must
-delete `~/.sherpa` by hand, and work committed inside an installed profile with
-`sherpa save` is lost with it unless published or copied out first. Tell testers
-before the reset, not after.
+See `domains.md`. Testers can now drop individual stacks with
+`sherpa remove <profile>`, but the reset still discards local work: anything
+committed inside an installed profile with `sherpa save` is lost unless
+published or copied out first. Tell testers before the reset, not after.
 
 ## Checklist
 

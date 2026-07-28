@@ -255,6 +255,9 @@ func TestBorgCreateDoesNotStageCancelledOrExpiredRequests(t *testing.T) {
 func TestBorgCreateTimeoutIncludesStagingLifecycle(t *testing.T) {
 	object := testPendingObject(t)
 	config := testBorgConfig(t)
+	// Must expire while staging is still in progress, so it stays below the
+	// 250ms delay injected into linkat below. No helper runs before it fires,
+	// so this does not race with process startup.
 	config.CreateTimeout = 100 * time.Millisecond
 	system := defaultBorgSystem()
 	baseLinkat := system.linkat
@@ -507,7 +510,7 @@ func TestBorgRunnerKillsDescendantsOnTimeoutAndOverflow(t *testing.T) {
 			t.Setenv("COLLECTOR_BORG_CHILD_PID", pidPath)
 			backend, _ := newTestBorgBackend(t, test.mode)
 			if test.mode == "timeout-tree" {
-				backend.config.QueryTimeout = 50 * time.Millisecond
+				backend.config.QueryTimeout = borgTestTimeout
 			}
 			_, err := backend.List(context.Background())
 			want := "collector backend failed"

@@ -24,7 +24,7 @@ func TestBorgCreateReconcilesAmbiguousOutcomes(t *testing.T) {
 	}{
 		{name: "nonzero exact present", mode: "create-failure-exact", wantCalls: 2},
 		{name: "timeout exact present", mode: "create-timeout-exact", configure: func(backend *BorgBackend) {
-			backend.config.CreateTimeout = 50 * time.Millisecond
+			backend.config.CreateTimeout = borgTestTimeout
 		}, wantCalls: 2},
 		{name: "output ambiguity exact present", mode: "create-overflow-exact", wantCalls: 2},
 		{name: "wait-delay ambiguity exact present", mode: "create-waitdelay-exact", wantCalls: 2},

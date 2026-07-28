@@ -375,6 +375,14 @@ func TestNewBorgBackendRejectsSymlinkWorkDirectoryWithoutChangingTarget(t *testi
 	}
 }
 
+// borgTestTimeout applies to tests whose helper must reach a milestone -
+// recording its invocation, or writing its child PID - before the timeout
+// fires. Sub-100ms values raced with fork and exec: under full-suite load the
+// helper was killed first, surfacing as "helper child did not start" and as
+// missing invocations. Tests that only assert the returned error, or that must
+// expire before any helper runs, keep their own tighter values.
+const borgTestTimeout = time.Second
+
 func newTestBorgBackend(t testing.TB, mode string) (*BorgBackend, string) {
 	t.Helper()
 	return newTestBorgBackendForObject(t, mode, "")
