@@ -29,7 +29,29 @@ the quarantine attribute and is blocked. The README currently papers over this
 with `xattr -d com.apple.quarantine`, which is a workaround, not a fix: it
 teaches users to strip a security control by hand.
 
-**Required before launch:**
+**The workflow is already written** (`.github/workflows/release.yml`) and gated
+on secrets: when they are absent it publishes the plain binaries exactly as it
+does today and skips the package entirely, because an unsigned installer would
+be blocked by Gatekeeper anyway. Supplying the secrets below activates signing,
+notarization, stapling, and the `.pkg` with no further code change.
+
+| Secret | Contents |
+|---|---|
+| `MACOS_CERT_P12_BASE64` | Developer ID **Application** certificate, base64 `.p12` |
+| `MACOS_CERT_PASSWORD` | its export password |
+| `MACOS_SIGN_IDENTITY` | e.g. `Developer ID Application: Name (TEAMID)` |
+| `MACOS_INSTALLER_CERT_P12_BASE64` | Developer ID **Installer** certificate, base64 `.p12` |
+| `MACOS_INSTALLER_CERT_PASSWORD` | its export password |
+| `MACOS_INSTALLER_IDENTITY` | e.g. `Developer ID Installer: Name (TEAMID)` |
+| `APPLE_API_KEY_P8_BASE64` | App Store Connect API key, base64 `.p8` |
+| `APPLE_API_KEY_ID` | its key ID |
+| `APPLE_API_ISSUER_ID` | its issuer ID |
+
+The signing path itself is unverified: it cannot run until the credentials
+exist. Treat the first signed release as a test, and check the workflow's own
+`spctl --assess` and `stapler validate` gates rather than assuming.
+
+**Remaining prerequisites:**
 
 1. Apple Developer Program membership and a **Developer ID Application**
    certificate. Export as `.p12`.
@@ -170,8 +192,9 @@ published or copied out first. Tell testers before the reset, not after.
 
 ## Checklist
 
-- [ ] macOS binaries signed with Developer ID and notarized; staplable archive
-      published alongside them; README bypass removed
+- [ ] Apple Developer Program joined; both certificates created
+- [ ] The nine signing secrets added to the repository
+- [ ] First signed release verified; README quarantine bypass removed
 - [ ] Homebrew tap evaluated (bypasses quarantine; likely the primary macOS path)
 - [ ] Windows binaries Authenticode signed
 - [ ] Alert delivery configured and tested end to end
