@@ -88,7 +88,9 @@ used by personal follow, update, or trial-sharing commands.
 
 Registry and website deployment variables, OAuth callback ownership, backup/restore, rollback,
 and live staging gates are documented in
-[docs/deployment/railway.md](docs/deployment/railway.md).
+[docs/deployment/railway.md](docs/deployment/railway.md). Uptime monitoring and
+alert delivery are documented in
+[docs/deployment/monitoring.md](docs/deployment/monitoring.md).
 
 ## Trust Model
 
