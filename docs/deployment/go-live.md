@@ -112,12 +112,15 @@ cost more. Lower priority than macOS only if the beta shows few Windows users.
 
 ## 3. Configure alert delivery
 
-Uptime Kuma has **zero notification providers**. Monitors 11, 13, and 14 detect
-collector readiness and both beta hosts correctly, but a failure notifies
-nobody — it is visible only to someone already looking at the dashboard.
+**Done for the beta.** Monitors 11, 13, and 14 deliver to a private Matrix room
+on the self-hosted Synapse instance, verified in both directions on 2026-07-29.
+See [monitoring.md](monitoring.md).
 
-Self-hosted Matrix is the preferred channel; the instance is already monitored
-and adds no third party. An n8n webhook or SMTP are the alternatives.
+What remains before go-live is the shared-fate gap, not the channel: Kuma,
+Traefik, and Synapse all run on the same VPS, so an outage of that host is both
+undetected and undeliverable, and silence cannot be distinguished from health.
+Closing it needs something off that host — an external dead-man's-switch on
+Kuma, or a second channel on independent infrastructure.
 
 ## 4. Run an export shortly after startup
 
@@ -132,7 +135,8 @@ point was 40h old against a 26h `SHERPA_COLLECTOR_MAX_RECOVERY_AGE`, so the
 collector reported `/readyz` 503. The registry had been redeployed six times in
 the preceding day, and the only stored object existed solely because the
 interval had been temporarily lowered to `1m` during the acceptance run. No
-alert fired, because no notification provider is configured (see above).
+alert fired, because no notification provider was configured at the time. That
+gap is now closed (see above), so a repeat would at least be reported.
 
 Mitigated for beta by lowering `SHERPA_EXPORT_INTERVAL` to `1h`, which is
 shorter than the deploy cadence. That is a workaround, not a fix: a production
@@ -197,7 +201,9 @@ published or copied out first. Tell testers before the reset, not after.
 - [ ] First signed release verified; README quarantine bypass removed
 - [ ] Homebrew tap evaluated (bypasses quarantine; likely the primary macOS path)
 - [ ] Windows binaries Authenticode signed
-- [ ] Alert delivery configured and tested end to end
+- [x] Alert delivery configured and tested end to end (Matrix, 2026-07-29)
+- [ ] Alerting survives loss of the VPS: external dead-man's-switch or a second
+      channel off that host
 - [ ] Exporter runs shortly after startup; beta's 1h interval workaround reverted
 - [ ] Task 14 steps 3 and 6–8 passed
 - [ ] Storage Box snapshot schedule verified
