@@ -101,7 +101,7 @@ func activeProfile(ctx *Ctx) (state.Profile, error) {
 		return state.Profile{}, err
 	}
 	if st.Active == "" {
-		return state.Profile{}, fmt.Errorf("no active profile")
+		return state.Profile{}, fmt.Errorf("no active profile — run `sherpa init` to import your setup, then `sherpa use <profile>`")
 	}
 	profile, ok := st.Profiles[st.Active]
 	if !ok {

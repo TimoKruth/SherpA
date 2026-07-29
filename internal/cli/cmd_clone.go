@@ -29,7 +29,7 @@ func cmdClone(ctx *Ctx, args []string) error {
 	}
 	var origin *state.RegistryOrigin
 	if owner, name, ok := parseRegistryStackRef(req.url); ok {
-		base, err := normalizeRegistryBase(os.Getenv("SHERPA_REGISTRY_URL"))
+		base, err := normalizeRegistryBase(registryBaseURL())
 		if err != nil {
 			return err
 		}

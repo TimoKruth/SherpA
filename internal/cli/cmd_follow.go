@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"sherpa/internal/state"
@@ -65,7 +64,7 @@ func parseRegistryStackRefArgs(args []string, command string) (string, string, e
 }
 
 func socialClientFromEnvironment(home string) (string, *registrySocialClient, error) {
-	base, err := normalizeRegistryBase(os.Getenv("SHERPA_REGISTRY_URL"))
+	base, err := normalizeRegistryBase(registryBaseURL())
 	if err != nil {
 		return "", nil, err
 	}

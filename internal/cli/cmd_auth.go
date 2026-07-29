@@ -139,7 +139,7 @@ func cmdLogin(ctx *Ctx, args []string) error {
 	if len(args) != 0 {
 		return errors.New("usage: sherpa login")
 	}
-	base, err := normalizeRegistryBase(os.Getenv("SHERPA_REGISTRY_URL"))
+	base, err := normalizeRegistryBase(registryBaseURL())
 	if err != nil {
 		return err
 	}
