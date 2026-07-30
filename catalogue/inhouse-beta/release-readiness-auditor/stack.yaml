@@ -1,0 +1,10 @@
+name: release-readiness-auditor
+owner: TimoKruth
+version: 1
+harness: codex
+summary: Audits a repository against a concrete release target and produces a go or no-go decision.
+tags:
+  - release
+  - audit
+  - ci
+  - operations

@@ -1,6 +1,6 @@
 module sherpa
 
-go 1.26.3
+go 1.26.5
 
 require (
 	filippo.io/age v1.3.1
@@ -16,6 +16,6 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	golang.org/x/crypto v0.45.0 // indirect
-	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 )

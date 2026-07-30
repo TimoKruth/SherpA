@@ -38,11 +38,41 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: reachable vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
       # The store test harness starts postgres:16 through Docker and skips when
       # Docker is unavailable. GitHub-hosted runners provide Docker, so the real
       # Postgres tests execute here rather than skipping.
       - name: go test (race)
         run: go test -race ./...
+
+  collector-smoke:
+    name: collector smoke ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Native runners make the runtime and Borg checks architecture-exact; the
+      # smoke script also scans the complete image and starts the hardened
+      # Compose service from an exact committed source archive.
+      - name: collector release gate
+        env:
+          DOCKER_DEFAULT_PLATFORM: ${{ matrix.platform }}
+          SHERPA_COLLECTOR_SMOKE_IMAGE: sherpa-collector:ci
+        run: bash deploy/collector/smoke_build.sh
 
   build:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}

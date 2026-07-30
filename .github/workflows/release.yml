@@ -35,12 +35,41 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: reachable vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
       - name: go test
         run: go test ./...
 
+  collector-smoke:
+    name: collector smoke ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux/amd64, runner: ubuntu-24.04 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: collector release gate
+        env:
+          DOCKER_DEFAULT_PLATFORM: ${{ matrix.platform }}
+          SHERPA_COLLECTOR_SMOKE_IMAGE: sherpa-collector:release
+        run: bash deploy/collector/smoke_build.sh
+
   build-portable:
     name: build linux and windows
-    needs: verify
+    needs: [verify, collector-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -80,7 +109,7 @@ jobs:
 
   build-macos:
     name: build macos
-    needs: verify
+    needs: [verify, collector-smoke]
     runs-on: macos-latest
     timeout-minutes: 30
     steps:

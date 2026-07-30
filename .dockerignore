@@ -2,10 +2,15 @@
 .github
 .codex
 .superpowers
+.DS_Store
+**/.DS_Store
+/SHA256SUMS
+/tmp
 dist
 docs
 spike
 registry-content
+catalogue
 *.out
 coverage*
 .env*

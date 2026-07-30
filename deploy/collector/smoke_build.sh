@@ -30,6 +30,15 @@ cleanup() {
   fi
   docker rm -f "$inspect_container" >/dev/null 2>&1 || true
   docker image rm --force "$image_alias" >/dev/null 2>&1 || true
+  # The fixture check deliberately changes bind-mounted files to the runtime
+  # UID. Linux hosts enforce that ownership during cleanup, unlike Docker
+  # Desktop's translated mounts, so restore the invoking user's ownership
+  # through the already-reviewed image before removing the temporary tree.
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    docker run --rm --user 0:0 --entrypoint /bin/chown \
+      --mount "type=bind,src=$work_dir,dst=/cleanup" \
+      "$image" -R "$(id -u):$(id -g)" /cleanup >/dev/null 2>&1 || true
+  fi
   rm -rf "$work_dir"
 }
 trap cleanup EXIT

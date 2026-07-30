@@ -179,13 +179,13 @@ production recovery points in one immutable store with no clean way to separate
 them later. Provision a separate repository, and retire the beta one as a unit
 under its own approval.
 
-## 8. Railway custom-domain limit
+## 8. Domain cutover
 
-The current plan allows **one custom domain per service**. `registry` and `web`
-each have their slot filled by the beta hostnames, so the permanent domains
-cannot be added alongside them. Either remove the beta domains first — which
-the teardown does anyway — or upgrade the plan if both must coexist during a
-cutover.
+Railway supports multiple custom domains on a service, so domain capacity does
+not force an early beta teardown. If a short validation overlap is useful, add
+the permanent domains, verify their certificates and canonical base variables,
+then remove the beta domains. Do not redirect the old registry origin; see
+`domains.md`.
 
 ## 9. Tester migration
 
@@ -208,5 +208,5 @@ published or copied out first. Tell testers before the reset, not after.
 - [ ] Task 14 steps 3 and 6–8 passed
 - [ ] Storage Box snapshot schedule verified
 - [ ] Separate production Borg repository provisioned
-- [ ] Custom-domain slots freed or plan upgraded
+- [ ] Permanent domains verified and beta domains retired
 - [ ] Tester reset instructions sent
