@@ -1,6 +1,6 @@
 # SherpA Domain Plan
 
-Status: 2026-07-27. Supersedes nothing; complements `railway.md` and `collector.md`.
+Status: 2026-07-30. Supersedes nothing; complements `railway.md` and `collector.md`.
 
 ## Strategy
 
@@ -9,7 +9,7 @@ domain, and go-live is a fresh build on the permanent domain rather than a migra
 
 | Phase | Domain | Railway environment | Fate |
 |---|---|---|---|
-| Internal beta | `trysherpa.net` | `staging` | Discarded entirely at go-live |
+| Internal beta | `beta.trysherpa.net` | `staging` | Discarded entirely at go-live |
 | Public launch | `sherpa.guide` | `production` (built fresh) | Permanent |
 
 The reset is the point. Nothing is migrated between phases, so the classes of bug
@@ -25,9 +25,13 @@ scheme and host match — and both must be HTTPS outside loopback.
 Beta:
 
 ```text
-trysherpa.net            -> web service      (discovery site)
+beta.trysherpa.net       -> web service      (discovery site)
 registry.trysherpa.net   -> registry service (API + git over HTTPS)
 ```
+
+The `trysherpa.net` apex is deliberately not a SherpA application origin. All
+beta links, redirects, OAuth destinations, and monitoring checks use
+`beta.trysherpa.net`.
 
 Go-live:
 
@@ -46,7 +50,7 @@ Set on the registry service:
 | Variable | Beta value |
 |---|---|
 | `SHERPA_PUBLIC_BASE_URL` | `https://registry.trysherpa.net` |
-| `SHERPA_WEB_PUBLIC_BASE_URL` | `https://trysherpa.net` |
+| `SHERPA_WEB_PUBLIC_BASE_URL` | `https://beta.trysherpa.net` |
 | `SHERPA_GITHUB_CLIENT_ID` | from the beta OAuth app |
 | `SHERPA_GITHUB_CLIENT_SECRET` | from the beta OAuth app |
 
@@ -79,14 +83,16 @@ still means deleting `$SHERPA_HOME`, which also drops sessions and trials.
 
 ## Go-live reset
 
-Everything on `trysherpa.net` is discarded: Postgres, the `/data` git volume and
-every bare repository in it, all sessions, all published stacks and their version
-history. Version numbers restart at 1.
+Everything behind `beta.trysherpa.net` and `registry.trysherpa.net` is
+discarded: Postgres, the `/data` git volume and every bare repository in it, all
+sessions, all published stacks and their version history. Version numbers
+restart at 1.
 
-Do **not** redirect `trysherpa.net` to `sherpa.guide`. Git follows HTTP redirects
-on fetch, so a redirect would point existing clones at a live host where their
-stack no longer exists — a confusing failure. Let the beta domain stop resolving,
-or serve a static "beta ended, reinstall" page.
+Do **not** redirect `registry.trysherpa.net` to `registry.sherpa.guide`. Git
+follows HTTP redirects on fetch, so a redirect would point existing clones at a
+live host where their stack no longer exists — a confusing failure. Let the
+beta registry stop resolving. `beta.trysherpa.net` may instead serve a static
+"beta ended, reinstall" page.
 
 Tester instructions at go-live:
 
@@ -117,9 +123,6 @@ alert delivery, the disaster-recovery gate, snapshots — is tracked in
 
 ## Open items
 
-- `sherpa.guide` is not yet registered. The relaunch depends on it; it was still
-  unregistered as of 2026-07-27. Register and park it before the beta starts.
-- `trysherpa.net` registration had not appeared in the `.net` registry as of
-  2026-07-27; DNS cannot be configured until it does.
-- The web service has never been deployed in any environment.
-- No alert delivery is configured for the readiness monitor.
+- Confirm ownership and DNS readiness for `sherpa.guide` before public launch.
+- Retire both beta application hostnames during the go-live reset without
+  redirecting the registry origin.

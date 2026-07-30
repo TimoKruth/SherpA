@@ -1,0 +1,10 @@
+name: safe-refactor-driver
+owner: TimoKruth
+version: 1
+harness: codex
+summary: Drives behavior-preserving refactors with characterization tests and bounded commits.
+tags:
+  - refactoring
+  - testing
+  - maintenance
+  - safety

@@ -1,0 +1,10 @@
+name: incident-evidence-analyst
+owner: TimoKruth
+version: 1
+harness: claude-code
+summary: Read-only incident triage that builds a timestamped evidence chain before recommending action.
+tags:
+  - incident-response
+  - operations
+  - diagnostics
+  - safety

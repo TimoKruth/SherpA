@@ -2,6 +2,12 @@
 
 SherpA is a CLI and registry for sharing and trying complete agent setups as versioned, sanitized stacks. Power users build global instructions, skills, subagents, hooks, MCP servers, settings, and keybindings that can meaningfully change agent performance, but those setups are hard to discover, try, revert, fork, update, and follow safely. SherpA supports Claude Code and Codex harnesses: experts can publish a stack, users can try or clone it, `sherpa back` restores the protected `mine` profile, and local changes are saved as a fork that can track upstream.
 
+Internal beta catalogue: [beta.trysherpa.net](https://beta.trysherpa.net)
+
+The beta is disposable. Accounts, sessions, published stacks, and version
+history will be reset before the public launch; do not treat it as permanent
+storage for the only copy of a stack.
+
 Design spec: [docs/superpowers/specs/2026-07-08-follow-the-expert-design.md](docs/superpowers/specs/2026-07-08-follow-the-expert-design.md)
 
 ## Install
@@ -11,7 +17,7 @@ Download the binary for your platform from the
 put it on your `PATH`:
 
 ```sh
-VERSION=v0.1.0-beta.1          # see the releases page for the current tag
+VERSION=v0.1.0-beta.2          # see the releases page for the current tag
 ASSET=sherpa-darwin-arm64      # or -darwin-amd64, -linux-amd64, -linux-arm64,
                                #    -windows-amd64.exe, -windows-arm64.exe
 BASE=https://github.com/TimoKruth/SherpA/releases/download/$VERSION
@@ -45,8 +51,6 @@ instead, use `sherpa remove <profile>`. Your own harness configuration
 Builds are published for macOS, Linux, and Windows on both `amd64` and `arm64`.
 On macOS the binary is unsigned, so the first run needs Gatekeeper approval:
 `xattr -d com.apple.quarantine /usr/local/bin/sherpa`.
-
-Check the install with `sherpa version`.
 
 From source instead:
 

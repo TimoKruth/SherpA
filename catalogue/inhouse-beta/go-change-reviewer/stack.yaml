@@ -1,0 +1,10 @@
+name: go-change-reviewer
+owner: TimoKruth
+version: 1
+harness: claude-code
+summary: Evidence-first review of Go changes for correctness, security, and regressions.
+tags:
+  - go
+  - code-review
+  - security
+  - testing
