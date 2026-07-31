@@ -109,12 +109,31 @@ never mutated**:
 ```
 ~/.sherpa/
 ├── profiles/
-│   ├── mine/               # copy of your real ~/.claude, auto-git-init'd (permanent, versioned)
+│   ├── mine/               # user-confirmed primary setup (permanent, versioned)
+│   ├── mine-codex/         # optional baseline for another detected harness
 │   ├── jane-rust-reviewer/ # cloned stack = git repo = a complete config dir
 │   └── simonw-writing/
 ├── active                  # which profile new sessions use
 └── state.json              # follows, trial journal, last-update-check
 ```
+
+**Multi-harness initialization (required before public go-live).** `sherpa init`
+must not silently choose the default adapter once more than one harness is
+supported. It discovers every registered harness whose configuration exists on
+the machine and shows the detected harness and source path. It then proposes a
+primary setup and requires the user to confirm which detected setup owns the
+canonical protected name `mine`; confirmation is required even when only one
+setup is detected so the imported harness is unambiguous.
+
+The confirmed primary is imported as `mine`. Every other detected setup is
+preserved as an optional protected baseline named `mine-<harness-alias>` (for
+example, `mine-codex` or `mine-claude`) and remains available for explicit use.
+Each profile must use the credentials and setup-state baseline for its own
+harness. Discovery/import is atomic and idempotent: declining leaves all source
+and SherpA state untouched, rerunning does not duplicate profiles, and adding a
+new harness later must not rename or replace the established primary without a
+separate explicit confirmation. A non-interactive caller may select the primary
+with an explicit flag, but there is no silent first-found winner.
 
 - `sherpa try/clone` creates a new profile directory; it never writes into `~/.claude`.
 - Switching = pointing `CLAUDE_CONFIG_DIR` at a profile. `sherpa try` does this by
@@ -309,7 +328,7 @@ opt-in-fresh behavior is uniform across harnesses; only the file list and curati
 
 | Command | Behavior |
 |---|---|
-| `sherpa init` | Import `~/.claude` as the protected `mine` profile |
+| `sherpa init` | Discover installed harness setups, confirm which is the protected primary `mine`, and import other detected setups as optional `mine-<harness>` baselines |
 | `sherpa search <query>` | Search registry (also available to agents via MCP) |
 | `sherpa show @jane/rust-reviewer` | Render manifest, README, executable surface, stats |
 | `sherpa try @jane/rust-reviewer` | Clone → review gate → launch session under profile (subprocess; exit = revert) |
@@ -493,9 +512,12 @@ setup/identity files, curation policy, and fresh-setup trigger.
 
 1. **Naming**: **SherpA** (capital A for Agents); CLI command `sherpa`.
 2. **`mine` import**: copy + auto-git-init (recommended option taken), so `mine` is a
-   versioned stack from day one and the personal config is permanently saved. Long term
-   this generalizes beyond CLIs via the Config Vault (§3.6) — the setting must become
-   changeable and resettable for GUI tools too, with "mine is sacred" preserved.
+   versioned stack from day one and the personal config is permanently saved. Refined
+   2026-07-31 for multi-harness installs: the user explicitly confirms which detected
+   setup owns `mine`; every other detected setup is preserved as an optional protected
+   `mine-<harness-alias>` baseline. Long term this generalizes beyond CLIs via the Config
+   Vault (§3.6) — the setting must become changeable and resettable for GUI tools too,
+   with "mine is sacred" preserved.
 3. **Partial adoption**: not in v1. Whole-profile ("full copy") only; cherry-picking
    single skills is a later feature.
 4. **Storage & hosting**: target self-hosted Forgejo; GitHub bootstrap only if truly
