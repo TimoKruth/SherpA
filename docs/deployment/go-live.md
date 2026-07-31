@@ -194,6 +194,20 @@ See `domains.md`. Testers can now drop individual stacks with
 committed inside an installed profile with `sherpa save` is lost unless
 published or copied out first. Tell testers before the reset, not after.
 
+## 10. Make initialization multi-harness aware
+
+The beta `sherpa init` defaults to one harness unless the user supplies
+`--harness`, and importing a second baseline can leave only suffixed baseline
+names. Before public go-live, initialization must discover all supported setups,
+ask which detected harness should own the canonical protected `mine`, and import
+the others as optional protected `mine-<harness-alias>` profiles. It must never
+pick the primary from discovery order.
+
+Acceptance coverage must include one detected setup, multiple detected setups,
+declined confirmation, an explicit non-interactive primary, adding a harness on
+a later run, rerunning without duplication, and rollback after a partial import.
+The normative behavior and naming rules are in §3.2 of the design spec.
+
 ## Checklist
 
 - [ ] Apple Developer Program joined; both certificates created
@@ -210,3 +224,5 @@ published or copied out first. Tell testers before the reset, not after.
 - [ ] Separate production Borg repository provisioned
 - [ ] Permanent domains verified and beta domains retired
 - [ ] Tester reset instructions sent
+- [ ] Multi-harness `sherpa init` discovery, primary confirmation, optional
+      baselines, idempotency, and rollback shipped and acceptance-tested
