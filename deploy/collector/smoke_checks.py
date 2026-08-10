@@ -343,7 +343,7 @@ linux/arm64|usr/lib/aarch64-linux-gnu/libsystemd.so.0.35.0|e38e0c11131d330c9a49a
 linux/arm64|usr/lib/aarch64-linux-gnu/libudev.so.1.7.5|215857660d2d9ff00d8d653188fc9bd77b25cb2492d275be4b25fe500981da95|key,p.b.key
 linux/arm64|usr/lib/aarch64-linux-gnu/security/pam_unix.so|bf595555d3f0c80572ff96f3c1c65b17cdd2c2da18b1fb76e85b63709504e21a|pam_unix_auth
 linux/arm64|usr/lib/apt/methods/http|1b2ae08e1853d682e7f472c4d96773bb4b237dd4a64189c21c729e79a7c70cfc|Authorization,Proxy-Authorization
-linux/arm64|usr/local/bin/collector|86942e23b62714a352c1151b4ae25356c366a3ee43ab5dc4912d96bfbd58d277|key,key_sharebufio.Scanner,readage-renameBORG_REPO,stringBORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK
+linux/arm64|usr/local/bin/collector|4abd240643b00f24ca5591151bb30cd37a39f2556042bd51796456520fd3ba20|key,key_sharebufio.Scanner,readage-renameBORG_REPO,stringBORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK
 linux/arm64|usr/local/lib/libpython3.13.so.1.0|6883e73be69e1d09eff85be6670ba90c55b4e738735c5be2b172e6fbec4083a1|key,pwd.struct_passwd
 linux/arm64|usr/local/lib/python3.13/lib-dynload/_bisect.cpython-313-aarch64-linux-gnu.so|c1935e52815bbeb478d2f97037b9b4d615735688cb0f0d98d41489771831eb45|key
 linux/arm64|usr/local/lib/python3.13/lib-dynload/_blake2.cpython-313-aarch64-linux-gnu.so|0d64ecbbb59f84cb89f03ecce00546dfe3af0b0acb1bb69a5b3c868ec9db2f5a|key
@@ -386,7 +386,7 @@ linux/amd64|usr/lib/x86_64-linux-gnu/libssl.so.3|9aec161fdbc82d3e4280f5084843118
 linux/amd64|usr/lib/x86_64-linux-gnu/libsystemd.so.0.35.0|3880319ae776b622ad3c89201984065905d10271f78ef3a4db2ee0604a61256b|key,p.b.key
 linux/amd64|usr/lib/x86_64-linux-gnu/libudev.so.1.7.5|99a5e38f8b45ec2729e5bc24d2d8e2f04d260a2455431a1f9d61f500b31060dd|key,p.b.key
 linux/amd64|usr/lib/x86_64-linux-gnu/security/pam_unix.so|f4ef9b05d76c72ff807e82929e745ae34e769f0caab1e357163ebc63eb1621b1|pam_unix_auth
-linux/amd64|usr/local/bin/collector|ca754aefde6d34b3e03835b4c283ad710e4ad9d064b1b937207973acc98c2014|key,key_sharebufio.Scanner,readage-renameBORG_REPO,stringBORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK
+linux/amd64|usr/local/bin/collector|0015ec88b2b8d98a693508f8f3eea16a38f302228a7e957435c92f464852f78d|key,key_sharebufio.Scanner,readage-renameBORG_REPO,stringBORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK
 linux/amd64|usr/local/lib/libpython3.13.so.1.0|1c99db6c082a0ff2acb4af8b87dc6b43349056ee22dfc573bd7353ffd05fc8ef|key,pwd.struct_passwd
 linux/amd64|usr/local/lib/python3.13/lib-dynload/_bisect.cpython-313-x86_64-linux-gnu.so|ab1941e87f927eed2683dd5a84166d403b5678ae0131ac79869cf62f8ca7bf53|key
 linux/amd64|usr/local/lib/python3.13/lib-dynload/_blake2.cpython-313-x86_64-linux-gnu.so|c6e5cffe5c51f94349f372afba720ea96a9712ac2034130eae1a820517c5b5e3|key

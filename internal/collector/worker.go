@@ -199,7 +199,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		return w.terminalFailure()
 	}
 
-	queue, err := w.reconcileStartup(ctx)
+	queue, err := w.reconcile(ctx, true)
 	if err != nil {
 		if ctx.Err() != nil && !w.status.Snapshot().TerminalLocalError {
 			return nil
@@ -217,7 +217,7 @@ func (w *Worker) Run(ctx context.Context) error {
 				}
 				return w.terminalFailure()
 			}
-			queue, err = w.reconcileStartup(ctx)
+			queue, err = w.reconcile(ctx, false)
 			if err != nil {
 				if ctx.Err() != nil && !w.status.Snapshot().TerminalLocalError {
 					return nil
@@ -259,7 +259,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Worker) reconcileStartup(ctx context.Context) ([]PendingObject, error) {
+func (w *Worker) reconcile(ctx context.Context, verifyStored bool) ([]PendingObject, error) {
 	if err := w.service.publishGate.acquire(ctx); err != nil {
 		return nil, errors.New("collector startup cancelled")
 	}
@@ -301,6 +301,9 @@ func (w *Worker) reconcileStartup(ctx context.Context) ([]PendingObject, error) 
 					return nil, w.terminalFailure()
 				}
 				w.status.RemovePending(record.ObjectID)
+				continue
+			}
+			if !verifyStored {
 				continue
 			}
 			digest, ok := canonicalDigest(record.ObjectID)
