@@ -205,7 +205,10 @@ the exact archive locally; a restart resends the identical bytes, accepts a vali
 response, and deletes only after that proof. Any failed upload remains in
 `SHERPA_EXPORT_ARCHIVE_DIR` and is retried on each interval; startup rediscovers completed queue
 archives, and the scheduler does not create a new archive until the oldest pending archive uploads
-and is deleted. This bounds ordinary local accumulation to one archive, but a failed upload or
+and is deleted. After the queue drains, startup uses the persisted last-success timestamp to wait
+only until the next export is due. A missing, invalid, or future timestamp fails safe to a new
+export after jitter bounded by five minutes or one tenth of the configured interval. This bounds
+ordinary local accumulation to one archive, but a failed upload or
 missing collector object is still an alert because the off-site recovery point is not advancing.
 Keep the archive directory outside `/data/git` and monitor its capacity. `/data` must remain a
 real, root-owned volume mountpoint that is not writable by the registry UID; the root entrypoint

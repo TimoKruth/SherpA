@@ -124,11 +124,12 @@ Kuma, or a second channel on independent infrastructure.
 
 ## 4. Run an export shortly after startup
 
-`PreparedScheduler.Run` schedules exports with `time.NewTicker(interval)`
-(`internal/registry/export/export.go:1146`), so the first export fires one full
-interval after process start and there is no run-at-boot. Every deploy, crash,
-or host reboot resets the timer, so a registry that restarts more often than
-its interval never exports at all.
+**Implemented in the launch-readiness branch.** `PreparedScheduler.Run` now
+records each validated export in a mode-`0600` state file inside the locked
+archive queue. On startup it waits only until the next export is due. If no
+valid success record exists, it runs after cryptographically random jitter
+bounded by the smaller of five minutes or one tenth of the configured interval.
+Pending archives still drain before any new archive is created.
 
 This is not theoretical. During beta setup on 2026-07-28 the newest recovery
 point was 40h old against a 26h `SHERPA_COLLECTOR_MAX_RECOVERY_AGE`, so the
@@ -138,17 +139,10 @@ interval had been temporarily lowered to `1m` during the acceptance run. No
 alert fired, because no notification provider was configured at the time. That
 gap is now closed (see above), so a repeat would at least be reported.
 
-Mitigated for beta by lowering `SHERPA_EXPORT_INTERVAL` to `1h`, which is
-shorter than the deploy cadence. That is a workaround, not a fix: a production
-registry on a 24h interval remains one restart away from silently skipping a
-day.
-
-The fix is to run one cycle shortly after startup and then continue on the
-interval. It needs care:
-
-- apply startup jitter, or a crash-looping service will stampede the collector;
-- persist the last successful run so a restart does not re-export needlessly;
-- keep the existing queue rediscovery, which already runs at boot, unchanged.
+The beta's temporary `SHERPA_EXPORT_INTERVAL=1h` mitigation can be reverted to
+the intended interval after this change is reviewed, merged, deployed, and one
+startup-triggered export is observed. Do not change that live variable as part
+of the code rollout without the separately required operational approval.
 
 ## 5. Complete the disaster-recovery gate
 

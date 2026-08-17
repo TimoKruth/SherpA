@@ -1007,6 +1007,141 @@ func TestStartSchedulerDrainsExistingArchiveBeforeFirstTick(t *testing.T) {
 	}
 }
 
+func TestStartSchedulerRunsDueExportAfterBoundedStartupJitterAndPersistsSuccess(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 17, 12, 0, 0, 123, time.UTC)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var waited time.Duration
+	var runs atomic.Int32
+	ops := defaultSchedulerOps()
+	ops.now = func() time.Time { return now }
+	ops.jitter = func(limit time.Duration) time.Duration {
+		if limit != maxStartupExportJitter {
+			t.Fatalf("startup jitter limit = %v, want %v", limit, maxStartupExportJitter)
+		}
+		return 37 * time.Second
+	}
+	ops.wait = func(_ context.Context, delay time.Duration) error {
+		waited = delay
+		return nil
+	}
+	ops.runExport = func(_ context.Context, _, _, path string) error {
+		runs.Add(1)
+		return os.WriteFile(path, []byte("archive"), 0o600)
+	}
+	ops.upload = func(context.Context, *os.File, os.FileInfo, string, string) (UploadResult, error) {
+		cancel()
+		return validatedUploadResult("stored"), nil
+	}
+
+	if err := startScheduler(ctx, schedulerTestConfig(dir, 24*time.Hour), ops); err != nil {
+		t.Fatal(err)
+	}
+	if waited != 37*time.Second {
+		t.Fatalf("initial wait = %v, want 37s", waited)
+	}
+	if runs.Load() != 1 {
+		t.Fatalf("startup exports = %d, want 1", runs.Load())
+	}
+	last, err := readLastSuccessfulExportFromPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !last.Equal(now) {
+		t.Fatalf("last success = %v, want %v", last, now)
+	}
+}
+
+func TestStartSchedulerFreshSuccessWaitsOnlyUntilNextDueTime(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 17, 12, 0, 0, 0, time.UTC)
+	last := now.Add(-40 * time.Minute)
+	if err := os.WriteFile(filepath.Join(dir, lastSuccessStateName), []byte(last.Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var waited time.Duration
+	var runs atomic.Int32
+	ops := defaultSchedulerOps()
+	ops.now = func() time.Time { return now }
+	ops.wait = func(_ context.Context, delay time.Duration) error {
+		waited = delay
+		cancel()
+		return context.Canceled
+	}
+	ops.runExport = func(context.Context, string, string, string) error {
+		runs.Add(1)
+		return nil
+	}
+
+	if err := startScheduler(ctx, schedulerTestConfig(dir, time.Hour), ops); err != nil {
+		t.Fatal(err)
+	}
+	if waited != 20*time.Minute {
+		t.Fatalf("initial wait = %v, want 20m", waited)
+	}
+	if runs.Load() != 0 {
+		t.Fatalf("exports = %d, want 0 before due time", runs.Load())
+	}
+}
+
+func TestStartSchedulerCorruptOrFutureSuccessStateFailsSafeToStartupExport(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "corrupt", content: "not-a-timestamp\n"},
+		{name: "future", content: "2126-08-17T12:00:00Z\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Chmod(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, lastSuccessStateName), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Date(2026, time.August, 17, 12, 0, 0, 0, time.UTC)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var runs atomic.Int32
+			ops := defaultSchedulerOps()
+			ops.now = func() time.Time { return now }
+			ops.jitter = func(time.Duration) time.Duration { return 0 }
+			ops.wait = func(context.Context, time.Duration) error { return nil }
+			ops.runExport = func(_ context.Context, _, _, path string) error {
+				runs.Add(1)
+				return os.WriteFile(path, []byte("archive"), 0o600)
+			}
+			ops.upload = func(context.Context, *os.File, os.FileInfo, string, string) (UploadResult, error) {
+				cancel()
+				return validatedUploadResult("stored"), nil
+			}
+
+			if err := startScheduler(ctx, schedulerTestConfig(dir, time.Hour), ops); err != nil {
+				t.Fatal(err)
+			}
+			if runs.Load() != 1 {
+				t.Fatalf("startup exports = %d, want 1", runs.Load())
+			}
+			last, err := readLastSuccessfulExportFromPath(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !last.Equal(now) {
+				t.Fatalf("last success = %v, want %v", last, now)
+			}
+		})
+	}
+}
+
 func TestStartSchedulerDoesNotCreateAcrossTicksWhilePendingArchiveExists(t *testing.T) {
 	dir := t.TempDir()
 	pending := writePendingArchive(t, dir, generatedPendingName(time.Now()), "archive", time.Now())
@@ -1722,6 +1857,15 @@ func createTempPartial(t *testing.T, dir string, modTime time.Time) string {
 
 func schedulerTestConfig(archiveDir string, interval time.Duration) SchedulerConfig {
 	return schedulerTestConfigWithCollector(archiveDir, interval, "https://collector.example/upload")
+}
+
+func readLastSuccessfulExportFromPath(archiveDir string) (time.Time, error) {
+	queue, err := openArchiveQueue(archiveDir)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer queue.close()
+	return readLastSuccessfulExport(queue)
 }
 
 func schedulerTestConfigWithCollector(archiveDir string, interval time.Duration, collectorURL string) SchedulerConfig {

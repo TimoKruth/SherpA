@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -513,6 +515,10 @@ type schedulerOps struct {
 	remove       func(*archiveQueue, string) error
 	syncQueue    func(*archiveQueue) error
 	now          func() time.Time
+	wait         func(context.Context, time.Duration) error
+	jitter       func(time.Duration) time.Duration
+	readSuccess  func(*archiveQueue) (time.Time, error)
+	writeSuccess func(*archiveQueue, time.Time) error
 	effectiveUID uint32
 	effectiveGID uint32
 }
@@ -527,13 +533,23 @@ func defaultSchedulerOps() schedulerOps {
 		syncQueue: func(queue *archiveQueue) error {
 			return queue.directory.Sync()
 		},
+		wait:         waitForSchedulerDelay,
+		jitter:       randomSchedulerJitter,
+		readSuccess:  readLastSuccessfulExport,
+		writeSuccess: writeLastSuccessfulExport,
 		now:          time.Now,
 		effectiveUID: uint32(os.Geteuid()),
 		effectiveGID: uint32(os.Getegid()),
 	}
 }
 
-const staleExportPartialMaxAge = 24 * time.Hour
+const (
+	staleExportPartialMaxAge = 24 * time.Hour
+	maxStartupExportJitter   = 5 * time.Minute
+	lastSuccessStateName     = ".sherpa-last-success"
+	lastSuccessTempName      = ".sherpa-last-success.tmp"
+	maxSuccessStateBytes     = 128
+)
 
 var errSyncExportArchiveDirectory = errors.New("sync export archive directory")
 
@@ -726,6 +742,127 @@ func (queue *archiveQueue) openNoFollow(entryBase string) (*os.File, error) {
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), filepath.Join(queue.path, entryBase)), nil
+}
+
+func waitForSchedulerDelay(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func startupExportJitterLimit(interval time.Duration) time.Duration {
+	limit := interval / 10
+	if limit > maxStartupExportJitter {
+		return maxStartupExportJitter
+	}
+	if limit < 0 {
+		return 0
+	}
+	return limit
+}
+
+func randomSchedulerJitter(limit time.Duration) time.Duration {
+	if limit <= 0 {
+		return 0
+	}
+	value, err := rand.Int(rand.Reader, big.NewInt(int64(limit)+1))
+	if err != nil {
+		return limit / 2
+	}
+	return time.Duration(value.Int64())
+}
+
+func initialExportDelay(lastSuccess, now time.Time, interval time.Duration, jitter func(time.Duration) time.Duration) time.Duration {
+	if !lastSuccess.IsZero() && !lastSuccess.After(now) {
+		next := lastSuccess.Add(interval)
+		if next.After(now) {
+			return next.Sub(now)
+		}
+	}
+	return jitter(startupExportJitterLimit(interval))
+}
+
+func readLastSuccessfulExport(queue *archiveQueue) (time.Time, error) {
+	file, err := queue.openNoFollow(lastSuccessStateName)
+	if errors.Is(err, unix.ENOENT) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		return time.Time{}, err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o7777 != archiveMode || stat.Nlink != 1 ||
+		stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) ||
+		stat.Size <= 0 || stat.Size > maxSuccessStateBytes {
+		return time.Time{}, errors.New("invalid export success state")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maxSuccessStateBytes+1))
+	if err != nil {
+		return time.Time{}, err
+	}
+	if len(content) > maxSuccessStateBytes {
+		return time.Time{}, errors.New("invalid export success state")
+	}
+	timestamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(content)))
+	if err != nil {
+		return time.Time{}, errors.New("invalid export success state")
+	}
+	return timestamp.UTC(), nil
+}
+
+func writeLastSuccessfulExport(queue *archiveQueue, timestamp time.Time) error {
+	if err := unix.Unlinkat(int(queue.directory.Fd()), lastSuccessTempName, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+	fd, err := unix.Openat(
+		int(queue.directory.Fd()),
+		lastSuccessTempName,
+		unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_CREAT|unix.O_EXCL,
+		archiveMode,
+	)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), filepath.Join(queue.path, lastSuccessTempName))
+	if file == nil {
+		_ = unix.Close(fd)
+		return errors.New("open export success state")
+	}
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = unix.Unlinkat(int(queue.directory.Fd()), lastSuccessTempName, 0)
+		}
+	}()
+	content := []byte(timestamp.UTC().Format(time.RFC3339Nano) + "\n")
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := unix.Renameat(int(queue.directory.Fd()), lastSuccessTempName, int(queue.directory.Fd()), lastSuccessStateName); err != nil {
+		return err
+	}
+	renamed = true
+	return queue.directory.Sync()
 }
 
 func discoverPendingArchives(archiveDir string) ([]pendingArchive, error) {
@@ -1127,9 +1264,11 @@ func (scheduler *PreparedScheduler) Run(ctx context.Context) error {
 		return err
 	}
 	defer scheduler.finishRun()
-	if _, err := cleanupStaleExportPartialsIn(scheduler.queue, scheduler.ops.now(), staleExportPartialMaxAge); err != nil {
+	now := scheduler.ops.now()
+	if _, err := cleanupStaleExportPartialsIn(scheduler.queue, now, staleExportPartialMaxAge); err != nil {
 		return errors.New("clean stale export partials")
 	}
+	pendingFailed := false
 	if archives, err := discoverPendingArchivesIn(scheduler.queue); err != nil {
 		return errors.New("discover pending export archives")
 	} else if len(archives) > 0 {
@@ -1140,6 +1279,41 @@ func (scheduler *PreparedScheduler) Run(ctx context.Context) error {
 			if errors.Is(err, errSyncExportArchiveDirectory) {
 				return err
 			}
+			pendingFailed = true
+		} else {
+			now = scheduler.ops.now().UTC()
+			if err := scheduler.ops.writeSuccess(scheduler.queue, now); err != nil {
+				return errors.New("record successful export")
+			}
+		}
+	}
+
+	initialDelay := scheduler.cfg.Interval
+	if !pendingFailed {
+		lastSuccess, err := scheduler.ops.readSuccess(scheduler.queue)
+		if err != nil {
+			logSchedulerRetry(scheduler.cfg, 0, "-", time.Time{}, "state")
+			lastSuccess = time.Time{}
+		}
+		now = scheduler.ops.now()
+		initialDelay = initialExportDelay(lastSuccess, now, scheduler.cfg.Interval, scheduler.ops.jitter)
+	}
+	if err := scheduler.ops.wait(ctx, initialDelay); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return errors.New("wait for initial export")
+	}
+	if err := runSchedulerCycleIn(ctx, scheduler.cfg, scheduler.ops.now(), scheduler.queue, scheduler.ops); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if errors.Is(err, errSyncExportArchiveDirectory) {
+			return err
+		}
+	} else {
+		if err := scheduler.ops.writeSuccess(scheduler.queue, scheduler.ops.now().UTC()); err != nil {
+			return errors.New("record successful export")
 		}
 	}
 
@@ -1157,6 +1331,10 @@ func (scheduler *PreparedScheduler) Run(ctx context.Context) error {
 				if errors.Is(err, errSyncExportArchiveDirectory) {
 					return err
 				}
+				continue
+			}
+			if err := scheduler.ops.writeSuccess(scheduler.queue, scheduler.ops.now().UTC()); err != nil {
+				return errors.New("record successful export")
 			}
 		}
 	}
