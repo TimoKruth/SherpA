@@ -190,17 +190,18 @@ published or copied out first. Tell testers before the reset, not after.
 
 ## 10. Make initialization multi-harness aware
 
-The beta `sherpa init` defaults to one harness unless the user supplies
-`--harness`, and importing a second baseline can leave only suffixed baseline
-names. Before public go-live, initialization must discover all supported setups,
-ask which detected harness should own the canonical protected `mine`, and import
-the others as optional protected `mine-<harness-alias>` profiles. It must never
-pick the primary from discovery order.
+**Implemented in the launch-readiness branch.** `sherpa init` discovers all
+registered harness setup directories and displays each harness and source path.
+First initialization requires an explicit primary confirmation, including when
+only one setup is detected. `--primary-harness <name>` provides the equivalent
+non-interactive path. The primary remains canonical `mine`; all other detected
+setups use protected `mine-<harness-alias>` profiles, including setups discovered
+on a later run.
 
-Acceptance coverage must include one detected setup, multiple detected setups,
-declined confirmation, an explicit non-interactive primary, adding a harness on
-a later run, rerunning without duplication, and rollback after a partial import.
-The normative behavior and naming rules are in §3.2 of the design spec.
+Acceptance coverage includes one and multiple detected setups, declined
+confirmation, an explicit non-interactive primary, adding a harness later,
+rerunning without duplication, and rollback after partial import or state-save
+failure. The normative behavior and naming rules are in §3.2 of the design spec.
 
 ## Checklist
 

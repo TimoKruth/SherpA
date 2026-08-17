@@ -64,7 +64,7 @@ The current CLI implements the following commands.
 
 | Command | Behavior |
 |---|---|
-| `sherpa init` | Import `~/.claude` as the protected `mine` profile. |
+| `sherpa init` | Discover supported harness setups, confirm which owns protected `mine`, and import the others as `mine-<alias>`; automation can use `--primary-harness <name>`. |
 | `sherpa login` / `sherpa logout` | Create or remove an issuer-scoped GitHub-backed registry session. |
 | `sherpa search <query>` | Search `SHERPA_REGISTRY_URL`, falling back to the Phase 1 JSON index when configured. |
 | `sherpa try <git-url-or-@owner/name-or-profile>` | Clone if needed, show the review gate, and launch under that profile without changing the active profile. |
