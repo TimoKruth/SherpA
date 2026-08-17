@@ -173,6 +173,28 @@ production recovery points in one immutable store with no clean way to separate
 them later. Provision a separate repository, and retire the beta one as a unit
 under its own approval.
 
+The safe pre-provisioning plan is complete; none of these live actions has been
+performed:
+
+1. allocate a production-only Storage Box sub-account and repository path;
+2. verify and record its maximum-practical automatic snapshot schedule before
+   the first authoritative write;
+3. generate new production routine and recovery SSH identities under the same
+   split-custody rules as the beta (never reuse either beta key);
+4. rerun the reduced-model sacrificial capability test using the exact
+   production provider restriction;
+5. initialize with the recovery identity, install the exact forced Borg 1.4
+   append-only routine restriction, and independently verify it;
+6. deploy production collector credentials and state without overwriting or
+   deleting the beta repository, ledger, snapshots, or keys; and
+7. complete an independent extraction, age decryption, `collector verify`, and
+   sibling restore before declaring the repository authoritative.
+
+Provisioning, key installation, repository initialization, collector restart,
+the recovery drill, and later beta retirement each retain their documented
+fresh approval checkpoints. The beta repository remains evidence and must not
+be treated as a disposable staging resource.
+
 ## 8. Domain cutover
 
 Railway supports multiple custom domains on a service, so domain capacity does

@@ -53,6 +53,41 @@ dead-man's-switch that alerts when Kuma stops reporting, or a second channel on
 independent infrastructure. Neither is in place. Until then, absence of alerts
 is not evidence of health.
 
+## Prepared independent dead-man control
+
+The no-cost implementation prepared for approval is a hosted Healthchecks.io
+dead-man check with delivery to an email account that does not depend on this
+VPS or its Matrix homeserver. Its free-account limit is sufficient for this one
+check, and the ping API supports explicit success and failure signals:
+
+- https://healthchecks.io/docs/autoprovisioning/
+- https://healthchecks.io/docs/http_api/
+
+After the operator creates the external account and approves installing its
+private ping URL, use one root-owned mode-`0600` environment file and a
+systemd timer every five minutes. The timer must send success only after all of
+these local checks pass:
+
+1. the Kuma, Traefik, Synapse, and SherpA collector containers are running and
+   healthy where a Docker healthcheck exists;
+2. collector `/readyz`, registry `/healthz`, and website `/healthz` return 2xx
+   over their public HTTPS origins with certificate validation enabled; and
+3. the previous timer invocation is not still running.
+
+Configure the external check for a ten-minute period plus five-minute grace.
+Send no diagnostic body and never place the ping URL in Git, unit names,
+process arguments visible to other users, or logs. Attach an independent email
+integration, not the self-hosted Matrix route. A missing ping then detects loss
+of the host; an explicit failure ping detects a live host whose monitoring or
+SherpA checks have failed.
+
+Account creation, installing the private ping URL, enabling the timer, and the
+end-to-end alert test are external/live changes and remain approval-gated. The
+safe preparation here creates none of them. Acceptance requires observing both
+a failure notification and a recovery notification in the independent mailbox,
+then confirming the normal five-minute heartbeat without changing any real
+service's availability.
+
 ## Operations
 
 Verify or change the wiring (Kuma caches notifications in memory and holds the
