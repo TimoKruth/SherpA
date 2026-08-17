@@ -20,6 +20,7 @@ func TestRegistryCLIEndToEnd(t *testing.T) {
 	claudeDir := filepath.Join(root, "real-claude")
 	t.Setenv("SHERPA_HOME", home)
 	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(root, "missing-codex"))
 	t.Setenv("SHERPA_SECURITY_BIN", "/usr/bin/false")
 
 	if err := writeFile(filepath.Join(claudeDir, "CLAUDE.md"), "baseline instructions\n", 0o644); err != nil {
@@ -39,7 +40,7 @@ func TestRegistryCLIEndToEnd(t *testing.T) {
 	t.Setenv("SHERPA_REGISTRY_URL", serverURL)
 	t.Setenv("SHERPA_REGISTRY_TOKEN", "test-token")
 
-	if out, errb, code := runCLI(t, nil, "init"); code != 0 {
+	if out, errb, code := runCLI(t, nil, "init", "--primary-harness", "claude-code"); code != 0 {
 		t.Fatalf("init failed: %s\nstdout:\n%s", errb, out)
 	}
 
@@ -132,6 +133,7 @@ func TestRegistryIdentityEndToEnd(t *testing.T) {
 	claudeDir := filepath.Join(root, "real-claude")
 	t.Setenv("SHERPA_HOME", home)
 	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(root, "missing-codex"))
 	t.Setenv("SHERPA_REGISTRY_TOKEN", "")
 	if err := writeFile(filepath.Join(claudeDir, "CLAUDE.md"), "baseline instructions\n", 0o644); err != nil {
 		t.Fatal(err)
@@ -149,7 +151,7 @@ func TestRegistryIdentityEndToEnd(t *testing.T) {
 	if out, errb, code := runCLI(t, nil, "login"); code != 0 || !strings.Contains(out, "alice") {
 		t.Fatalf("login code=%d out=%s err=%s", code, out, errb)
 	}
-	if out, errb, code := runCLI(t, nil, "init"); code != 0 {
+	if out, errb, code := runCLI(t, nil, "init", "--primary-harness", "claude-code"); code != 0 {
 		t.Fatalf("init: %s %s", out, errb)
 	}
 

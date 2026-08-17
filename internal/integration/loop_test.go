@@ -20,6 +20,7 @@ func TestFullPhase1Loop(t *testing.T) {
 	claudeDir := filepath.Join(root, "real-claude")
 	t.Setenv("SHERPA_HOME", home)
 	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(root, "missing-codex"))
 	t.Setenv("SHERPA_SECURITY_BIN", "/usr/bin/false")
 
 	if err := writeFile(filepath.Join(claudeDir, "CLAUDE.md"), "mine instructions\n", 0o644); err != nil {
@@ -48,7 +49,7 @@ func TestFullPhase1Loop(t *testing.T) {
 	var mineSnapshot treeSnapshot
 
 	t.Run("init", func(t *testing.T) {
-		out, errb, code := runCLI(t, nil, "init")
+		out, errb, code := runCLI(t, nil, "init", "--primary-harness", "claude-code")
 		if code != 0 {
 			t.Fatalf("init failed: %s\nstdout:\n%s", errb, out)
 		}
@@ -241,22 +242,16 @@ func TestCodexHarnessRoundTrip(t *testing.T) {
 	t.Setenv("SHERPA_CODEX_BIN", fakeCodex)
 	t.Setenv("SHERPA_FAKE_CODEX_MARKER", codexMarker)
 
-	if out, errb, code := runCLI(t, nil, "init"); code != 0 {
+	if out, errb, code := runCLI(t, nil, "init", "--primary-harness", "claude-code"); code != 0 {
 		t.Fatalf("claude init failed: %s\nstdout:\n%s", errb, out)
-	}
-	if out, errb, code := runCLI(t, nil, "init", "--harness", "codex"); code != 0 {
-		t.Fatalf("codex init failed: %s\nstdout:\n%s", errb, out)
 	}
 
 	st := loadState(t, home)
-	if _, ok := st.Profiles["mine"]; ok {
-		t.Fatalf("bare mine should have been renamed after codex init: %#v", st.Profiles)
+	if st.Active != "mine" {
+		t.Fatalf("Active = %q, want mine", st.Active)
 	}
-	if st.Active != "mine-claude" {
-		t.Fatalf("Active = %q, want mine-claude", st.Active)
-	}
-	if got := st.Baselines["claude-code"]; got != "mine-claude" {
-		t.Fatalf("claude baseline = %q, want mine-claude (all baselines: %#v)", got, st.Baselines)
+	if got := st.Baselines["claude-code"]; got != "mine" {
+		t.Fatalf("claude baseline = %q, want mine (all baselines: %#v)", got, st.Baselines)
 	}
 	if got := st.Baselines["codex"]; got != "mine-codex" {
 		t.Fatalf("codex baseline = %q, want mine-codex (all baselines: %#v)", got, st.Baselines)
@@ -268,7 +263,7 @@ func TestCodexHarnessRoundTrip(t *testing.T) {
 	if out, errb, code := runCLI(t, nil, "clone", repo, "--name", profileName, "--review=approve-all"); code != 0 {
 		t.Fatalf("codex clone failed: %s\nstdout:\n%s", errb, out)
 	}
-	if st := loadState(t, home); st.Active != "mine-claude" {
+	if st := loadState(t, home); st.Active != "mine" {
 		t.Fatalf("clone changed active profile to %q", st.Active)
 	}
 

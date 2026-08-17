@@ -33,9 +33,10 @@ func TestInitCleansUpDestinationWhenImportFails(t *testing.T) {
 		_ = os.Chmod(unreadable, 0o600)
 	})
 	t.Setenv("SHERPA_CLAUDE_DIR", source)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(t.TempDir(), "missing-codex"))
 
 	var out, errb bytes.Buffer
-	if code := Run([]string{"init"}, &out, &errb); code == 0 {
+	if code := Run([]string{"init", "--primary-harness", "claude-code"}, &out, &errb); code == 0 {
 		t.Fatal("init must fail when the source contains an unreadable file")
 	}
 	if _, err := os.Stat(filepath.Join(home, "profiles", "mine")); !os.IsNotExist(err) {
@@ -52,13 +53,14 @@ func TestInitCapturesSetupState(t *testing.T) {
 	src := t.TempDir()
 	os.WriteFile(filepath.Join(src, "CLAUDE.md"), []byte("# me"), 0o644)
 	t.Setenv("SHERPA_CLAUDE_DIR", filepath.Join(src, ".claude"))
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(t.TempDir(), "missing-codex"))
 	os.MkdirAll(filepath.Join(src, ".claude"), 0o755)
 	os.WriteFile(filepath.Join(src, ".claude", "CLAUDE.md"), []byte("# me"), 0o644)
 	// setup-state sibling file
 	os.WriteFile(filepath.Join(src, ".claude.json"), []byte(`{"hasCompletedOnboarding":true,"projects":{}}`), 0o600)
 
 	var out, errb bytes.Buffer
-	if code := Run([]string{"init"}, &out, &errb); code != 0 {
+	if code := Run([]string{"init", "--primary-harness", "claude-code"}, &out, &errb); code != 0 {
 		t.Fatal(errb.String())
 	}
 	cap := filepath.Join(home, "profiles", "mine", ".sherpa-setup.json")
@@ -82,11 +84,12 @@ func TestInitDefaultCreatesBareMineBaseline(t *testing.T) {
 		"CLAUDE.md": "# claude\n",
 	})
 	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(t.TempDir(), "missing-codex"))
 	os.WriteFile(claudeDir+".json", []byte(`{"hasCompletedOnboarding":true}`), 0o600)
 
-	var out, errb bytes.Buffer
-	if code := Run([]string{"init"}, &out, &errb); code != 0 {
-		t.Fatal(errb.String())
+	out, errb, err := runInitWithInput(home, "yes\n")
+	if err != nil {
+		t.Fatalf("init: %v\nstdout:\n%s\nstderr:\n%s", err, out, errb)
 	}
 
 	st := loadTestState(t, home)
@@ -115,6 +118,7 @@ func TestInitRefusesExistingUntrackedBaselineDirWithoutDeletingIt(t *testing.T) 
 		"CLAUDE.md": "# claude\n",
 	})
 	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(t.TempDir(), "missing-codex"))
 
 	mineDir := filepath.Join(home, "profiles", "mine")
 	if err := os.MkdirAll(mineDir, 0o755); err != nil {
@@ -126,7 +130,7 @@ func TestInitRefusesExistingUntrackedBaselineDirWithoutDeletingIt(t *testing.T) 
 	}
 
 	var out, errb bytes.Buffer
-	if code := Run([]string{"init"}, &out, &errb); code == 0 {
+	if code := Run([]string{"init", "--primary-harness", "claude-code"}, &out, &errb); code == 0 {
 		t.Fatal("init must fail when profiles/mine already exists outside state")
 	}
 	if !strings.Contains(errb.String(), "profile directory already exists") ||
@@ -142,7 +146,7 @@ func TestInitRefusesExistingUntrackedBaselineDirWithoutDeletingIt(t *testing.T) 
 	}
 }
 
-func TestInitCodexRenamesLoneClaudeMineAndCreatesTaggedBaseline(t *testing.T) {
+func TestInitExplicitPrimaryImportsEveryDetectedHarnessWithoutRenamingMine(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("SHERPA_HOME", home)
 	claudeDir := fixtureConfigDir(t, "claude", map[string]string{
@@ -158,41 +162,35 @@ func TestInitCodexRenamesLoneClaudeMineAndCreatesTaggedBaseline(t *testing.T) {
 	os.WriteFile(claudeDir+".json", []byte(`{"hasCompletedOnboarding":true}`), 0o600)
 
 	var out, errb bytes.Buffer
-	if code := Run([]string{"init"}, &out, &errb); code != 0 {
-		t.Fatal(errb.String())
-	}
-	if code := Run([]string{"init", "--harness", "codex"}, &out, &errb); code != 0 {
+	if code := Run([]string{"init", "--primary-harness", "claude-code"}, &out, &errb); code != 0 {
 		t.Fatal(errb.String())
 	}
 
 	st := loadTestState(t, home)
-	if _, ok := st.Profiles["mine"]; ok {
-		t.Fatalf("bare mine should be renamed, profiles = %#v", st.Profiles)
+	if st.Active != "mine" {
+		t.Fatalf("Active = %q, want mine", st.Active)
 	}
-	if st.Active != "mine-claude" {
-		t.Fatalf("Active = %q, want mine-claude", st.Active)
-	}
-	if got := st.Baselines["claude-code"]; got != "mine-claude" {
-		t.Fatalf("Baselines[claude-code] = %q, want mine-claude (all baselines: %#v)", got, st.Baselines)
+	if got := st.Baselines["claude-code"]; got != "mine" {
+		t.Fatalf("Baselines[claude-code] = %q, want mine (all baselines: %#v)", got, st.Baselines)
 	}
 	if got := st.Baselines["codex"]; got != "mine-codex" {
 		t.Fatalf("Baselines[codex] = %q, want mine-codex (all baselines: %#v)", got, st.Baselines)
 	}
-	if p := st.Profiles["mine-claude"]; p.Harness != "claude-code" {
-		t.Fatalf("mine-claude harness = %q, want claude-code", p.Harness)
+	if p := st.Profiles["mine"]; p.Harness != "claude-code" {
+		t.Fatalf("mine harness = %q, want claude-code", p.Harness)
 	}
 	if p := st.Profiles["mine-codex"]; p.Harness != "codex" {
 		t.Fatalf("mine-codex harness = %q, want codex", p.Harness)
 	}
-	if _, err := os.Stat(filepath.Join(home, "profiles", "mine-claude", "CLAUDE.md")); err != nil {
-		t.Fatalf("renamed claude baseline content missing: %v", err)
+	if _, err := os.Stat(filepath.Join(home, "profiles", "mine", "CLAUDE.md")); err != nil {
+		t.Fatalf("primary claude baseline content missing: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(home, "profiles", "mine-codex", "AGENTS.md")); err != nil {
 		t.Fatalf("codex baseline content missing: %v", err)
 	}
 }
 
-func TestInitRollbackRestoresLoneMineAfterSecondHarnessSaveFails(t *testing.T) {
+func TestInitRollbackKeepsEstablishedMineAfterLaterHarnessSaveFails(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("SHERPA_HOME", home)
 	claudeDir := fixtureConfigDir(t, "claude", map[string]string{
@@ -203,13 +201,14 @@ func TestInitRollbackRestoresLoneMineAfterSecondHarnessSaveFails(t *testing.T) {
 		"auth.json": `{"tokens":{"access_token":"fixture"}}`,
 	})
 	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
-	t.Setenv("SHERPA_CODEX_DIR", codexDir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(t.TempDir(), "missing-codex"))
 	os.WriteFile(claudeDir+".json", []byte(`{"hasCompletedOnboarding":true}`), 0o600)
 
 	var out, errb bytes.Buffer
-	if code := Run([]string{"init"}, &out, &errb); code != 0 {
+	if code := Run([]string{"init", "--primary-harness", "claude-code"}, &out, &errb); code != 0 {
 		t.Fatal(errb.String())
 	}
+	t.Setenv("SHERPA_CODEX_DIR", codexDir)
 	if err := os.MkdirAll(filepath.Join(home, "state.json.tmp"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -220,9 +219,6 @@ func TestInitRollbackRestoresLoneMineAfterSecondHarnessSaveFails(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "profiles", "mine", "CLAUDE.md")); err != nil {
 		t.Fatalf("rollback did not restore profiles/mine: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(home, "profiles", "mine-claude")); !os.IsNotExist(err) {
-		t.Fatalf("rollback left profiles/mine-claude behind: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(home, "profiles", "mine-codex")); !os.IsNotExist(err) {
 		t.Fatalf("rollback left profiles/mine-codex behind: %v", err)
@@ -247,12 +243,9 @@ func TestInitRollbackRestoresLoneMineAfterSecondHarnessSaveFails(t *testing.T) {
 	if _, ok := st.Profiles["mine-codex"]; ok {
 		t.Fatalf("state recorded mine-codex despite rollback: %#v", st.Profiles)
 	}
-	if _, ok := st.Profiles["mine-claude"]; ok {
-		t.Fatalf("state recorded mine-claude despite rollback: %#v", st.Profiles)
-	}
 }
 
-func TestInitExistingCodexBaselineRequiresRefresh(t *testing.T) {
+func TestInitExistingCodexBaselineIsIdempotentAndMentionsRefresh(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("SHERPA_HOME", home)
 	claudeDir := fixtureConfigDir(t, "claude", map[string]string{
@@ -263,22 +256,23 @@ func TestInitExistingCodexBaselineRequiresRefresh(t *testing.T) {
 		"auth.json": `{"tokens":{"access_token":"fixture"}}`,
 	})
 	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
-	t.Setenv("SHERPA_CODEX_DIR", codexDir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(t.TempDir(), "missing-codex"))
 	os.WriteFile(claudeDir+".json", []byte(`{"hasCompletedOnboarding":true}`), 0o600)
 
 	var out, errb bytes.Buffer
-	if code := Run([]string{"init"}, &out, &errb); code != 0 {
+	if code := Run([]string{"init", "--primary-harness", "claude-code"}, &out, &errb); code != 0 {
 		t.Fatal(errb.String())
 	}
+	t.Setenv("SHERPA_CODEX_DIR", codexDir)
 	if code := Run([]string{"init", "--harness", "codex"}, &out, &errb); code != 0 {
 		t.Fatal(errb.String())
 	}
 	errb.Reset()
-	if code := Run([]string{"init", "--harness", "codex"}, &out, &errb); code == 0 {
-		t.Fatal("second codex init must fail without --refresh")
+	if code := Run([]string{"init", "--harness", "codex"}, &out, &errb); code != 0 {
+		t.Fatalf("idempotent codex init failed: %s", errb.String())
 	}
-	if !strings.Contains(errb.String(), "already initialized for codex") || !strings.Contains(errb.String(), "--refresh") {
-		t.Fatalf("unexpected error: %q", errb.String())
+	if !strings.Contains(out.String(), "already initialized as profile \"mine-codex\"") || !strings.Contains(out.String(), "--refresh") {
+		t.Fatalf("unexpected output: %q", out.String())
 	}
 }
 
@@ -290,10 +284,13 @@ func TestInitRefreshRecaptures(t *testing.T) {
 	os.MkdirAll(cdir, 0o755)
 	os.WriteFile(filepath.Join(cdir, "CLAUDE.md"), []byte("# me"), 0o644)
 	t.Setenv("SHERPA_CLAUDE_DIR", cdir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(t.TempDir(), "missing-codex"))
 	os.WriteFile(filepath.Join(src, ".claude.json"), []byte(`{"theme":"light"}`), 0o600)
 
 	var out, errb bytes.Buffer
-	Run([]string{"init"}, &out, &errb)
+	if code := Run([]string{"init", "--primary-harness", "claude-code"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
 	// user logs in / changes theme afterward
 	os.WriteFile(filepath.Join(src, ".claude.json"), []byte(`{"theme":"dark","hasCompletedOnboarding":true}`), 0o600)
 	if code := Run([]string{"init", "--refresh"}, &out, &errb); code != 0 {
@@ -303,6 +300,123 @@ func TestInitRefreshRecaptures(t *testing.T) {
 	if !strings.Contains(string(b), "dark") {
 		t.Fatalf("refresh did not re-capture: %s", b)
 	}
+}
+
+func TestInitMultipleDetectedRequiresPrimaryChoiceAndRerunIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := fixtureConfigDir(t, "claude", map[string]string{"CLAUDE.md": "# claude\n"})
+	codexDir := fixtureConfigDir(t, "codex", map[string]string{"AGENTS.md": "# codex\n"})
+	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", codexDir)
+
+	out, _, err := runInitWithInput(home, "codex\nyes\n")
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "claude-code: "+claudeDir) || !strings.Contains(out, "codex: "+codexDir) {
+		t.Fatalf("detected setups were not shown with paths:\n%s", out)
+	}
+	st := loadTestState(t, home)
+	if st.Active != "mine" || st.Baselines["codex"] != "mine" || st.Baselines["claude-code"] != "mine-claude" {
+		t.Fatalf("unexpected primary/baselines: active=%q baselines=%#v", st.Active, st.Baselines)
+	}
+
+	out, _, err = runInitWithInput(home, "")
+	if err != nil {
+		t.Fatalf("idempotent rerun: %v", err)
+	}
+	if !strings.Contains(out, "already initialized") {
+		t.Fatalf("idempotent rerun output = %q", out)
+	}
+	st = loadTestState(t, home)
+	if len(st.Profiles) != 2 || len(st.Baselines) != 2 {
+		t.Fatalf("rerun duplicated state: profiles=%#v baselines=%#v", st.Profiles, st.Baselines)
+	}
+}
+
+func TestInitDeclinedConfirmationLeavesSourceAndSherpaStateUntouched(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := fixtureConfigDir(t, "claude", map[string]string{"CLAUDE.md": "original\n"})
+	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(t.TempDir(), "missing-codex"))
+
+	if _, _, err := runInitWithInput(home, "no\n"); err == nil || !strings.Contains(err.Error(), "confirmation declined") {
+		t.Fatalf("declined init error = %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(claudeDir, "CLAUDE.md")); err != nil || string(got) != "original\n" {
+		t.Fatalf("source changed: content=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "state.json")); !os.IsNotExist(err) {
+		t.Fatalf("declined init created state: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "profiles")); !os.IsNotExist(err) {
+		t.Fatalf("declined init created profiles: %v", err)
+	}
+}
+
+func TestInitLaterDiscoveryAddsTaggedBaselineWithoutRenamingMine(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SHERPA_HOME", home)
+	claudeDir := fixtureConfigDir(t, "claude", map[string]string{"CLAUDE.md": "# claude\n"})
+	codexDir := fixtureConfigDir(t, "codex", map[string]string{"AGENTS.md": "# codex\n"})
+	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", filepath.Join(t.TempDir(), "missing-codex"))
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--primary-harness", "claude-code"}, &out, &errb); code != 0 {
+		t.Fatal(errb.String())
+	}
+
+	t.Setenv("SHERPA_CODEX_DIR", codexDir)
+	if _, _, err := runInitWithInput(home, "yes\n"); err != nil {
+		t.Fatal(err)
+	}
+	st := loadTestState(t, home)
+	if st.Active != "mine" || st.Baselines["claude-code"] != "mine" || st.Baselines["codex"] != "mine-codex" {
+		t.Fatalf("later discovery renamed primary: active=%q baselines=%#v", st.Active, st.Baselines)
+	}
+	if _, err := os.Stat(filepath.Join(home, "profiles", "mine", "CLAUDE.md")); err != nil {
+		t.Fatalf("canonical mine was not preserved: %v", err)
+	}
+}
+
+func TestInitBatchImportRollsBackEveryCreatedProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based unreadable file test is Unix-specific")
+	}
+	home := t.TempDir()
+	t.Setenv("SHERPA_HOME", home)
+	claudeDir := fixtureConfigDir(t, "claude", map[string]string{"CLAUDE.md": "# claude\n"})
+	codexDir := fixtureConfigDir(t, "codex", map[string]string{
+		"AGENTS.md": "# codex\n",
+		"blocked":   "cannot copy\n",
+	})
+	blocked := filepath.Join(codexDir, "blocked")
+	if err := os.Chmod(blocked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o600) })
+	t.Setenv("SHERPA_CLAUDE_DIR", claudeDir)
+	t.Setenv("SHERPA_CODEX_DIR", codexDir)
+
+	var out, errb bytes.Buffer
+	if code := Run([]string{"init", "--primary-harness", "claude-code"}, &out, &errb); code == 0 {
+		t.Fatal("batch import unexpectedly succeeded")
+	}
+	for _, name := range []string{"mine", "mine-codex"} {
+		if _, err := os.Stat(filepath.Join(home, "profiles", name)); !os.IsNotExist(err) {
+			t.Fatalf("rollback left %s behind: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, "state.json")); !os.IsNotExist(err) {
+		t.Fatalf("failed batch import wrote state: %v", err)
+	}
+}
+
+func runInitWithInput(home, input string, args ...string) (stdout, stderr string, err error) {
+	var out, errOut bytes.Buffer
+	ctx := &Ctx{Home: home, Stdout: &out, Stderr: &errOut, Stdin: strings.NewReader(input)}
+	err = cmdInit(ctx, args)
+	return out.String(), errOut.String(), err
 }
 
 func fixtureConfigDir(t *testing.T, name string, files map[string]string) string {
