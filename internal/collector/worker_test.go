@@ -309,6 +309,47 @@ func TestWorkerRetriesStoredLedgerCleanupAfterBackendOutage(t *testing.T) {
 	}
 }
 
+func TestWorkerDoesNotReverifyStoredLedgerOnEveryIdleRetry(t *testing.T) {
+	fixture := newServiceFixture(t)
+	pending := createPendingFixture(t, fixture.spool, fixture.ledger, fixture.now.Add(-time.Hour), "stored-idle-retry")
+	record, _, err := fixture.ledger.Get(pending.ObjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedAt := fixture.now.Add(-30 * time.Minute)
+	record.StoredAt = &storedAt
+	if err := fixture.ledger.Put(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.spool.RemoveEncrypted(pending.EncryptedPath); err != nil {
+		t.Fatal(err)
+	}
+	fixture.backend.set(pending.ObjectID, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waits := 0
+	worker := newWorker(fixture.spool, fixture.ledger, fixture.service, fixture.status, time.Minute, workerOps{
+		now: fixture.clock,
+		wait: func(context.Context, time.Duration) error {
+			waits++
+			if waits == 2 {
+				cancel()
+				return context.Canceled
+			}
+			return nil
+		},
+	})
+	if err := worker.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if fixture.backend.existsCalls != 1 {
+		t.Fatalf("stored ledger presence checks = %d, want one startup verification", fixture.backend.existsCalls)
+	}
+	if snapshot := fixture.status.Snapshot(); snapshot.NewestSuccessfulAt == nil || !snapshot.NewestSuccessfulAt.Equal(storedAt) || snapshot.OldestPendingAt != nil {
+		t.Fatalf("status = %#v", snapshot)
+	}
+}
+
 func TestWorkerPersistsRetryMetadataAcrossRestart(t *testing.T) {
 	fixture := newServiceFixture(t)
 	pending := createPendingFixture(t, fixture.spool, fixture.ledger, fixture.now.Add(-time.Hour), "persisted-backoff")
