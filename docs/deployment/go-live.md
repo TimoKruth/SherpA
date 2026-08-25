@@ -124,11 +124,12 @@ Kuma, or a second channel on independent infrastructure.
 
 ## 4. Run an export shortly after startup
 
-`PreparedScheduler.Run` schedules exports with `time.NewTicker(interval)`
-(`internal/registry/export/export.go:1146`), so the first export fires one full
-interval after process start and there is no run-at-boot. Every deploy, crash,
-or host reboot resets the timer, so a registry that restarts more often than
-its interval never exports at all.
+**Implemented in the launch-readiness branch.** `PreparedScheduler.Run` now
+records each validated export in a mode-`0600` state file inside the locked
+archive queue. On startup it waits only until the next export is due. If no
+valid success record exists, it runs after cryptographically random jitter
+bounded by the smaller of five minutes or one tenth of the configured interval.
+Pending archives still drain before any new archive is created.
 
 This is not theoretical. During beta setup on 2026-07-28 the newest recovery
 point was 40h old against a 26h `SHERPA_COLLECTOR_MAX_RECOVERY_AGE`, so the
@@ -138,17 +139,10 @@ interval had been temporarily lowered to `1m` during the acceptance run. No
 alert fired, because no notification provider was configured at the time. That
 gap is now closed (see above), so a repeat would at least be reported.
 
-Mitigated for beta by lowering `SHERPA_EXPORT_INTERVAL` to `1h`, which is
-shorter than the deploy cadence. That is a workaround, not a fix: a production
-registry on a 24h interval remains one restart away from silently skipping a
-day.
-
-The fix is to run one cycle shortly after startup and then continue on the
-interval. It needs care:
-
-- apply startup jitter, or a crash-looping service will stampede the collector;
-- persist the last successful run so a restart does not re-export needlessly;
-- keep the existing queue rediscovery, which already runs at boot, unchanged.
+The beta's temporary `SHERPA_EXPORT_INTERVAL=1h` mitigation can be reverted to
+the intended interval after this change is reviewed, merged, deployed, and one
+startup-triggered export is observed. Do not change that live variable as part
+of the code rollout without the separately required operational approval.
 
 ## 5. Complete the disaster-recovery gate
 
@@ -179,6 +173,28 @@ production recovery points in one immutable store with no clean way to separate
 them later. Provision a separate repository, and retire the beta one as a unit
 under its own approval.
 
+The safe pre-provisioning plan is complete; none of these live actions has been
+performed:
+
+1. allocate a production-only Storage Box sub-account and repository path;
+2. verify and record its maximum-practical automatic snapshot schedule before
+   the first authoritative write;
+3. generate new production routine and recovery SSH identities under the same
+   split-custody rules as the beta (never reuse either beta key);
+4. rerun the reduced-model sacrificial capability test using the exact
+   production provider restriction;
+5. initialize with the recovery identity, install the exact forced Borg 1.4
+   append-only routine restriction, and independently verify it;
+6. deploy production collector credentials and state without overwriting or
+   deleting the beta repository, ledger, snapshots, or keys; and
+7. complete an independent extraction, age decryption, `collector verify`, and
+   sibling restore before declaring the repository authoritative.
+
+Provisioning, key installation, repository initialization, collector restart,
+the recovery drill, and later beta retirement each retain their documented
+fresh approval checkpoints. The beta repository remains evidence and must not
+be treated as a disposable staging resource.
+
 ## 8. Domain cutover
 
 Railway supports multiple custom domains on a service, so domain capacity does
@@ -196,17 +212,18 @@ published or copied out first. Tell testers before the reset, not after.
 
 ## 10. Make initialization multi-harness aware
 
-The beta `sherpa init` defaults to one harness unless the user supplies
-`--harness`, and importing a second baseline can leave only suffixed baseline
-names. Before public go-live, initialization must discover all supported setups,
-ask which detected harness should own the canonical protected `mine`, and import
-the others as optional protected `mine-<harness-alias>` profiles. It must never
-pick the primary from discovery order.
+**Implemented in the launch-readiness branch.** `sherpa init` discovers all
+registered harness setup directories and displays each harness and source path.
+First initialization requires an explicit primary confirmation, including when
+only one setup is detected. `--primary-harness <name>` provides the equivalent
+non-interactive path. The primary remains canonical `mine`; all other detected
+setups use protected `mine-<harness-alias>` profiles, including setups discovered
+on a later run.
 
-Acceptance coverage must include one detected setup, multiple detected setups,
-declined confirmation, an explicit non-interactive primary, adding a harness on
-a later run, rerunning without duplication, and rollback after a partial import.
-The normative behavior and naming rules are in §3.2 of the design spec.
+Acceptance coverage includes one and multiple detected setups, declined
+confirmation, an explicit non-interactive primary, adding a harness later,
+rerunning without duplication, and rollback after partial import or state-save
+failure. The normative behavior and naming rules are in §3.2 of the design spec.
 
 ## Checklist
 
