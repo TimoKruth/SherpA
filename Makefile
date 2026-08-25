@@ -1,7 +1,12 @@
-.PHONY: test build registry collector-image collector-smoke fmt
+.PHONY: test build registry collector-image collector-smoke beta-smoke fmt
 
 test:
 	go test ./...
+
+# Functional pass over the installed CLI. Override the binary under test with
+# SHERPA_BIN; add SHERPA_BETA_ONLINE=1 for the live-registry suite.
+beta-smoke:
+	bash scripts/beta/run-all.sh
 
 build:
 	mkdir -p dist

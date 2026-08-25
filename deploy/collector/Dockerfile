@@ -1,4 +1,4 @@
-FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS go-build
+FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS go-build
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -27,7 +27,8 @@ RUN python -m venv /opt/borg \
     && printf '%s  %s\n' \
         '4f9a5fe584c504b15485841236750dea16aa7cd2ddbc4a594e9d2ce5c49c4508' \
         '/tmp/borgbackup-1.4.5.tar.gz' | sha256sum -c - \
-    && /opt/borg/bin/pip install --no-cache-dir /tmp/borgbackup-1.4.5.tar.gz \
+    && /opt/borg/bin/pip install --no-cache-dir 'msgpack==1.2.1' 'packaging==26.3' \
+    && /opt/borg/bin/pip install --no-cache-dir --no-deps /tmp/borgbackup-1.4.5.tar.gz \
     && /opt/borg/bin/borg --version | grep -Fx 'borg 1.4.5' \
     && rm -f /tmp/borgbackup-1.4.5.tar.gz
 COPY --from=go-build /out/collector-integration.test /tmp/collector-integration.test

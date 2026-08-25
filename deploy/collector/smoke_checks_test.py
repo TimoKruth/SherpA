@@ -289,7 +289,7 @@ class LeakageGateTests(unittest.TestCase):
 
     def test_platform_binary_manifest_contains_exact_reviewed_candidate_entries(self):
         manifest = CHECKS_MODULE.REVIEWED_PLATFORM_BINARY_ASSIGNMENTS
-        expected_digest = "eb421c29d042041e732b3175f5f5cd13ec21a1bed25866ce24a3a258555af001"
+        expected_digest = "1e2a56ab6087037830de4f1e20378d2f4d1175c96ce57195db9527e8c196be56"
         self.assertEqual(canonical_platform_manifest_sha256(manifest), expected_digest)
 
         mutated = {
@@ -311,7 +311,7 @@ class LeakageGateTests(unittest.TestCase):
         self.assertEqual(
             manifest["linux/arm64"]["usr/local/bin/collector"],
             {
-                "86942e23b62714a352c1151b4ae25356c366a3ee43ab5dc4912d96bfbd58d277": frozenset({
+                "e755b7f4e2b0f229e6a1bf76979e49032cb83ca54b98ed140e463b24a0101a74": frozenset({
                     "key",
                     "key_sharebufio.Scanner",
                     "readage-renameBORG_REPO",
@@ -322,7 +322,7 @@ class LeakageGateTests(unittest.TestCase):
         self.assertEqual(
             manifest["linux/amd64"]["usr/local/bin/collector"],
             {
-                "ca754aefde6d34b3e03835b4c283ad710e4ad9d064b1b937207973acc98c2014": frozenset({
+                "76a1837e3cad8462141a4cc3981675ded52dfad4a719a22ce4d0afca81d40401": frozenset({
                     "key",
                     "key_sharebufio.Scanner",
                     "readage-renameBORG_REPO",
