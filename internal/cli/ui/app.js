@@ -1,12 +1,14 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let token = location.hash.slice(1) || sessionStorage.getItem('sherpa-token') || '';
-if (location.hash) { sessionStorage.setItem('sherpa-token', token); history.replaceState(null, '', location.pathname); }
+let token = sessionStorage.getItem('sherpa-token') || '';
+// Remove fragments left in old bookmarks without using them as credentials.
+if (location.hash) history.replaceState(null, '', location.pathname);
 let state, current, selected = new Set(), timer;
 function notice(message, problem = false) { $('notice').textContent = message; $('notice').classList.toggle('problem', problem); $('notice').hidden = !message; }
 async function api(path, body) {
   const response = await fetch('/api/' + path, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: 'Bearer ' + token, ...(body === undefined ? {} : {'Content-Type':'application/json'}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (response.status === 401) { disconnect(); }
   if (!response.ok) { let message = await response.text(); try { message = JSON.parse(message).error || message; } catch {} throw new Error(message); }
   return response;
 }
@@ -71,4 +73,17 @@ async function loadHistory() {
 $('cancel').addEventListener('click',async()=>{try{await json('cancel',{id:current.id});notice('Stopping the comparison and saving partial results…');}catch(error){notice(error.message,true);}});
 $('rerun').addEventListener('click',()=>{$('project').value=current.request.project;$('prompt').value=current.request.prompt;$('timeout').value=String(current.request.timeout_seconds);selected=new Set(current.request.profiles);loadState().catch(e=>notice(e.message,true));$('prompt').focus();notice('Prompt and lineup restored. The next comparison will capture the current project and setup files.');});
 $('export').addEventListener('click',async()=>{try{const response=await api('report?id='+encodeURIComponent(current.id));const url=URL.createObjectURL(await response.blob());const a=document.createElement('a');a.href=url;a.download='sherpa-'+current.id+'.html';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(error){notice(error.message,true);}});
-(async()=>{try{await loadState();await loadHistory();}catch(error){notice(error.message,true);}})();
+function disconnect() {
+  clearTimeout(timer); token=''; sessionStorage.removeItem('sherpa-token');
+  $('workspace').hidden=true; $('connect').hidden=false; $('access-token').focus();
+}
+async function connect() {
+  await loadState(); await loadHistory();
+  sessionStorage.setItem('sherpa-token',token);
+  $('connect').hidden=true; $('workspace').hidden=false; $('access-token').value=''; notice('');
+}
+$('connect-form').addEventListener('submit',async event=>{
+  event.preventDefault(); token=$('access-token').value.trim();
+  try { await connect(); } catch(error) { notice(error.message,true); }
+});
+if (token) connect().catch(error=>notice(error.message,true));

@@ -61,18 +61,10 @@ func cmdServe(ctx *Ctx, args []string) error {
 	}
 	app := &localServer{home: ctx.Home, token: hex.EncodeToString(b), host: listener.Addr().String(), jobs: map[string]context.CancelFunc{}}
 	server := &http.Server{Handler: app, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second}
-	url := "http://" + app.host + "/#" + app.token
-	fmt.Fprintf(ctx.Stdout, "SherpA local workspace: %s\nPress Ctrl+C to stop.\n", url)
+	url := "http://" + app.host + "/"
+	fmt.Fprintf(ctx.Stdout, "SherpA local workspace: %s\nAccess token (paste into the browser): %s\nPress Ctrl+C to stop.\n", url, app.token)
 	if !*noOpen {
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "darwin":
-			cmd = exec.Command("open", url)
-		case "windows":
-			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-		default:
-			cmd = exec.Command("xdg-open", url)
-		}
+		cmd := browserCommand(app.host)
 		if err := cmd.Start(); err != nil {
 			fmt.Fprintln(ctx.Stderr, "Open the URL above in your browser.")
 		} else {
@@ -115,7 +107,7 @@ func (s *localServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) != 1 {
-		http.Error(w, "Open the private URL printed by sherpa serve to connect.", 401)
+		http.Error(w, "Paste the access token printed by sherpa serve to connect.", 401)
 		return
 	}
 	if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+s.host {
@@ -336,5 +328,18 @@ func (s *localServer) stop() {
 	s.closing = true
 	for _, cancel := range s.jobs {
 		cancel()
+	}
+}
+
+// Only the public loopback address is passed to a browser-launch process.
+func browserCommand(host string) *exec.Cmd {
+	url := "http://" + host + "/"
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url)
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return exec.Command("xdg-open", url)
 	}
 }

@@ -101,3 +101,15 @@ func TestLocalServerRejectsNewWorkDuringShutdown(t *testing.T) {
 		t.Fatalf("shutdown accepted mutation: %d %s", w.Code, w.Body.String())
 	}
 }
+
+func TestBrowserLauncherReceivesOnlyPublicAddress(t *testing.T) {
+	cmd := browserCommand("127.0.0.1:7331")
+	if got := cmd.Args[len(cmd.Args)-1]; got != "http://127.0.0.1:7331/" {
+		t.Fatalf("browser URL contains extra data: %q", got)
+	}
+	s := testServer(t)
+	w := request(t, s, "GET", "/", "", "", "")
+	if strings.Contains(w.Body.String(), s.token) || !strings.Contains(w.Body.String(), `id="connect-form"`) {
+		t.Fatal("public shell exposed a token or lacks connection form")
+	}
+}

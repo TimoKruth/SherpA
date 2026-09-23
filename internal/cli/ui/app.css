@@ -2,3 +2,6 @@
 
 #result-context{font-size:12px;margin-top:12px}#result-context summary{cursor:pointer;color:var(--green)}#result-prompt{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--panel);border-left:3px solid var(--line);padding:12px;font:13px/1.6 var(--mono)}
 .history-item{grid-template-columns:minmax(0,1fr) auto}.history-item>span{min-width:0}.history-item small{overflow-wrap:anywhere}
+
+.connect-panel{max-width:660px;margin:10vh auto;padding:32px}.connect-panel h1{font-size:clamp(2.4rem,5vw,3.5rem)}.connect-panel form{display:grid;gap:14px;margin:32px 0}.connect-panel button{justify-self:start}
+[hidden]{display:none!important}

@@ -30,10 +30,10 @@ are not rewritten. For noninteractive initialization:
 ./sherpa init --primary-harness claude-code
 ```
 
-The local app opens at `127.0.0.1:7331`. Its private access token is in the URL
-fragment, never in an HTTP query. Use the URL printed by `serve` to connect a new
-browser tab. `--port 0` chooses an available port; `--no-open` prints the URL
-without launching a browser. Ctrl+C cancels active comparisons and stops it.
+The local app opens at `127.0.0.1:7331`. Paste the access token printed in your
+terminal into the connection screen. The token stays in that browser tab's
+session storage; it is never passed to the browser launcher or included in a URL.
+Restarting `serve` creates a new token.
 
 ## A complete CLI comparison
 
@@ -130,7 +130,8 @@ Outputs and diffs are capped at 2 MiB each, with truncation shown explicitly.
 - Supported setup files are instructions (`CLAUDE.md`, `AGENTS.md`, overrides),
   `settings.json` / `config.toml`, keybindings, skills, agents, rules, hooks, and
   existing stack/quarantine metadata as applicable to the harness. Linked skill
-  directories are materialized into independent files; cycles fail. Setup copies
+  directories within the source are materialized into independent files; cycles
+  and links outside the source fail. Setup copies
   are limited to 20,000 files / 128 MiB. Plugin installations and settings stored
   outside these configuration files are not portable in V1.
 - Timing includes preparation and harness startup; model responses are
@@ -152,6 +153,14 @@ Use a separate `SHERPA_HOME` if you want to keep beta and V1 experiments apart.
 
 For testing/custom installations, `SHERPA_CLAUDE_DIR` / `SHERPA_CODEX_DIR` select
 configuration sources and `SHERPA_CLAUDE_BIN` / `SHERPA_CODEX_BIN` select executables.
+
+Setup imports and reviews list all copied configuration entries, including resolved
+symlink targets. Links must stay inside the source setup directory; copy any
+intended external files into that directory and review them before importing.
+Post-trial change capture has a separate 10-second limit. A failed capture keeps
+the tool output, marks the trial failed, and lets later setups run. Unreadable
+comparison records are skipped in history; `sherpa results <id>` still reports
+the underlying error so the record can be inspected or restored.
 
 ## Development
 

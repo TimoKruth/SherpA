@@ -1,6 +1,6 @@
 //go:build !darwin && !linux && !windows
 
-package launch
+package process
 
 import (
 	"os/exec"

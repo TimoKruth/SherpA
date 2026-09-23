@@ -1,14 +1,16 @@
 package compare
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sherpa/internal/gitutil"
 	"sort"
 	"strings"
+	"time"
 )
 
 const maxProjectBytes int64 = 256 << 20
@@ -31,8 +33,9 @@ func snapshot(source, dest string) (string, string, error) {
 	if real != realRoot {
 		return "", "", fmt.Errorf("project must be the repository root: %s", root)
 	}
-	cmd := exec.Command("git", "-C", source, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-	cmd.Env = cleanGitEnv()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := gitutil.Command(ctx, source, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", "", err
@@ -128,26 +131,9 @@ func copyProject(src, dst string) error {
 	})
 }
 func git(dir string, args ...string) (string, error) {
-	// Ignore inherited repository/index overrides; they could point back at the
-	// source project. Disable external diff, signing, hooks and global templates.
-	base := []string{"-c", "core.hooksPath=", "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false", "-c", "init.templateDir=", "-c", "user.name=SherpA", "-c", "user.email=sherpa@local", "-C", dir}
-	cmd := exec.Command("git", append(base, args...)...)
-	cmd.Env = cleanGitEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", args[0], err, out)
-	}
-	return strings.TrimSpace(string(out)), nil
+	return gitutil.Run(dir, args...)
 }
-func cleanGitEnv() []string {
-	var env []string
-	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "GIT_") {
-			env = append(env, v)
-		}
-	}
-	return append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
-}
+
 func initProject(dir string) error {
 	for _, args := range [][]string{{"init", "-b", "trial"}, {"add", "--all", "--force", "--", "."}, {"commit", "--allow-empty", "-m", "comparison starting point"}} {
 		if _, err := git(dir, args...); err != nil {

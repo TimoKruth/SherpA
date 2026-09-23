@@ -20,7 +20,13 @@ New regression coverage includes:
   ignored files excluded; independent run edits; original project preserved.
 - Main baseline launches use disposable configurations; baseline instructions and
   credentials remain unchanged; `save`, setup reset and removal reject baselines.
-- Linked skills become regular copies; cyclic links and invalid paths fail.
+- Internal linked skills become regular copies; external/cyclic links and invalid
+  paths fail before copying. Reviews enumerate nested files and link targets.
+- Inherited Git directory, worktree, index, and config overrides cannot redirect
+  setup initialization or versioning; the original repository remains unchanged.
+- A stalled Git clean filter times out during change capture; the response is
+  saved, later trials finish, and ratings remain available.
+- Corrupt or incomplete result records do not hide healthy history entries.
 - Configuration fingerprints, tool version, stdout/stderr, changes, exit status,
   timing, private persistence, ratings, and escaped offline reports.
 - Diffs include edits an agent commits during its run, using the starting commit
@@ -46,6 +52,9 @@ The embedded app was tested in Chromium at 1440 × 1100 and 390 × 844:
 7. Restart the app and reopen history; verify the rating and notes persist.
 8. Verify mobile layout has no horizontal overflow, including long history text.
 9. Check the source setup/project are unchanged and trial runtime copies are gone.
+10. Open the token-free URL; reject an invalid token, connect with the terminal
+    token, and reload while retaining the session. The token field clears after
+    connection. Both the connection screen and workspace fit a 390 px viewport.
 
 ![Local comparison results using deterministic fixture responses](images/local-comparison.png)
 

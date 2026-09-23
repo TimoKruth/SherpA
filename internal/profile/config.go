@@ -18,7 +18,7 @@ func ValidName(name string) bool { return namePattern.MatchString(name) }
 
 // CopyConfig copies only configuration, never conversations, caches or Git
 // metadata. Linked skills are materialized as independent regular files.
-// Cycles and oversized trees fail rather than producing partial setups.
+// External links, cycles and oversized trees fail before copying any files.
 func CopyConfig(src, dst string, h harness.Harness, identity bool) error {
 	src, err := filepath.Abs(src)
 	if err != nil {
@@ -46,29 +46,68 @@ func CopyConfig(src, dst string, h harness.Harness, identity bool) error {
 	if canonical == src || strings.HasPrefix(canonical, src+string(os.PathSeparator)) {
 		return fmt.Errorf("destination must be outside the source setup")
 	}
+	entries, err := InspectConfig(src, h, identity)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dst, 0700); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		target := filepath.Join(dst, entry.Path)
+		if entry.Info.IsDir() {
+			if err := os.MkdirAll(target, 0700); err != nil {
+				return err
+			}
+		} else if err := copyFile(entry.Resolved, target, 0600|entry.Info.Mode().Perm()&0100); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ConfigEntry describes one materialized entry. LinkTarget is populated for symlinks.
+type ConfigEntry struct {
+	Path, Resolved, LinkTarget string
+	Info                       os.FileInfo
+}
+
+// InspectConfig and CopyConfig use the same bounded traversal. Links must stay
+// within the source directory; external trees must be copied in and reviewed first.
+func InspectConfig(src string, h harness.Harness, identity bool) ([]ConfigEntry, error) {
+	src, err := filepath.Abs(src)
+	if err != nil {
+		return nil, err
+	}
+	src, err = filepath.EvalSymlinks(src)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("setup source must be a directory")
+	}
 	paths := append([]string{}, h.AllowedPaths()...)
 	if identity {
 		paths = append(paths, h.CredentialFiles()...)
 		paths = append(paths, h.CapturedName())
 	}
-	if err := os.MkdirAll(dst, 0700); err != nil {
-		return err
-	}
-	copier := configCopier{ancestors: map[string]bool{}}
+	scanner := configScanner{root: src, ancestors: map[string]bool{}}
 	for _, rel := range paths {
 		rel = strings.TrimSuffix(rel, "/")
-		p := filepath.Join(src, rel)
-		if _, err := os.Lstat(p); os.IsNotExist(err) {
+		if _, err := os.Lstat(filepath.Join(src, rel)); os.IsNotExist(err) {
 			continue
 		} else if err != nil {
-			return err
+			return scanner.entries, err
 		}
-		if err := copier.copy(p, filepath.Join(dst, rel)); err != nil {
-			return err
+		if err := scanner.walk(filepath.Join(src, rel), rel); err != nil {
+			return scanner.entries, err
 		}
 	}
-
-	return nil
+	return scanner.entries, nil
 }
 
 // Resolve existing ancestors without creating anything under the source.
@@ -91,57 +130,65 @@ func destinationPath(path string) (string, error) {
 	return filepath.Join(real, filepath.Base(path)), nil
 }
 
-type configCopier struct {
+type configScanner struct {
+	root      string
 	ancestors map[string]bool
-	files     int
+	entries   []ConfigEntry
 	bytes     int64
 }
 
-func (c *configCopier) copy(src, dst string) error {
+func (c *configScanner) walk(src, rel string) error {
+	linkInfo, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
 	real, err := filepath.EvalSymlinks(src)
 	if err != nil {
 		return err
+	}
+	relative, err := filepath.Rel(c.root, real)
+	if err != nil || (relative != "." && !filepath.IsLocal(relative)) {
+		return fmt.Errorf("setup link %s resolves outside source to %s; copy the intended files into the source directory and review them before importing", rel, real)
 	}
 	info, err := os.Stat(real)
 	if err != nil {
 		return err
 	}
-	if info.IsDir() {
-		c.files++
-		if c.files > 20000 {
-			return fmt.Errorf("setup exceeds 20,000 entries")
-		}
-		if c.ancestors[real] {
-			return fmt.Errorf("cyclic setup link: %s", src)
-		}
-		c.ancestors[real] = true
-		defer delete(c.ancestors, real)
-		if err := os.MkdirAll(dst, 0700); err != nil {
-			return err
-		}
-		entries, err := os.ReadDir(real)
-		if err != nil {
-			return err
-		}
-		for _, e := range entries {
-			if e.Name() == ".git" {
-				continue
-			}
-			if err := c.copy(filepath.Join(real, e.Name()), filepath.Join(dst, e.Name())); err != nil {
-				return err
-			}
-		}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return fmt.Errorf("unsupported setup file: %s", rel)
+	}
+	entry := ConfigEntry{Path: rel, Resolved: real, Info: info}
+	if linkInfo.Mode()&os.ModeSymlink != 0 {
+		entry.LinkTarget = real
+	}
+	c.entries = append(c.entries, entry)
+	if info.Mode().IsRegular() {
+		c.bytes += info.Size()
+	}
+	if len(c.entries) > 20000 || c.bytes > 128<<20 {
+		return fmt.Errorf("setup exceeds 20,000 entries or 128 MiB")
+	}
+	if !info.IsDir() {
 		return nil
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("unsupported setup file: %s", src)
+	if c.ancestors[real] {
+		return fmt.Errorf("cyclic setup link: %s", rel)
 	}
-	c.files++
-	c.bytes += info.Size()
-	if c.files > 20000 || c.bytes > 128<<20 {
-		return fmt.Errorf("setup exceeds 20,000 files or 128 MiB")
+	c.ancestors[real] = true
+	defer delete(c.ancestors, real)
+	entries, err := os.ReadDir(real)
+	if err != nil {
+		return err
 	}
-	return copyFile(real, dst, 0600|info.Mode().Perm()&0100)
+	for _, e := range entries {
+		if e.Name() == ".git" {
+			continue
+		}
+		if err := c.walk(filepath.Join(real, e.Name()), filepath.Join(rel, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func copyFile(src, dst string, mode os.FileMode) error {
 	in, err := os.Open(src)

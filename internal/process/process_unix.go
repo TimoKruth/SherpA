@@ -1,6 +1,6 @@
 //go:build darwin || linux
 
-package launch
+package process
 
 import (
 	"os"

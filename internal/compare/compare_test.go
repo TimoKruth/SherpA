@@ -222,3 +222,65 @@ git -c core.hooksPath= -c commit.gpgsign=false -c user.name=fixture -c user.emai
 		t.Fatalf("committed edits disappeared: %+v", c.Results[0])
 	}
 }
+
+func TestStalledCaptureSavesOutputAndContinues(t *testing.T) {
+	home, project := fixture(t)
+	bin := filepath.Join(t.TempDir(), "stalled-capture")
+	write(t, bin, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo fixture; exit; fi
+cat >/dev/null
+printf 'partial response before capture'
+printf 'changed\n' > code.txt
+printf 'code.txt filter=stall\n' > .gitattributes
+git config filter.stall.clean 'sleep 60'
+`)
+	if err := os.Chmod(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHERPA_CLAUDE_BIN", bin)
+	c, err := Prepare(home, Request{Project: project, Prompt: "task", Profiles: []string{"mine", "mine-codex"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := Execute(context.Background(), home, c); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 18*time.Second {
+		t.Fatalf("capture exceeded its bound: %v", elapsed)
+	}
+	saved, err := Load(home, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != "completed_with_errors" || saved.Results[0].Status != "failed" || saved.Results[0].Output != "partial response before capture" || !strings.Contains(saved.Results[0].Error, "deadline exceeded") || saved.Results[1].Status != "completed" {
+		t.Fatalf("capture recovery: %+v", saved)
+	}
+	if err := Rate(home, c.ID, "mine", 2, "Partial output retained"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHistorySkipsDamagedRecordsAndKeepsHealthyResults(t *testing.T) {
+	home, project := fixture(t)
+	healthy, err := Prepare(home, Request{Project: project, Prompt: "keep me", Profiles: []string{"mine", "mine-codex"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt := "000000000000000000000000"
+	incomplete := "111111111111111111111111"
+	write(t, filepath.Join(home, "comparisons", corrupt, "result.json"), "{broken")
+	if err := os.MkdirAll(filepath.Join(home, "comparisons", incomplete), 0700); err != nil {
+		t.Fatal(err)
+	}
+	all, err := List(home)
+	if err != nil || len(all) != 1 || all[0].ID != healthy.ID {
+		t.Fatalf("history unavailable: %+v %v", all, err)
+	}
+	if _, err := Load(home, corrupt); err == nil {
+		t.Fatal("explicit load hid the damaged record")
+	}
+	if _, err := os.Stat(filepath.Join(home, "comparisons", corrupt, "result.json")); err != nil {
+		t.Fatal("damaged record was removed")
+	}
+}

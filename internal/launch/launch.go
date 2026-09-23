@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"sherpa/internal/harness"
+	"sherpa/internal/process"
 )
 
 type Stdio struct {
@@ -119,10 +119,8 @@ func CopyCredentials(h harness.Harness, dstDir, srcDir string) error {
 
 // Command runs a noninteractive trial with explicit working and config dirs.
 func Command(ctx context.Context, h harness.Harness, configDir, workDir string, args []string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, launchBin(h), args...)
+	cmd := process.Command(ctx, launchBin(h), args...)
 	cmd.Dir = workDir
 	cmd.Env = withConfigDir(os.Environ(), h.ConfigDirEnv(), configDir)
-	cmd.WaitDelay = 2 * time.Second
-	configureProcess(cmd)
 	return cmd
 }

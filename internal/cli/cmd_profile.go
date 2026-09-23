@@ -192,27 +192,25 @@ func printSetupReview(ctx *Ctx, dir string, h harness.Harness) error {
 		return fmt.Errorf("setup source must be a directory")
 	}
 	fmt.Fprintf(ctx.Stdout, "Review %s configuration at %s (including referenced scripts and servers):\n", h.Name(), dir)
-	for _, rel := range h.AllowedPaths() {
-		path := filepath.Join(dir, rel)
-		info, err := os.Stat(path)
-		if os.IsNotExist(err) {
-			continue
+	entries, scanErr := profile.InspectConfig(dir, h, false)
+	for _, entry := range entries {
+		rel, info := entry.Path, entry.Info
+		fmt.Fprintf(ctx.Stdout, "  %s", terminalLines(rel, 4096))
+		if entry.LinkTarget != "" {
+			fmt.Fprintf(ctx.Stdout, " -> %s", terminalLines(entry.LinkTarget, 4096))
 		}
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(ctx.Stdout, "  %s\n", rel)
+		fmt.Fprintln(ctx.Stdout)
 		if !info.IsDir() && (rel == "settings.json" || rel == "config.toml" || rel == "CLAUDE.md" || rel == "AGENTS.md") {
 			if info.Size() > 64<<10 {
 				fmt.Fprintln(ctx.Stdout, "    (large file: inspect in your editor)")
 				continue
 			}
-			b, err := os.ReadFile(path)
+			b, err := os.ReadFile(entry.Resolved)
 			if err != nil {
 				return err
 			}
 			fmt.Fprintln(ctx.Stdout, terminalLines(string(b), 64<<10))
 		}
 	}
-	return nil
+	return scanErr
 }

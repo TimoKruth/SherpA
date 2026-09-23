@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sherpa/internal/harness"
 	"sherpa/internal/state"
 	"strings"
 	"testing"
@@ -122,5 +123,25 @@ func TestStateKeepsLegacyPrivateJournalWithoutUsingRegistry(t *testing.T) {
 	}
 	if errout.Len() != 0 {
 		t.Fatalf("status tried a registry: %s", errout.String())
+	}
+}
+
+func TestSetupReviewListsNestedFilesAndResolvedLinks(t *testing.T) {
+	src := t.TempDir()
+	scripts := filepath.Join(src, "local-skills", "demo")
+	if err := os.MkdirAll(scripts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(scripts, "SKILL.md"), []byte("review this script too"), 0600)
+	if err := os.Symlink(filepath.Join(src, "local-skills"), filepath.Join(src, "skills")); err != nil {
+		t.Skip(err)
+	}
+	var out bytes.Buffer
+	if err := printSetupReview(&Ctx{Stdout: &out}, src, harness.Codex{}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := filepath.EvalSymlinks(filepath.Join(src, "local-skills"))
+	if !strings.Contains(out.String(), "skills -> "+resolved) || !strings.Contains(out.String(), filepath.Join("skills", "demo", "SKILL.md")) {
+		t.Fatalf("incomplete review: %s", out.String())
 	}
 }

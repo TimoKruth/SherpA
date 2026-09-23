@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sherpa/internal/gitutil"
 	"sherpa/internal/harness"
 	"sherpa/internal/launch"
 	"sherpa/internal/profile"
@@ -293,23 +294,40 @@ func executeOne(ctx context.Context, dir string, i int, prompt string, r *Result
 			}
 		}
 	}
-	// Capture additions, modifications and deletions against the frozen start.
-	if _, err := git(work, "add", "--all", "--", "."); err != nil {
-		r.Error += "; capture changes: " + err.Error()
+	// The trial may already have timed out. Give capture its own bounded budget
+	// so partial output is saved and later setups still run if Git stalls.
+	captureCtx, cancelCapture := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelCapture()
+	if _, _, err := captureGit(captureCtx, work, "add", "--all", "--", "."); err != nil {
+		r.Error = strings.TrimPrefix(r.Error+"; capture changes: "+err.Error(), "; ")
 		r.Status = "failed"
 		return
 	}
-	diff, err := git(work, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", baseCommit, "--")
-	if err != nil {
-		r.Error += "; diff: " + err.Error()
-		r.Status = "failed"
-		return
-	}
-	if len(diff) > maxOutput {
-		diff = diff[:maxOutput] + "\n[diff truncated]"
-		r.Truncated = true
-	}
+	diff, truncated, err := captureGit(captureCtx, work, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--no-color", baseCommit, "--")
 	r.Diff = diff
+	r.Truncated = r.Truncated || truncated
+	if err != nil {
+		r.Error = strings.TrimPrefix(r.Error+"; capture diff: "+err.Error(), "; ")
+		r.Status = "failed"
+	}
+}
+
+func captureGit(ctx context.Context, dir string, args ...string) (string, bool, error) {
+	cmd := gitutil.Command(ctx, dir, args...)
+	var out, diagnostic cappedBuffer
+	cmd.Stdout, cmd.Stderr = &out, &diagnostic
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		err = fmt.Errorf("git %s: %w: %s", args[0], err, diagnostic.String())
+	}
+	result := out.String()
+	if out.truncated {
+		result += "\n[diff truncated]"
+	}
+	return result, out.truncated, err
 }
 
 const maxOutput = 2 << 20
@@ -384,7 +402,9 @@ func List(home string) ([]Comparison, error) {
 		}
 		c, err := Load(home, e.Name())
 		if err != nil {
-			return nil, err
+			// A damaged or incomplete record must not hide healthy comparisons.
+			// Loading its ID directly still reports the underlying error.
+			continue
 		}
 		for i := range c.Results {
 			c.Results[i].Output = ""
