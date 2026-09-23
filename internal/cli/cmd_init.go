@@ -342,6 +342,35 @@ func refreshBaseline(ctx *Ctx, st *state.State, requested string) error {
 	if err := captureSetupState(dest, h); err != nil {
 		return err
 	}
+	// Refresh is the explicit path for adopting rotated on-disk login tokens.
+	// Normal launches only read the baseline and never write back into it.
+	for _, name := range h.CredentialFiles() {
+		b, err := os.ReadFile(filepath.Join(configDir(h), name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		f, err := os.CreateTemp(dest, ".credential-refresh-")
+		if err != nil {
+			return err
+		}
+		temp := f.Name()
+		if _, err := f.Write(b); err != nil {
+			f.Close()
+			os.Remove(temp)
+			return err
+		}
+		if err := f.Close(); err != nil {
+			os.Remove(temp)
+			return err
+		}
+		if err := os.Rename(temp, filepath.Join(dest, name)); err != nil {
+			os.Remove(temp)
+			return err
+		}
+	}
 	fmt.Fprintf(ctx.Stdout, "refreshed setup state for profile %q\n", baseline)
 	return nil
 }

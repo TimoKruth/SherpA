@@ -449,3 +449,31 @@ func loadTestState(t *testing.T, home string) *state.State {
 	}
 	return &st
 }
+
+func TestExplicitRefreshUpdatesCopiedCredentialsWithoutChangingSource(t *testing.T) {
+	home := t.TempDir()
+	source := fixtureConfigDir(t, "codex", map[string]string{"AGENTS.md": "main setup", "auth.json": "old token"})
+	t.Setenv("SHERPA_HOME", home)
+	t.Setenv("SHERPA_CODEX_DIR", source)
+	t.Setenv("SHERPA_CLAUDE_DIR", filepath.Join(t.TempDir(), "missing"))
+	var out, errout bytes.Buffer
+	if Run([]string{"init", "--primary-harness", "codex"}, &out, &errout) != 0 {
+		t.Fatal(errout.String())
+	}
+	if err := os.WriteFile(filepath.Join(source, "auth.json"), []byte("rotated token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if Run([]string{"init", "--refresh", "--harness", "codex"}, &out, &errout) != 0 {
+		t.Fatal(errout.String())
+	}
+	for _, dir := range []string{source, filepath.Join(home, "profiles", "mine")} {
+		b, err := os.ReadFile(filepath.Join(dir, "auth.json"))
+		if err != nil || string(b) != "rotated token" {
+			t.Fatalf("credential refresh %s: %s %v", dir, b, err)
+		}
+	}
+	b, _ := os.ReadFile(filepath.Join(home, "profiles", "mine", "AGENTS.md"))
+	if string(b) != "main setup" {
+		t.Fatal("refresh changed setup instructions")
+	}
+}

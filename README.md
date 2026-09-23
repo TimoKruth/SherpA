@@ -75,7 +75,7 @@ harnesses. A comparison does not change your active profile.
 | --- | --- |
 | `init` | Capture protected baselines from installed harness configurations. |
 | `init --harness codex` | Add a subsequently installed harness. |
-| `init --refresh --harness claude-code` | Explicitly refresh captured onboarding/identity state, not baseline instructions or skills. |
+| `init --refresh --harness claude-code` | Explicitly refresh captured onboarding and on-disk credentials, not baseline instructions or skills. |
 | `profile create <name> --from <profile>` | Create an editable local copy, optionally appending `--instructions`. |
 | `profile import <name> --path <dir> --harness <harness>` | Preview a local configuration and require trust review before importing. Repeat with `--trusted` after reviewing its scripts, servers, and permissions. |
 | `profile review <name>` | Show configuration and any pending legacy quarantined capabilities. `--approve-all` explicitly restores those capabilities on a variant. |
@@ -140,6 +140,9 @@ Outputs and diffs are capped at 2 MiB each, with truncation shown explicitly.
   lock under `SHERPA_HOME`. After confirming the process has stopped, delete its
   abandoned `comparisons/<id>/run-*/config` directories or the stale
   `.mutation-lock`. Normal completion/cancellation cleans runtime copies.
+
+If a copied login expires, refresh it from your currently signed-in installation
+with `sherpa init --refresh --harness codex` (or `claude-code`).
 
 Storage defaults to `~/.sherpa` (`SHERPA_HOME` overrides it). Comparisons contain
 private source code, prompts, outputs, notes, and setup configuration; inspect
