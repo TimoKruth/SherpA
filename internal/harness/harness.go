@@ -19,8 +19,6 @@ type Harness interface {
 	Seed(captured []byte) (targetRel string, content []byte, err error)
 	AllowedPaths() []string
 	GitignoreContent() string
-	SetupStateFilenames() []string
-	LoginSignatures() []string
 }
 
 var registry = map[string]Harness{"claude-code": ClaudeCode{}, "codex": Codex{}}

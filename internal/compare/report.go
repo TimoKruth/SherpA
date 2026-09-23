@@ -1,0 +1,10 @@
+package compare
+
+import (
+	"html/template"
+	"io"
+)
+
+var report = template.Must(template.New("report").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>SherpA comparison {{.ID}}</title><style>body{background:#f4f3ed;color:#202c28;font:16px Georgia,serif;margin:40px}header{border-bottom:3px solid #245e48;padding-bottom:24px}h1{font-size:38px}small,dt{font:12px monospace;overflow-wrap:anywhere}main{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:24px}article{background:white;padding:24px;border:1px solid #d9ddd5;min-width:0}pre{font:13px/1.6 monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f6f2;padding:16px}p{overflow-wrap:anywhere}details{margin:16px 0}@media print{body{margin:12px}article{break-inside:avoid}details{display:block}} </style><header><small>SHERPA / LOCAL COMPARISON</small><h1>One prompt. {{len .Results}} setups.</h1><p>{{.Request.Project}} · {{.CreatedAt.Format "2006-01-02 15:04 MST"}} · {{.Status}}</p><pre>{{.Request.Prompt}}</pre><small>Project snapshot: {{.ProjectHash}}<br>Revision: {{.Revision}}<br>Per-setup timeout: {{.Request.TimeoutSeconds}}s</small><p>Independent working copies; model responses are nondeterministic. Ratings are manual. Timing includes local preparation and harness startup. Reports may contain private prompts, model output and code.</p></header><main>{{range .Results}}<article><h2>{{.Profile}}</h2><p>{{.Harness}} · {{.Status}} · {{.DurationMS}} ms · exit {{.ExitCode}}</p><small>{{.ToolVersion}}<br>Config: {{.ConfigHash}}</small>{{if .Rating}}<p>Manual rating: {{.Rating}} / 5</p>{{end}}{{if .Notes}}<pre>{{.Notes}}</pre>{{end}}{{if .Error}}<p>{{.Error}}</p>{{end}}{{if .Truncated}}<p>Output or diff exceeded the display limit and was truncated.</p>{{end}}<h3>Response</h3><pre>{{.Output}}</pre><h3>Changes</h3><pre>{{if .Diff}}{{.Diff}}{{else}}No file changes.{{end}}</pre><details><summary>Diagnostics</summary><pre>{{.Stderr}}</pre></details></article>{{end}}</main></html>`))
+
+func WriteReport(w io.Writer, c *Comparison) error { return report.Execute(w, c) }

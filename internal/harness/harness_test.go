@@ -27,15 +27,3 @@ func TestNamesListsClaudeCode(t *testing.T) {
 		t.Fatalf("Names() = %v, want claude-code", Names())
 	}
 }
-
-func TestEveryHarnessHasNonEmptyBarrier(t *testing.T) {
-	for _, name := range Names() {
-		h, _ := For(name)
-		if len(h.SetupStateFilenames()) == 0 {
-			t.Errorf("%s: empty SetupStateFilenames weakens its publish barrier", name)
-		}
-		if len(h.LoginSignatures()) == 0 {
-			t.Errorf("%s: empty LoginSignatures weakens its publish barrier", name)
-		}
-	}
-}

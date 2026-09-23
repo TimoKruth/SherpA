@@ -31,7 +31,7 @@ func TestHelpListsCommands(t *testing.T) {
 		t.Fatalf("sherpa help exited %d: %s", code, errb.String())
 	}
 	text := out.String()
-	for _, want := range []string{"search", "clone", "publish", "remove", "init", "Usage:", "Commands:"} {
+	for _, want := range []string{"compare", "profile", "serve", "remove", "init", "Usage:", "Commands:"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("help output missing %q:\n%s", want, text)
 		}
@@ -44,7 +44,7 @@ func TestBareInvocationShowsCommands(t *testing.T) {
 		t.Fatal("bare invocation should exit non-zero")
 	}
 	// A single usage line left users with no way to discover the commands.
-	if !strings.Contains(errb.String(), "search") || !strings.Contains(errb.String(), "Commands:") {
+	if !strings.Contains(errb.String(), "compare") || !strings.Contains(errb.String(), "Commands:") {
 		t.Errorf("bare invocation did not list commands:\n%s", errb.String())
 	}
 }
@@ -60,29 +60,5 @@ func TestUnknownCommandShowsCommands(t *testing.T) {
 	}
 	if !strings.Contains(text, "Commands:") {
 		t.Errorf("unknown command should list the available ones:\n%s", text)
-	}
-}
-
-func TestRegistryURLFallsBackToTheBuildDefault(t *testing.T) {
-	t.Setenv("SHERPA_REGISTRY_URL", "")
-	if got := registryBaseURL(); got != DefaultRegistryURL {
-		t.Fatalf("registryBaseURL() = %q, want the build default %q", got, DefaultRegistryURL)
-	}
-	if DefaultRegistryURL == "" {
-		t.Fatal("a fresh install must have a usable registry without configuration")
-	}
-}
-
-func TestRegistryURLPrefersTheEnvironment(t *testing.T) {
-	t.Setenv("SHERPA_REGISTRY_URL", "https://registry.example.test")
-	if got := registryBaseURL(); got != "https://registry.example.test" {
-		t.Fatalf("registryBaseURL() = %q, want the configured value", got)
-	}
-}
-
-func TestRegistryURLIgnoresWhitespaceOnlyConfiguration(t *testing.T) {
-	t.Setenv("SHERPA_REGISTRY_URL", "   ")
-	if got := registryBaseURL(); got != DefaultRegistryURL {
-		t.Fatalf("registryBaseURL() = %q, want the build default", got)
 	}
 }

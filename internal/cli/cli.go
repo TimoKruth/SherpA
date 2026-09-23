@@ -5,25 +5,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
+	"sherpa/internal/state"
 )
 
 // Version is overridden at release time with -ldflags "-X sherpa/internal/cli.Version=<tag>".
 var Version = "0.1.0-dev"
-
-// DefaultRegistryURL is the registry used when SHERPA_REGISTRY_URL is unset, so
-// a fresh install can search and log in without configuration. Overridden at
-// build time with -ldflags "-X sherpa/internal/cli.DefaultRegistryURL=<url>".
-var DefaultRegistryURL = "https://registry.trysherpa.net"
-
-// registryBaseURL returns the configured registry, falling back to the build
-// default. An empty environment value counts as unset.
-func registryBaseURL() string {
-	if configured := strings.TrimSpace(os.Getenv("SHERPA_REGISTRY_URL")); configured != "" {
-		return configured
-	}
-	return DefaultRegistryURL
-}
 
 type Ctx struct {
 	Home   string
@@ -61,7 +47,20 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		writeHelp(stderr)
 		return 2
 	}
-	ctx := &Ctx{Home: homeDir(), Stdout: stdout, Stderr: stderr, Stdin: os.Stdin}
+	home, err := filepath.Abs(homeDir())
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	ctx := &Ctx{Home: home, Stdout: stdout, Stderr: stderr, Stdin: os.Stdin}
+	if args[0] != "serve" && args[0] != "compare" && args[0] != "run" && args[0] != "try" && args[0] != "status" && args[0] != "help" {
+		unlock, err := state.Lock(ctx.Home)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		defer unlock()
+	}
 	if err := cmd(ctx, args[1:]); err != nil {
 		fmt.Fprintf(stderr, "sherpa %s: %v\n", args[0], err)
 		return 1
