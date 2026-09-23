@@ -19,17 +19,6 @@ func TestCodexAdapterValues(t *testing.T) {
 	if got := h.CredentialFiles(); len(got) != 1 || got[0] != "auth.json" {
 		t.Fatalf("cred files: %v", got)
 	}
-	if got := h.SetupStateFilenames(); len(got) != 1 || got[0] != "auth.json" {
-		t.Fatalf("setup filenames: %v", got)
-	}
-	if len(h.LoginSignatures()) == 0 {
-		t.Fatal("login signatures must be non-empty")
-	}
-	for _, sig := range h.LoginSignatures() {
-		if sig == "OPENAI_API_KEY" {
-			t.Fatal("bare OPENAI_API_KEY signature blocks publishable config.toml env_key values")
-		}
-	}
 	// no keychain export
 	if err := h.PrepareBaselineCredentials(t.TempDir()); err != nil {
 		t.Fatalf("PrepareBaselineCredentials must be a no-op for codex: %v", err)

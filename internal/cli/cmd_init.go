@@ -286,7 +286,7 @@ func importDetectedSetups(ctx *Ctx, st *state.State, setups []detectedSetup, pri
 	}
 	for _, plan := range plans {
 		created = append(created, plan.dest)
-		if err := profile.Import(plan.setup.source, plan.dest, plan.setup.harness.GitignoreContent()); err != nil {
+		if err := profile.ImportConfig(plan.setup.source, plan.dest, plan.setup.harness); err != nil {
 			cleanup()
 			return err
 		}

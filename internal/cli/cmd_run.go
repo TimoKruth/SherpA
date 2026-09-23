@@ -2,56 +2,74 @@ package cli
 
 import (
 	"fmt"
-
+	"os"
+	"path/filepath"
 	"sherpa/internal/harness"
 	"sherpa/internal/launch"
+	"sherpa/internal/profile"
 	"sherpa/internal/state"
 )
 
-func init() {
-	register("run", cmdRun)
-}
-
+func init() { register("run", cmdRun) }
 func cmdRun(ctx *Ctx, args []string) error {
 	fresh := false
-	var passthrough []string
+	var pass []string
 	for _, a := range args {
 		if a == "--fresh-setup" {
 			fresh = true
-			continue
+		} else {
+			pass = append(pass, a)
 		}
-		passthrough = append(passthrough, a)
 	}
-
 	st, err := state.Load(ctx.Home)
 	if err != nil {
 		return err
 	}
-	active, ok := st.Profiles[st.Active]
+	p, ok := st.Profiles[st.Active]
 	if !ok {
-		return fmt.Errorf("no active profile (run `sherpa init` first)")
+		return fmt.Errorf("no active profile; run sherpa init first")
 	}
-	h, err := harness.For(active.Harness)
+	return runProfile(ctx, st, p, pass, fresh)
+}
+func runProfile(ctx *Ctx, st *state.State, p state.Profile, args []string, fresh bool) error {
+	h, err := harness.For(p.Harness)
 	if err != nil {
 		return err
 	}
-	baseline, err := baselineProfile(st, active.Harness)
+	baseline, err := baselineProfile(st, p.Harness)
 	if err != nil {
 		return err
 	}
-
-	if !fresh {
-		if err := launch.SeedSetup(active.Path, baseline.Path, h); err != nil {
-			fmt.Fprintf(ctx.Stderr, "warning: could not seed setup state (%v); tool may onboard\n", err)
+	dir := p.Path
+	if p.Name == baseline.Name {
+		root := filepath.Join(ctx.Home, "sessions")
+		if err := os.MkdirAll(root, 0700); err != nil {
+			return err
+		}
+		dir, err = os.MkdirTemp(root, "baseline-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
+		if err := profile.CopyConfig(p.Path, dir, h, false); err != nil {
+			return err
 		}
 	}
-
-	// Best-effort: make sure the baseline has credentials to link from.
-	// Never fatal: the tool can still prompt for login.
-	if err := h.PrepareBaselineCredentials(baseline.Path); err != nil {
-		fmt.Fprintf(ctx.Stderr, "warning: could not prepare credentials (%v); the tool may ask you to log in\n", err)
+	if !fresh {
+		if err := launch.SeedSetup(dir, baseline.Path, h); err != nil {
+			return err
+		}
+		if err := launch.CopyCredentials(h, dir, baseline.Path); err != nil {
+			return err
+		}
+		// Credential export, if needed, targets the launch copy, never the baseline.
+		if err := h.PrepareBaselineCredentials(dir); err != nil {
+			fmt.Fprintf(ctx.Stderr, "warning: %v; the tool may ask you to log in\n", err)
+		}
 	}
-
-	stdio := launch.Stdio{In: ctx.Stdin, Out: ctx.Stdout, Err: ctx.Stderr}
-	return launch.Launch(h, active.Path, baseline.Path, passthrough, stdio)
+	source := dir
+	if fresh {
+		source = filepath.Join(ctx.Home, "no-inherited-credentials")
+	}
+	return launch.Launch(h, dir, source, args, launch.Stdio{In: ctx.Stdin, Out: ctx.Stdout, Err: ctx.Stderr})
 }

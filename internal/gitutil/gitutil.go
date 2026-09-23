@@ -1,5 +1,5 @@
 // Package gitutil provides thin wrappers over the `git` command line used by
-// the clone/diff/update pipeline. It shells out rather than linking a git
+// local profile versioning. It shells out rather than linking a git
 // library so behaviour matches exactly what a user would see on the terminal.
 package gitutil
 
@@ -8,14 +8,6 @@ import (
 	"os/exec"
 	"strings"
 )
-
-// Clone runs `git clone url dest`. dest may be an existing empty directory.
-func Clone(url, dest string) error {
-	if out, err := exec.Command("git", "clone", url, dest).CombinedOutput(); err != nil {
-		return fmt.Errorf("git clone %s: %v: %s", url, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
 
 // Run executes `git -C dir args...` and returns the trimmed combined output.
 // On failure the trimmed output is returned alongside a wrapping error so

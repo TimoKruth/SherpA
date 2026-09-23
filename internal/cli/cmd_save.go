@@ -23,6 +23,13 @@ func cmdSave(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
+	st, err := state.Load(ctx.Home)
+	if err != nil {
+		return err
+	}
+	if st.Baselines[profile.Harness] == profile.Name {
+		return fmt.Errorf("protected baseline; create an experimental profile first")
+	}
 	if msg == "" {
 		msg = "sherpa: save " + time.Now().UTC().Format(time.RFC3339)
 	}
@@ -41,25 +48,13 @@ func cmdDiff(ctx *Ctx, args []string) error {
 	if err != nil {
 		return err
 	}
-	var stat, patch string
-	if profile.Origin == "" {
-		stat, err = gitutil.Run(profile.Path, "diff", "HEAD", "--stat")
-		if err != nil {
-			return err
-		}
-		patch, err = gitutil.Run(profile.Path, "diff", "HEAD")
-		if err != nil {
-			return err
-		}
-	} else {
-		stat, err = gitutil.Run(profile.Path, "diff", "origin/main...local", "--stat")
-		if err != nil {
-			return err
-		}
-		patch, err = gitutil.Run(profile.Path, "diff", "origin/main...local")
-		if err != nil {
-			return err
-		}
+	stat, err := gitutil.Run(profile.Path, "diff", "HEAD", "--stat")
+	if err != nil {
+		return err
+	}
+	patch, err := gitutil.Run(profile.Path, "diff", "HEAD")
+	if err != nil {
+		return err
 	}
 	if stat != "" {
 		fmt.Fprintln(ctx.Stdout, stat)

@@ -27,23 +27,8 @@ func fixtureRepo(t *testing.T) string {
 	return d
 }
 
-func TestCloneCopiesWorkingTree(t *testing.T) {
-	src := fixtureRepo(t)
-	dest := filepath.Join(t.TempDir(), "clone")
-	if err := Clone(src, dest); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dest, "f.txt")); err != nil {
-		t.Fatalf("cloned tree missing tracked file: %v", err)
-	}
-}
-
 func TestRunReportsBranchAndErrors(t *testing.T) {
-	src := fixtureRepo(t)
-	dest := filepath.Join(t.TempDir(), "clone")
-	if err := Clone(src, dest); err != nil {
-		t.Fatal(err)
-	}
+	dest := fixtureRepo(t)
 	out, err := Run(dest, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		t.Fatal(err)

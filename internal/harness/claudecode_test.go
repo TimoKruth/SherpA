@@ -88,13 +88,6 @@ func TestClaudeAdapterParity(t *testing.T) {
 	if got := h.CredentialFiles(); len(got) != 1 || got[0] != ".credentials.json" {
 		t.Fatalf("cred files drift: %v", got)
 	}
-	if got := h.SetupStateFilenames(); len(got) != 2 || got[0] != ".claude.json" || got[1] != ".sherpa-setup.json" {
-		t.Fatalf("setup filenames drift: %v", got)
-	}
-	wantSigs := []string{"oauthAccount", "claudeAiOauth", `"accessToken"`, `"refreshToken"`}
-	if got := h.LoginSignatures(); !equalStrings(got, wantSigs) {
-		t.Fatalf("login sig drift: %v", got)
-	}
 	wantAllowed := []string{
 		"stack.yaml", "README.md", "CHANGELOG.md", "CLAUDE.md",
 		"settings.json", "keybindings.json", "quarantine.json",

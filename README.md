@@ -1,101 +1,165 @@
-# SherpA
+# SherpA — local setup comparisons
 
-SherpA is a CLI and registry for sharing and trying complete agent setups as versioned, sanitized stacks. Power users build global instructions, skills, subagents, hooks, MCP servers, settings, and keybindings that can meaningfully change agent performance, but those setups are hard to discover, try, revert, fork, update, and follow safely. SherpA supports Claude Code and Codex harnesses: experts can publish a stack, users can try or clone it, `sherpa back` restores the protected `mine` profile, and local changes are saved as a fork that can track upstream.
+Run the same prompt against different **Claude Code and Codex configurations**,
+compare the responses and project changes, and keep your main setup protected.
+V1 works entirely from the CLI, with an optional local web app for side-by-side
+results, manual ratings, history, and downloadable HTML reports.
 
-Internal beta catalogue: [beta.trysherpa.net](https://beta.trysherpa.net)
+SherpA has no account, registry, publishing service, or telemetry. Orchestration
+and storage stay on your machine. The installed harnesses still use their normal
+model APIs and credentials, with their normal usage charges.
 
-The beta is disposable. Accounts, sessions, published stacks, and version
-history will be reset before the public launch; do not treat it as permanent
-storage for the only copy of a stack.
+## Start
 
-Design spec: [docs/superpowers/specs/2026-07-08-follow-the-expert-design.md](docs/superpowers/specs/2026-07-08-follow-the-expert-design.md)
-
-## Install
-
-Download the binary for your platform from the
-[releases page](https://github.com/TimoKruth/SherpA/releases), verify it, and
-put it on your `PATH`:
-
-```sh
-VERSION=v0.1.0-beta.2          # see the releases page for the current tag
-ASSET=sherpa-darwin-arm64      # or -darwin-amd64, -linux-amd64, -linux-arm64,
-                               #    -windows-amd64.exe, -windows-arm64.exe
-BASE=https://github.com/TimoKruth/SherpA/releases/download/$VERSION
-
-curl -fsSLO "$BASE/$ASSET"
-curl -fsSLO "$BASE/SHA256SUMS"
-shasum -a 256 --ignore-missing --check SHA256SUMS
-chmod +x "$ASSET"
-sudo mv "$ASSET" /usr/local/bin/sherpa
-```
-
-During the beta the releases are prereleases, so `/releases/latest/` does not
-resolve to them — use the explicit tag above.
-
-Check the install with `sherpa version`, and list the commands with
-`sherpa help`. `sherpa search` works out of the box; set `SHERPA_REGISTRY_URL`
-only to point at a different registry.
-
-### Uninstall
+Prerequisites: Git, Go 1.26.6 or later, and at least one installed and signed-in
+harness (`claude` or `codex`). Build this branch; previously published beta
+binaries contain the earlier registry product, not this V1 workflow.
 
 ```sh
-sudo rm -f /usr/local/bin/sherpa   # the binary
-rm -rf ~/.sherpa                   # profiles, session, and local state
+go build -o sherpa ./cmd/sherpa
+./sherpa init
+./sherpa serve
 ```
 
-`~/.sherpa` holds every installed profile, so removing it discards work
-committed with `sherpa save` that was never published. To drop a single stack
-instead, use `sherpa remove <profile>`. Your own harness configuration
-(`~/.claude`) is never touched by either.
-
-Builds are published for macOS, Linux, and Windows on both `amd64` and `arm64`.
-On macOS the binary is unsigned, so the first run needs Gatekeeper approval:
-`xattr -d com.apple.quarantine /usr/local/bin/sherpa`.
-
-From source instead:
+`init` discovers installed configurations, asks which harness owns `mine`, and
+imports independent protected baselines. If both are present, the second gets a
+name such as `mine-codex`. Your original `~/.claude` and `~/.codex` directories
+are not rewritten. For noninteractive initialization:
 
 ```sh
-go build ./cmd/sherpa
+./sherpa init --primary-harness claude-code
 ```
 
-## Commands
+The local app opens at `127.0.0.1:7331`. Its private access token is in the URL
+fragment, never in an HTTP query. Use the URL printed by `serve` to connect a new
+browser tab. `--port 0` chooses an available port; `--no-open` prints the URL
+without launching a browser. Ctrl+C cancels active comparisons and stops it.
 
-The current CLI implements the following commands.
+## A complete CLI comparison
+
+Create a variant of your main setup and add instructions, or edit its copied
+configuration in the directory printed by `profile show`:
+
+```sh
+./sherpa profile create careful-reviewer --from mine \
+  --instructions 'Explain your approach before making changes.'
+./sherpa profile show careful-reviewer
+./sherpa profile review careful-reviewer
+
+./sherpa compare \
+  --project /absolute/path/to/git-project \
+  --profiles mine,careful-reviewer \
+  --prompt 'Review the error handling. Explain the most important issue and propose a fix.' \
+  --timeout 5m
+```
+
+The comparison prints an ID. Use it to inspect, rate, or export the results:
+
+```sh
+./sherpa results
+./sherpa results <id>
+./sherpa results <id> --format json
+./sherpa results rate <id> careful-reviewer --score 5 --notes 'Clearer reasoning.'
+./sherpa results <id> --format html --output comparison.html
+```
+
+HTML reports are self-contained, work offline, and include responses, diffs,
+ratings, diagnostics, configuration fingerprints, and the project fingerprint.
+Existing output files are not overwritten. Use `--prompt-file task.txt` for a
+multiline prompt. Select 2–8 distinct profiles, including profiles using different
+harnesses. A comparison does not change your active profile.
+
+## Switch and maintain setups
 
 | Command | Behavior |
-|---|---|
-| `sherpa init` | Discover supported harness setups, confirm which owns protected `mine`, and import the others as `mine-<alias>`; automation can use `--primary-harness <name>`. |
-| `sherpa login` / `sherpa logout` | Create or remove an issuer-scoped GitHub-backed registry session. |
-| `sherpa search <query>` | Search `SHERPA_REGISTRY_URL`, falling back to the Phase 1 JSON index when configured. |
-| `sherpa try <git-url-or-@owner/name-or-profile>` | Clone if needed, show the review gate, and launch under that profile without changing the active profile. |
-| `sherpa clone <git-url-or-@owner/name>` | Clone, quarantine, validate, and install a stack without activating it; registry refs auto-follow best effort. |
-| `sherpa back` | Switch the active profile back to `mine`. |
-| `sherpa use <profile>` | Switch the active profile to an installed profile. |
-| `sherpa remove <profile> [--yes]` | Delete an installed profile and its directory. Refuses the active profile and the protected baseline. |
-| `sherpa run [args...]` | Run Claude Code under the active profile, reusing credentials from `mine` when available. |
-| `sherpa save [-m msg]` | Commit modifications in the active profile's local branch. |
-| `sherpa diff` | Show local profile changes, or a fork's changes against upstream. |
-| `sherpa update [<profile>]` | Fetch upstream tags, show changelog and diffstat, then merge after confirmation. |
-| `sherpa publish --remote <git-url>` / `--registry <url>` | Scan, review, bump, tag, and publish a new immutable version. |
-| `sherpa follow @owner/name` / `sherpa unfollow @owner/name` | Manage an issuer-scoped registry follow. |
-| `sherpa updates [--limit N]` | List pending immutable versions without marking them seen. |
-| `sherpa updates --seen @owner/name@vN` | Explicitly mark a followed version reviewed. |
-| `sherpa trial record|list|share` | Keep a local private trial journal and explicitly share verdict-only feedback. |
-| `sherpa status` | Show local profiles first, then a bounded online/cached pending-update summary. |
+| --- | --- |
+| `init` | Capture protected baselines from installed harness configurations. |
+| `init --harness codex` | Add a subsequently installed harness. |
+| `init --refresh --harness claude-code` | Explicitly refresh captured onboarding/identity state, not baseline instructions or skills. |
+| `profile create <name> --from <profile>` | Create an editable local copy, optionally appending `--instructions`. |
+| `profile import <name> --path <dir> --harness <harness>` | Preview a local configuration and require trust review before importing. Repeat with `--trusted` after reviewing its scripts, servers, and permissions. |
+| `profile review <name>` | Show configuration and any pending legacy quarantined capabilities. `--approve-all` explicitly restores those capabilities on a variant. |
+| `profile show <name>` | Print the setup's harness and editable directory. |
+| `use <name>` | Select the profile for subsequent `sherpa run` invocations. |
+| `back` | Select the protected baseline for the active profile's harness. |
+| `run [harness arguments…]` | Launch the selected harness. Protected baseline launches use a disposable configuration copy. |
+| `try <name>` | Launch an installed profile without changing the active selection. |
+| `profile setup <name>` | Clear a variant's copied login/setup state and launch fresh onboarding. Refuses protected baselines. |
+| `save [-m message]` / `diff` | Save an experimental setup's local changes / inspect tracked changes since its last save. |
+| `remove <name> [--yes]` | Remove an inactive experimental setup, with confirmation. Baselines cannot be removed. |
+| `status` | Show only local profiles and the active selection. No network request. |
 
-## Registry Configuration
+Switching affects **SherpA launches**. Direct `claude` and `codex` commands continue
+to use their normal configuration. Interactive `run` and `try` operate in your
+current project; **`compare` is the command that also copies the project**.
 
-Set `SHERPA_REGISTRY_URL` to the canonical registry origin before `sherpa login`, search, follow,
-or updates. Login writes an issuer-scoped `0600` session under `SHERPA_HOME`; a staging session is
-never sent to production. `SHERPA_REGISTRY_TOKEN` is an optional admin/CI publish bypass and is not
-used by personal follow, update, or trial-sharing commands.
+## What a comparison preserves
 
-Registry and website deployment variables, OAuth callback ownership, backup/restore, rollback,
-and live staging gates are documented in
-[docs/deployment/railway.md](docs/deployment/railway.md). Uptime monitoring and
-alert delivery are documented in
-[docs/deployment/monitoring.md](docs/deployment/monitoring.md).
+1. Capture the Git project's current tracked files, including uncommitted changes,
+   and nonignored untracked files, once before any trial starts.
+2. Capture every selected setup before the first trial. Copy credentials separately;
+   do not link credentials or reuse conversations, project trust caches, or history.
+3. Run setups sequentially in independent project repositories with independent
+   configuration directories. Each receives the exact same prompt and file snapshot.
+4. Save responses, Git-visible additions/deletions/changes, stderr, exit status,
+   elapsed time, harness version, setup fingerprint, and source revision/fingerprint.
+   A failed setup does not prevent the other setups from running.
+5. Remove trial credential/runtime directories when execution finishes. Keep the
+   input configuration snapshots, project snapshots, changed projects, and results
+   locally for inspection. Ratings and notes are private until you export a report.
 
-## Trust Model
+A timeout applies per setup (default five minutes; maximum one hour). Ctrl+C in the
+CLI or **Stop comparison** in the app preserves partial results. A failed,
+cancelled, or timed-out CLI comparison exits nonzero while keeping its results.
+Outputs and diffs are capped at 2 MiB each, with truncation shown explicitly.
 
-SherpA treats imported stacks as untrusted until reviewed: installation structurally quarantines executable capabilities from `settings.json` into `quarantine.json`, including hooks, MCP servers, and the permissions class that can weaken Claude Code permission prompts. The review gate shows pending capabilities and accepts `y`, `n`, `a`, or `q`; `--approve-all` is available as an informed-consent shortcut for users who intentionally want to restore every quarantined capability. Published stack versions are immutable: `publish` bumps `stack.yaml`, commits the new snapshot, tags it as `v<N>`, and pushes that versioned content.
+## Boundaries
+
+- V1 is for **trusted local setups**. Copied directories protect against ordinary
+  configuration and project writes; they are not a security boundary against
+  malicious hooks, MCP servers, instructions, or code. External absolute paths,
+  system services, environment variables, and OS credential stores remain shared.
+- Codex comparisons explicitly use its `workspace-write` sandbox. Claude comparisons
+  use noninteractive `dontAsk` permissions: operations needing approval can be
+  denied. SherpA never adds permission-bypass flags. Check diagnostics when a setup
+  cannot perform a task.
+- Use the repository root as the project directory. Project symlinks, submodules,
+  and special files are rejected rather than silently omitted or linked to the
+  source. Limits are 20,000 project files / 256 MiB. Ignored dependencies are not
+  copied or installed automatically.
+- Supported setup files are instructions (`CLAUDE.md`, `AGENTS.md`, overrides),
+  `settings.json` / `config.toml`, keybindings, skills, agents, rules, hooks, and
+  existing stack/quarantine metadata as applicable to the harness. Linked skill
+  directories are materialized into independent files; cycles fail. Setup copies
+  are limited to 20,000 files / 128 MiB. Plugin installations and settings stored
+  outside these configuration files are not portable in V1.
+- Timing includes preparation and harness startup; model responses are
+  nondeterministic. Ratings are human judgments, not an automatic quality score.
+  Different harnesses keep their different execution and permission semantics.
+- A process killed abruptly can leave private trial credentials or a mutation
+  lock under `SHERPA_HOME`. After confirming the process has stopped, delete its
+  abandoned `comparisons/<id>/run-*/config` directories or the stale
+  `.mutation-lock`. Normal completion/cancellation cleans runtime copies.
+
+Storage defaults to `~/.sherpa` (`SHERPA_HOME` overrides it). Comparisons contain
+private source code, prompts, outputs, notes, and setup configuration; inspect
+reports before sharing them. Existing beta profiles and private trial metadata
+are retained when opening an existing home; no beta registry is contacted.
+Use a separate `SHERPA_HOME` if you want to keep beta and V1 experiments apart.
+
+For testing/custom installations, `SHERPA_CLAUDE_DIR` / `SHERPA_CODEX_DIR` select
+configuration sources and `SHERPA_CLAUDE_BIN` / `SHERPA_CODEX_BIN` select executables.
+
+## Development
+
+```sh
+go test -race ./...
+go vet ./...
+make build
+```
+
+Tests use temporary configurations and fake harnesses; they do not call model APIs.
+CI also scans reachable vulnerabilities and builds macOS, Linux, and Windows
+binaries for arm64 and amd64. See [V1 scope and deferred work](docs/v1-scope.md)
+for the future-development branches and [validation](docs/v1-validation.md)
+for the acceptance evidence.

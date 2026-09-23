@@ -22,7 +22,7 @@ func TestInitCleansUpDestinationWhenImportFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "CLAUDE.md"), []byte("# mine\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	unreadable := filepath.Join(source, "unreadable.txt")
+	unreadable := filepath.Join(source, "settings.json")
 	if err := os.WriteFile(unreadable, []byte("cannot copy"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestInitRollbackKeepsEstablishedMineAfterLaterHarnessSaveFails(t *testing.T
 		t.Fatal(errb.String())
 	}
 	t.Setenv("SHERPA_CODEX_DIR", codexDir)
-	if err := os.MkdirAll(filepath.Join(home, "state.json.tmp"), 0o755); err != nil {
+	if err := os.Chmod(home, 0500); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
@@ -224,7 +224,7 @@ func TestInitRollbackKeepsEstablishedMineAfterLaterHarnessSaveFails(t *testing.T
 		t.Fatalf("rollback left profiles/mine-codex behind: %v", err)
 	}
 
-	if err := os.RemoveAll(filepath.Join(home, "state.json.tmp")); err != nil {
+	if err := os.Chmod(home, 0700); err != nil {
 		t.Fatal(err)
 	}
 	st := loadTestState(t, home)
@@ -387,10 +387,10 @@ func TestInitBatchImportRollsBackEveryCreatedProfile(t *testing.T) {
 	t.Setenv("SHERPA_HOME", home)
 	claudeDir := fixtureConfigDir(t, "claude", map[string]string{"CLAUDE.md": "# claude\n"})
 	codexDir := fixtureConfigDir(t, "codex", map[string]string{
-		"AGENTS.md": "# codex\n",
-		"blocked":   "cannot copy\n",
+		"AGENTS.md":   "# codex\n",
+		"config.toml": "cannot copy\n",
 	})
-	blocked := filepath.Join(codexDir, "blocked")
+	blocked := filepath.Join(codexDir, "config.toml")
 	if err := os.Chmod(blocked, 0); err != nil {
 		t.Fatal(err)
 	}

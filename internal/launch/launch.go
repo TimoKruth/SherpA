@@ -1,11 +1,14 @@
 package launch
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"sherpa/internal/harness"
 )
@@ -31,23 +34,24 @@ func SeedSetup(profileDir, mineDir string, h harness.Harness) error {
 	if err != nil {
 		return err
 	}
+	if rel == "" {
+		return nil
+	}
 	dst := filepath.Join(profileDir, rel)
-	if _, err := os.Stat(dst); err == nil {
-		return nil // never overwrite live state
+	if info, err := os.Lstat(dst); err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("setup state must be a regular file")
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	return os.WriteFile(dst, content, 0o600)
 }
 
 func Launch(h harness.Harness, profileDir, baselineDir string, args []string, stdio Stdio) error {
-	for _, f := range h.CredentialFiles() {
-		dst := filepath.Join(profileDir, f)
-		if _, err := os.Stat(dst); err == nil {
-			continue // never overwrite
-		}
-		src := filepath.Join(baselineDir, f)
-		if b, err := os.ReadFile(src); err == nil {
-			os.WriteFile(dst, b, 0o600)
-		}
+	if err := CopyCredentials(h, profileDir, baselineDir); err != nil {
+		return err
 	}
 	cmd := exec.Command(launchBin(h), args...)
 	cmd.Env = withConfigDir(os.Environ(), h.ConfigDirEnv(), profileDir)
@@ -81,4 +85,44 @@ func withConfigDir(env []string, envName, profileDir string) []string {
 		out = append(out, kv)
 	}
 	return append(out, envName+"="+profileDir)
+}
+
+// CopyCredentials never links to or writes the baseline. A copied credential
+// can be refreshed by the harness without changing its source.
+func CopyCredentials(h harness.Harness, dstDir, srcDir string) error {
+	for _, f := range h.CredentialFiles() {
+		dst := filepath.Join(dstDir, f)
+		if info, err := os.Lstat(dst); err == nil {
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("credential must be a regular file: %s", f)
+			}
+			if err := os.Chmod(dst, 0600); err != nil {
+				return err
+			}
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		b, err := os.ReadFile(filepath.Join(srcDir, f))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(dst, b, 0600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Command runs a noninteractive trial with explicit working and config dirs.
+func Command(ctx context.Context, h harness.Harness, configDir, workDir string, args []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, launchBin(h), args...)
+	cmd.Dir = workDir
+	cmd.Env = withConfigDir(os.Environ(), h.ConfigDirEnv(), configDir)
+	cmd.WaitDelay = 2 * time.Second
+	configureProcess(cmd)
+	return cmd
 }

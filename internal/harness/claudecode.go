@@ -31,12 +31,6 @@ func (ClaudeCode) AllowedPaths() []string {
 	}
 }
 func (ClaudeCode) GitignoreContent() string { return claudeGitignore }
-func (ClaudeCode) SetupStateFilenames() []string {
-	return []string{".claude.json", ".sherpa-setup.json"}
-}
-func (ClaudeCode) LoginSignatures() []string {
-	return []string{"oauthAccount", "claudeAiOauth", `"accessToken"`, `"refreshToken"`}
-}
 
 const claudeGitignore = `*
 !/.gitignore

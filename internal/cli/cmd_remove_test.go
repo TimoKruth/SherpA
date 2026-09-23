@@ -122,3 +122,26 @@ func TestRemoveRejectsUnknownProfile(t *testing.T) {
 		t.Fatalf("error should name the profile: %v", err)
 	}
 }
+
+func TestRemoveRefusesRecordedSourcePath(t *testing.T) {
+	home := removableHome(t)
+	source := t.TempDir()
+	sentinel := filepath.Join(source, "important")
+	os.WriteFile(sentinel, []byte("keep"), 0600)
+	st, _ := state.Load(home)
+	p := st.Profiles["jane"]
+	p.Path = source
+	st.Profiles["jane"] = p
+	st.Save(home)
+	if _, _, err := runRemove(home, "", "jane", "--yes"); err == nil {
+		t.Fatal("accepted source directory for deletion")
+	}
+	b, _ := os.ReadFile(sentinel)
+	if string(b) != "keep" {
+		t.Fatal("source deleted")
+	}
+	st, _ = state.Load(home)
+	if _, ok := st.Profiles["jane"]; !ok {
+		t.Fatal("failed removal modified state")
+	}
+}

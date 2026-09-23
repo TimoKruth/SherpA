@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	profilecopy "sherpa/internal/profile"
 	"sherpa/internal/state"
 )
 
@@ -51,6 +52,23 @@ func cmdRemove(ctx *Ctx, args []string) error {
 		return fmt.Errorf("profile %q is active — run `sherpa back` before removing it", name)
 	}
 
+	// State from older installations is read without rewriting its recorded path.
+	// Never let a stale or edited path turn profile removal into source deletion.
+	dir := profileDir(ctx.Home, name, profile)
+	expected, err := filepath.Abs(filepath.Join(ctx.Home, "profiles", name))
+	if err != nil {
+		return err
+	}
+	actual, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	if !profilecopy.ValidName(name) || actual != expected {
+		return fmt.Errorf("refusing to remove a directory outside SherpA's profile storage")
+	}
+	if info, err := os.Lstat(dir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to remove a linked profile directory")
+	}
 	if !assumeYes {
 		if err := confirm(bufio.NewReader(ctx.Stdin), ctx.Stdout,
 			fmt.Sprintf("Remove profile %q and everything in it? This cannot be undone. Type yes to confirm: ", name)); err != nil {
@@ -65,7 +83,6 @@ func cmdRemove(ctx *Ctx, args []string) error {
 		return err
 	}
 
-	dir := profileDir(ctx.Home, name, profile)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("profile %q was removed from state, but its directory %s could not be deleted: %w", name, dir, err)
 	}
